@@ -104,6 +104,7 @@ enum slot_state {
     SLOT_STATE_PROCESSING_PROMPT,
     SLOT_STATE_DONE_PROMPT,
     SLOT_STATE_GENERATING,
+    SLOT_STATE_PREEMPTED,  // memory freed to make room for older slots, waiting to be recomputed
 };
 
 struct server_slot; // forward declaration
@@ -296,6 +297,24 @@ struct server_slot {
 
     server_prompt prompt;
 
+    // launch order, lower is older; older slots keep their memory when the unified KV cache runs out
+    uint64_t n_launch = 0;
+
+    // preemption: the slot keeps its task and generation state but no memory, and is recomputed later
+    // resume_tokens = the tokens that were in memory + the pending sampled token, so that finishing the
+    // recompute samples exactly the token that the interrupted generation step would have sampled
+    bool          resuming  = false; // processing resume_tokens instead of the task prompt
+    bool          preempted = false; // preempted at least once, the client already got the response headers
+    server_tokens resume_tokens;
+
+    const server_tokens & input_tokens() const {
+        return resuming ? resume_tokens : task->tokens;
+    }
+
+    int32_t n_input_tokens() const {
+        return (int32_t) input_tokens().size();
+    }
+
     bool prompt_save(server_prompt_cache & prompt_cache) const {
         if (prompt.tokens.size() == 0) {
             return false;
@@ -404,6 +423,10 @@ struct server_slot {
 
         // clear multimodal state
         mbatch.reset();
+
+        resuming  = false;
+        preempted = false;
+        resume_tokens.clear();
     }
 
     void init_sampler() const {
@@ -623,7 +646,7 @@ struct server_slot {
         }
 
         const double n_prompt_second = stats.n_prompt_tps();
-        const double f_progress = task->n_tokens() > 0 ? (double) prompt.n_tokens() / task->n_tokens() : 0.0;
+        const double f_progress = n_input_tokens() > 0 ? (double) prompt.n_tokens() / n_input_tokens() : 0.0;
 
         SLT_INF(*this, "prompt processing, n_tokens = %6d, progress = %.2f, t = %6.2f s / %.2f tokens per second\n",
                 (int) stats.n_prompt_processed, f_progress, t_prompt_total / 1e3, n_prompt_second);
@@ -651,9 +674,12 @@ struct server_slot {
                 "      total time = %10.2f ms / %5d tokens\n",
                 t_prompt_total + t_gen_total, (int) (stats.n_prompt_processed + stats.n_gen));
 
+        const auto perf_tgt = llama_perf_context(ctx_tgt);
+
         SLT_INF(*this,
-                "   graphs reused = %10d\n",
-                llama_perf_context(ctx_tgt).n_reused);
+                "   graphs reused = %10d / %5d computes (%5.1f %%)\n",
+                perf_tgt.n_reused, perf_tgt.n_graph_computes,
+                perf_tgt.n_graph_computes > 0 ? 100.0 * perf_tgt.n_reused / perf_tgt.n_graph_computes : 0.0);
 
         const int32_t n_draft_total       = stats.n_draft_tokens;
         const int32_t n_draft_accepted    = stats.n_draft_accepted;
@@ -742,7 +768,7 @@ struct server_slot {
 static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, size_t & n_tokens_out) {
     GGML_ASSERT(slot.mctx);
     const auto & mctx = slot.mctx;
-    const auto & input_tokens = slot.task->tokens;
+    const auto & input_tokens = slot.input_tokens();
     const auto & chunk = input_tokens.find_chunk(idx);
     int32_t res = 0;
 
@@ -911,6 +937,10 @@ private:
     int slots_n_diff = 0; // env: LLAMA_SERVER_SLOTS_N_DIFF
 
     int n_empty_consecutive = 0;
+
+    // preemption, see kv_schedule()
+    uint64_t n_launch_next    = 0;
+    int32_t  kv_budget_prompt = -1; // KV cells left for prompt tokens in the current batch, -1 = unlimited
 
     std::unique_ptr<server_prompt_cache> prompt_cache;
 
@@ -1691,6 +1721,306 @@ private:
         return res;
     }
 
+    // recurrent/hybrid models hold one recurrent-state cell per sequence still in memory:
+    // a slot holds one while processing, and afterwards for as long as its prompt stays loaded
+    // a preempted slot holds no memory until it is resumed
+    uint32_t n_rs_cells_held() {
+        uint32_t n = 0;
+        for (auto & slot : slots) {
+            if ((slot.is_processing() && slot.state != SLOT_STATE_PREEMPTED) || slot.prompt.n_tokens() > 0) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    // free the memory of one idle slot, never touching `keep`
+    // unlike try_clear_idle_slots this does not require a unified KV cache, recurrent cells are always shared
+    bool try_clear_idle_slot_rs(const server_slot * keep, const char * reason = "a recurrent-state cell") {
+        for (auto & slot : slots) {
+            if (&slot == keep || slot.is_processing() || slot.prompt.n_tokens() == 0) {
+                continue;
+            }
+
+            SRV_WRN("purging slot %d with %zu tokens to free %s\n", slot.id, slot.prompt.tokens.size(), reason);
+
+            slot.prompt_clear();
+
+            return true;
+        }
+
+        return false;
+    }
+
+    //
+    // preemption (vLLM-style) for a unified KV cache
+    //
+    // every token of every sequence takes one cell of the shared cache, so the server can account for it:
+    // slots are served oldest first, and when the cache cannot hold the next decode step of a slot, the newest
+    // slots are preempted - their memory is freed and they are recomputed once there is room again -
+    // instead of failing the decode for every active slot
+    //
+
+    bool kv_preemption_enabled() const {
+        return params_base.kv_unified;
+    }
+
+    int32_t kv_cells_total() const {
+        return (int32_t) llama_n_ctx(ctx_tgt);
+    }
+
+    int32_t kv_cells_held() const {
+        int32_t n = 0;
+        for (const auto & slot : slots) {
+            n += slot.prompt.n_tokens();
+        }
+        return n;
+    }
+
+    // cells held, plus the rest of every prompt (or recompute after preemption) that is still being processed
+    int32_t kv_cells_committed() const {
+        int32_t n = 0;
+        for (const auto & slot : slots) {
+            const bool in_prompt = slot.state == SLOT_STATE_STARTED || slot.state == SLOT_STATE_PROCESSING_PROMPT;
+            n += in_prompt ? std::max(slot.prompt.n_tokens(), slot.n_input_tokens()) : slot.prompt.n_tokens();
+        }
+        return n;
+    }
+
+    bool any_slot_preempted() const {
+        for (const auto & slot : slots) {
+            if (slot.state == SLOT_STATE_PREEMPTED) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // KV cells a slot needs to make progress in the next decode
+    int32_t kv_cells_step(const server_slot & slot) const {
+        switch (slot.state) {
+            case SLOT_STATE_GENERATING:
+                {
+                    int32_t n_draft = 0;
+                    if (slot.can_speculate()) {
+                        n_draft = slot.spec_draft.empty()
+                            ? std::max(0, std::min(common_speculative_n_max(spec.get()), slot.get_n_draft_max()))
+                            : (int32_t) slot.spec_draft.size();
+                    }
+                    return 1 + n_draft;
+                }
+            case SLOT_STATE_PROCESSING_PROMPT:
+                {
+                    // the next input chunk: a whole media chunk, or at least one text token
+                    const int32_t idx = slot.prompt.n_tokens();
+                    const auto & input_tokens = slot.input_tokens();
+                    if (idx < (int32_t) input_tokens.size() && input_tokens[idx] == LLAMA_TOKEN_NULL) {
+                        return (int32_t) mtmd_input_chunk_get_n_tokens(input_tokens.find_chunk(idx).get());
+                    }
+                    return 1;
+                }
+            case SLOT_STATE_STARTED:
+                return 1;
+            default:
+                return 0;
+        }
+    }
+
+    // only single-sequence text generation can be recomputed from its tokens
+    bool kv_can_preempt(const server_slot & slot) const {
+        if (!slot.task || !slot.task->need_sampling() || slot.task->is_parent() || slot.task->is_child()) {
+            return false;
+        }
+        if (!slot.inp_embd.empty() || slot.spec_is_replay) {
+            return false;
+        }
+        return slot.state == SLOT_STATE_STARTED ||
+               slot.state == SLOT_STATE_PROCESSING_PROMPT ||
+               slot.state == SLOT_STATE_GENERATING;
+    }
+
+    void kv_preempt(server_slot & slot) {
+        GGML_ASSERT(kv_can_preempt(slot));
+
+        if (slot.state == SLOT_STATE_GENERATING) {
+            GGML_ASSERT(!slot.resuming);
+
+            const auto & tokens = slot.prompt.tokens.get_tokens();
+
+            if (std::find(tokens.begin(), tokens.end(), LLAMA_TOKEN_NULL) != tokens.end()) {
+                // the slot prompt keeps only placeholders for media, take the media from the task prompt
+                // there is no context shift with media, so the task prompt is a prefix of the slot prompt
+                GGML_ASSERT(tokens.size() >= slot.task->tokens.size());
+
+                slot.resume_tokens = slot.task->tokens.clone();
+                for (size_t i = slot.task->tokens.size(); i < tokens.size(); ++i) {
+                    slot.resume_tokens.push_back(tokens[i]);
+                }
+            } else {
+                slot.resume_tokens = slot.prompt.tokens.clone();
+            }
+
+            slot.resume_tokens.push_back(slot.sampled);
+            slot.resuming = true;
+        }
+        // a slot preempted while processing its prompt (or its resume tokens) simply starts that over
+
+        SLT_WRN(slot, "preempted to free %d KV cells, n_gen = %d, resume from %d tokens\n",
+                slot.prompt.n_tokens(), (int) slot.stats.n_gen, slot.n_input_tokens());
+
+        if (slot.can_speculate()) {
+            slot.spec_draft.clear();
+            slot.spec_i_batch.clear();
+            slot.spec_ckpt.clear();
+        }
+
+        slot.i_batch = -1;
+        slot.prompt_clear();
+
+        // a slot that never left SLOT_STATE_STARTED has not signaled the client yet
+        slot.preempted = slot.preempted || slot.state != SLOT_STATE_STARTED;
+        slot.state     = SLOT_STATE_PREEMPTED;
+    }
+
+    // run before building the batch; sets kv_budget_prompt, the KV cells left for prompt tokens
+    void kv_schedule() {
+        kv_budget_prompt = -1;
+
+        if (!kv_preemption_enabled()) {
+            return;
+        }
+
+        const int32_t n_total = kv_cells_total();
+
+        const auto by_launch = [](const server_slot * a, const server_slot * b) {
+            return a->n_launch < b->n_launch;
+        };
+
+        std::vector<server_slot *> running;
+        std::vector<server_slot *> preempted;
+
+        for (auto & slot : slots) {
+            if (slot.state == SLOT_STATE_PREEMPTED) {
+                preempted.push_back(&slot);
+            } else if (slot.is_processing() && slot.state != SLOT_STATE_WAIT_OTHER) {
+                running.push_back(&slot);
+            }
+        }
+
+        std::sort(running.begin(),   running.end(),   by_launch);
+        std::sort(preempted.begin(), preempted.end(), by_launch);
+
+        const auto cells_step_running = [&]() {
+            int32_t n = 0;
+            for (const auto * slot : running) {
+                n += kv_cells_step(*slot);
+            }
+            return n;
+        };
+
+        // resume preempted slots oldest first, once their whole recompute fits next to the running slots
+        // a younger preempted slot never jumps ahead of an older one
+        const bool is_rs = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
+
+        // the recompute plus the first generation step after it
+        const int32_t n_step_resume = 1 + (spec ? common_speculative_n_max(spec.get()) : 0);
+
+        for (auto * slot : preempted) {
+            const int32_t need = slot->n_input_tokens() + n_step_resume;
+
+            while (kv_cells_committed() + cells_step_running() + need > n_total && try_clear_idle_slot_rs(nullptr, "KV cells")) {
+            }
+
+            if (kv_cells_committed() + cells_step_running() + need > n_total) {
+                break;
+            }
+
+            if (is_rs) {
+                while (n_rs_cells_held() >= llama_n_rs_cells(ctx_tgt) && try_clear_idle_slot_rs(nullptr)) {
+                }
+
+                if (n_rs_cells_held() >= llama_n_rs_cells(ctx_tgt)) {
+                    break;
+                }
+            }
+
+            SLT_INF(*slot, "resuming, recompute %d tokens\n", slot->n_input_tokens());
+
+            slot->state = SLOT_STATE_STARTED;
+
+            running.push_back(slot);
+            std::sort(running.begin(), running.end(), by_launch);
+        }
+
+        // new tasks were deferred while slots were preempted, and a release only re-offers one of them:
+        // once the last preempted slot resumes, re-offer as many as there are idle slots
+        if (!preempted.empty() && !any_slot_preempted()) {
+            size_t n_idle = 0;
+            for (const auto & slot : slots) {
+                n_idle += slot.is_processing() ? 0 : 1;
+            }
+
+            queue_tasks.pop_deferred_tasks(n_idle);
+        }
+
+        // reserve the next step of every running slot, oldest first, preempting the newest slots when needed
+        int32_t reserved = 0;
+
+        for (size_t i = 0; i < running.size(); ++i) {
+            server_slot * cur = running[i];
+
+            if (cur->state == SLOT_STATE_PREEMPTED) {
+                continue;
+            }
+
+            const int32_t need = kv_cells_step(*cur);
+
+            while (kv_cells_held() + reserved + need > n_total) {
+                if (try_clear_idle_slot_rs(nullptr, "KV cells")) {
+                    continue;
+                }
+
+                server_slot * victim = nullptr;
+                for (size_t j = running.size(); j-- > i + 1;) {
+                    if (running[j]->state != SLOT_STATE_PREEMPTED && kv_can_preempt(*running[j])) {
+                        victim = running[j];
+                        break;
+                    }
+                }
+
+                // the current slot is the newest one left: preempt it, unless it is the oldest running slot
+                if (victim == nullptr && i > 0 && kv_can_preempt(*cur)) {
+                    victim = cur;
+                }
+
+                if (victim == nullptr) {
+                    // nothing left to preempt, the decode falls back to retrying with smaller batches
+                    break;
+                }
+
+                kv_preempt(*victim);
+
+                if (victim == cur) {
+                    break;
+                }
+            }
+
+            if (cur->state != SLOT_STATE_PREEMPTED) {
+                reserved += need;
+            }
+        }
+
+        // prompt tokens may use what is left after the generation steps
+        int32_t n_step_gen = 0;
+        for (const auto * slot : running) {
+            if (slot->state == SLOT_STATE_GENERATING) {
+                n_step_gen += kv_cells_step(*slot);
+            }
+        }
+
+        kv_budget_prompt = std::max(0, n_total - kv_cells_held() - n_step_gen);
+    }
+
     std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
         std::vector<common_adapter_lora_info> output = params_base.lora_adapters; // copy
         for (size_t i = 0; i < output.size(); ++i) {
@@ -1818,6 +2148,8 @@ private:
         slot.n_predict_max = task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict;
 
         slot.task = std::make_unique<const server_task>(std::move(task));
+
+        slot.n_launch = n_launch_next++;
 
         slot.state = slot.task->is_child()
             ? SLOT_STATE_WAIT_OTHER // wait for the parent to process prompt
@@ -2415,6 +2747,57 @@ private:
                         break;
                     }
 
+                    // with --rs-cells below --parallel there can be fewer recurrent-state cells than slots:
+                    // wait for a free cell here, because a decode that cannot get one errors every active slot
+                    if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
+                        const uint32_t n_rs_cells = llama_n_rs_cells(ctx_tgt);
+                        const uint32_t n_rs_new   = (slot->prompt.n_tokens() > 0 ? 0 : 1)
+                                                  + (task.is_parent() ? (uint32_t) task.child_tasks.size() : 0);
+
+                        if (n_rs_new > n_rs_cells) {
+                            SRV_ERR("task needs %u recurrent-state cells but only %u exist, id_task = %d\n", n_rs_new, n_rs_cells, id_task);
+                            send_error(task, "Request needs more parallel sequences than --rs-cells allows.", ERROR_TYPE_INVALID_REQUEST);
+                            break;
+                        }
+
+                        while (n_rs_cells_held() + n_rs_new > n_rs_cells && try_clear_idle_slot_rs(slot)) {
+                        }
+
+                        if (n_rs_cells_held() + n_rs_new > n_rs_cells) {
+                            SRV_DBG("no free recurrent-state cell, defer task, id_task = %d\n", id_task);
+                            queue_tasks.defer(std::move(task));
+                            break;
+                        }
+                    }
+
+                    // with a unified KV cache, admit a task only when its whole prompt fits next to the memory already
+                    // held, and never ahead of a preempted slot; a task that cannot fit even alone is admitted when
+                    // nothing else runs, so that it fails with the usual context size error
+                    if (kv_preemption_enabled()) {
+                        if (any_slot_preempted()) {
+                            SRV_DBG("preempted slots are waiting, defer task, id_task = %d\n", id_task);
+                            queue_tasks.defer(std::move(task));
+                            break;
+                        }
+
+                        const int32_t n_total = kv_cells_total();
+
+                        while (kv_cells_committed() + task.n_tokens() > n_total && try_clear_idle_slot_rs(slot, "KV cells")) {
+                        }
+
+                        bool any_running = false;
+                        for (const auto & other : slots) {
+                            any_running = any_running || other.is_processing();
+                        }
+
+                        if (any_running && kv_cells_committed() + task.n_tokens() > n_total) {
+                            SRV_DBG("not enough free KV cells (committed = %d, prompt = %d, total = %d), defer task, id_task = %d\n",
+                                    kv_cells_committed(), task.n_tokens(), n_total, id_task);
+                            queue_tasks.defer(std::move(task));
+                            break;
+                        }
+                    }
+
                     if (task.is_parent()) {
                         // try getting free slots for all child tasks
                         size_t n_child_tasks = task.child_tasks.size();
@@ -2971,6 +3354,9 @@ private:
             }
         });
 
+        // make room in the unified KV cache for this iteration, preempting the newest slots if needed
+        kv_schedule();
+
         // start populating the batch for this iteration
         batch.clear();
 
@@ -3116,7 +3502,7 @@ private:
                     return; // batch is full, skip remaining slots
                 }
 
-                if (!slot.is_processing()) {
+                if (!slot.is_processing() || slot.state == SLOT_STATE_PREEMPTED) {
                     return;
                 }
 
@@ -3133,19 +3519,21 @@ private:
 
                 // this slot still has a prompt to be processed
                 if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
-                    const auto & input_tokens = slot.task->tokens;
+                    const auto & input_tokens = slot.input_tokens();
 
                     // used to determine the number of tokens added to the batch for the current slot
                     const auto n_tokens_prev = batch.size();
 
                     // TODO: maybe move branch to outside of this loop in the future
                     if (slot.state == SLOT_STATE_STARTED) {
-                        slot.stats.update_prompt_start();
+                        if (!slot.resuming) {
+                            slot.stats.update_prompt_start();
+                        }
 
                         slot.state = SLOT_STATE_PROCESSING_PROMPT;
 
-                        SLT_TRC(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, task.n_tokens = %d\n",
-                                slot.n_ctx, slot.task->params.n_keep, slot.task->n_tokens());
+                        SLT_TRC(slot, "new prompt, n_ctx_slot = %d, n_keep = %d, n_input_tokens = %d, resuming = %d\n",
+                                slot.n_ctx, slot.task->params.n_keep, slot.n_input_tokens(), slot.resuming);
 
                         // print prompt tokens (for debugging)
                         /*if (1) {
@@ -3182,33 +3570,33 @@ private:
                         }
 
                         if (!slot.can_split()) {
-                            if (slot.task->n_tokens() > n_ubatch) {
+                            if (slot.n_input_tokens() > n_ubatch) {
                                 send_error(slot,
                                            string_format(
                                                "input (%d tokens) is too large to process. increase the physical batch "
                                                "size (current batch size: %d)",
-                                               slot.task->n_tokens(), n_ubatch),
+                                               slot.n_input_tokens(), n_ubatch),
                                            ERROR_TYPE_SERVER);
                                 slot.release();
                                 return;
                             }
 
-                            if (slot.task->n_tokens() > slot.n_ctx) {
+                            if (slot.n_input_tokens() > slot.n_ctx) {
                                 send_error(
                                     slot,
                                     string_format(
                                         "input (%d tokens) is larger than the max context size (%d tokens). skipping",
-                                        slot.task->n_tokens(), slot.n_ctx),
+                                        slot.n_input_tokens(), slot.n_ctx),
                                     ERROR_TYPE_EXCEED_CONTEXT_SIZE);
                                 slot.release();
                                 return;
                             }
                         } else {
-                            if (slot.task->n_tokens() >= slot.n_ctx) {
+                            if (slot.n_input_tokens() >= slot.n_ctx) {
                                 send_error(slot,
                                            string_format("request (%d tokens) exceeds the available context size (%d "
                                                          "tokens), try increasing it",
-                                                         slot.task->n_tokens(), slot.n_ctx),
+                                                         slot.n_input_tokens(), slot.n_ctx),
                                            ERROR_TYPE_EXCEED_CONTEXT_SIZE);
                                 slot.release();
                                 return;
@@ -3291,7 +3679,7 @@ private:
                             llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
 
                             // ref: https://github.com/ggml-org/llama.cpp/pull/24110
-                            const bool has_new_tokens = (n_past < slot.task->n_tokens());
+                            const bool has_new_tokens = (n_past < slot.n_input_tokens());
 
                             // the largest pos_min required for a checkpoint to be useful
                             const auto pos_min_thold = std::max(0, pos_next - n_swa - (has_new_tokens ? 0 : 1));
@@ -3307,7 +3695,7 @@ private:
                                 // this is useful for debugging prompt caching
                                 if (slots_debug) {
                                     const int np0 = std::max<int>(n_past - slots_n_diff, 0);
-                                    const int np1 = std::min<int>(n_past + slots_n_diff + 2, std::min(slot.prompt.tokens.size(), slot.task->tokens.size()));
+                                    const int np1 = std::min<int>(n_past + slots_n_diff + 2, std::min(slot.prompt.tokens.size(), input_tokens.size()));
 
                                     std::stringstream ss0;
                                     std::stringstream ss1;
@@ -3332,7 +3720,7 @@ private:
                                         }
 
                                         {
-                                            const auto token = slot.task->tokens[i];
+                                            const auto token = input_tokens[i];
                                             const auto piece = token != LLAMA_TOKEN_NULL ? common_token_to_piece(ctx_tgt, token) : "[mtmd]";
                                             ss1 << piece;
                                             st1 << std::setw(8) << token;
@@ -3400,21 +3788,25 @@ private:
                         }
 
                         // [TAG_PROMPT_LOGITS]
-                        if (n_past == slot.task->n_tokens() && n_past > 0) {
-                            SLT_WRN(slot, "need to evaluate at least 1 token for each active slot (n_past = %d, task.n_tokens() = %d)\n", n_past, slot.task->n_tokens());
+                        if (n_past == slot.n_input_tokens() && n_past > 0) {
+                            SLT_WRN(slot, "need to evaluate at least 1 token for each active slot (n_past = %d, task.n_tokens() = %d)\n", n_past, slot.n_input_tokens());
                             n_past--;
                             SLT_WRN(slot, "n_past was set to %d\n", n_past);
                         }
 
-                        slot.stats.n_prompt_cached    = n_past;
-                        slot.stats.n_prompt_processed = 0;
+                        // a recompute after preemption keeps the stats of the original prompt
+                        if (!slot.preempted) {
+                            slot.stats.n_prompt_cached    = n_past;
+                            slot.stats.n_prompt_processed = 0;
 
-                        metrics.add_prompt_cached(n_past);
+                            metrics.add_prompt_cached(n_past);
+                        }
 
                         slot.prompt.tokens.keep_first(n_past);
 
                         // this is to signal the client that the request has started processing
-                        if (slot.task->params.stream) {
+                        // a preempted slot has already done this before it was preempted
+                        if (slot.task->params.stream && !slot.preempted) {
                             if (slot.task->params.return_progress) {
                                 // send initial 0% progress update if needed
                                 send_partial_response(slot, {}, true);
@@ -3427,7 +3819,7 @@ private:
 
                     if (!slot.can_split()) {
                         // cannot fit the prompt in the current batch - will try next iter
-                        if (batch.size() + slot.task->n_tokens() > n_batch) {
+                        if (batch.size() + slot.n_input_tokens() > n_batch) {
                             return;
                         }
                     }
@@ -3478,10 +3870,19 @@ private:
                     while (true) {
                         auto cur_token_idx = slot.prompt.n_tokens();
                         if (
-                            cur_token_idx >= slot.task->n_tokens() ||
+                            cur_token_idx >= slot.n_input_tokens() ||
                             input_tokens[cur_token_idx] != LLAMA_TOKEN_NULL // encountered a text token
                         ) {
                             break;
+                        }
+
+                        // the chunk is decoded as a whole, wait until the KV cache has room for all of it
+                        if (kv_budget_prompt >= 0) {
+                            const int32_t n_chunk = (int32_t) mtmd_input_chunk_get_n_tokens(input_tokens.find_chunk(cur_token_idx).get());
+                            if (n_chunk > kv_budget_prompt) {
+                                break;
+                            }
+                            kv_budget_prompt -= n_chunk;
                         }
 
                         // process the mtmd chunk
@@ -3521,7 +3922,7 @@ private:
                     const auto last_user_pos = spans.last_user_message_pos();
 
                     // add prompt tokens for processing in the current batch
-                    while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
+                    while (slot.prompt.n_tokens() < slot.n_input_tokens() && batch.size() < n_batch && kv_budget_prompt != 0) {
                         // get next token to process
                         llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                         if (cur_tok == LLAMA_TOKEN_NULL) {
@@ -3546,6 +3947,10 @@ private:
                             /* is_prompt = */ true);
                         slot.prompt.tokens.push_back(cur_tok);
 
+                        if (kv_budget_prompt > 0) {
+                            kv_budget_prompt--;
+                        }
+
                         // break at the last user message, or at user messages at least min step past the last checkpoint
                         if (do_checkpoint && spans.is_user_start(slot.prompt.n_tokens())) {
                             const auto pos = slot.prompt.n_tokens();
@@ -3567,7 +3972,7 @@ private:
                             bool should_break = false;
                             for (int offset : checkpoint_offsets) {
                                 const int n_last = std::min(n_batch, offset);
-                                if (slot.task->n_tokens() == slot.prompt.n_tokens() + n_last) {
+                                if (slot.n_input_tokens() == slot.prompt.n_tokens() + n_last) {
                                     should_break = true;
                                     break;
                                 }
@@ -3581,15 +3986,21 @@ private:
                     // the number of tokens added to the batch for the current slot
                     const auto n_tokens_cur = batch.size() - n_tokens_prev;
 
+                    // no room in the KV cache for this slot's next input in this iteration
+                    if (kv_budget_prompt >= 0 && alora_scale <= 0.0f && n_tokens_cur == 0 && !has_mtmd &&
+                            slot.prompt.n_tokens() < slot.n_input_tokens()) {
+                        return;
+                    }
+
                     const auto n_tokens_start = slot.prompt.n_tokens() - n_tokens_cur;
 
-                    const bool near_prompt_end = slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch;
+                    const bool near_prompt_end = slot.n_input_tokens() < slot.prompt.n_tokens() + n_ubatch;
 
                     const bool is_user_start = spans.is_user_start(n_tokens_start);
                     const bool is_last_user_message = n_tokens_start == last_user_pos;
 
                     // entire prompt has been processed
-                    if (slot.prompt.n_tokens() == slot.task->n_tokens()) {
+                    if (slot.prompt.n_tokens() == slot.n_input_tokens()) {
                         slot.state = SLOT_STATE_DONE_PROMPT;
 
                         GGML_ASSERT(batch.size() > 0);
@@ -3597,10 +4008,14 @@ private:
                         // extract the logits only for the last token
                         batch.set_output(batch.size() - 1, true);
 
-                        slot.stats.n_gen = 0;
-                        slot.i_batch     = batch.size() - 1;
+                        slot.i_batch = batch.size() - 1;
 
-                        slot.init_sampler();
+                        // a resumed slot continues its generation: keep n_gen and the sampler state
+                        // (penalties, grammar), the last recomputed token is the pending sampled token
+                        if (!slot.resuming) {
+                            slot.stats.n_gen = 0;
+                            slot.init_sampler();
+                        }
                     } else {
                         // skip ordinary mid-prompt checkpoints, unless the batch starts a user
                         // message or we are near the end of the prompt
@@ -3835,6 +4250,13 @@ private:
 
                 // prompt evaluated for next-token prediction
                 slot.state = SLOT_STATE_GENERATING;
+
+                if (slot.resuming) {
+                    SLT_INF(slot, "resumed after preemption, n_tokens = %d, n_gen = %d\n", slot.prompt.n_tokens(), (int) slot.stats.n_gen);
+
+                    slot.resuming = false;
+                    slot.resume_tokens.clear();
+                }
 
                 if (slot.can_speculate()) {
                     common_speculative_begin(spec.get(), slot.id, slot.prompt.tokens.get_text_tokens());

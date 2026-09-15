@@ -7,6 +7,9 @@
 #include "llama-batch.h"
 #include "llama-io.h"
 #include "llama-memory.h"
+#include "llama-memory-hybrid.h"
+#include "llama-memory-hybrid-iswa.h"
+#include "llama-memory-recurrent.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
 #include "llama-ext.h"
@@ -107,6 +110,9 @@ llama_context::llama_context(
                         __func__, cparams.n_rs_seq);
         cparams.n_rs_seq = 0;
     }
+
+    // a seq owns at most one recurrent-state cell, so more than n_seq_max cells can never be used
+    cparams.n_rs_cells = params.n_rs_cells == 0 ? cparams.n_seq_max : std::min(params.n_rs_cells, cparams.n_seq_max);
 
     cparams.n_threads               = params.n_threads;
     cparams.n_threads_batch         = params.n_threads_batch;
@@ -272,6 +278,14 @@ llama_context::llama_context(
     cparams.op_offload = params.op_offload;
     cparams.kv_unified = params.kv_unified;
 
+    // a non-unified KV cache keeps one stream per seq and reserves graphs with one seq per stream,
+    // which a recurrent-state pool smaller than n_seq_max cannot back
+    if (cparams.n_rs_cells < cparams.n_seq_max && !cparams.kv_unified &&
+        (llm_arch_is_recurrent(model.arch) || llm_arch_is_hybrid(model.arch))) {
+        throw std::runtime_error("n_rs_cells (" + std::to_string(cparams.n_rs_cells) + ") below n_seq_max (" +
+                std::to_string(cparams.n_seq_max) + ") requires a unified KV cache (--kv-unified)");
+    }
+
     // initialized later
     cparams.pipeline_parallel = false;
 
@@ -314,6 +328,7 @@ llama_context::llama_context(
     LLAMA_LOG_INFO("%s: freq_base             = %.1f\n", __func__, cparams.rope_freq_base);
     LLAMA_LOG_INFO("%s: freq_scale            = %g\n",   __func__, cparams.rope_freq_scale);
     LLAMA_LOG_INFO("%s: n_rs_seq              = %u\n",   __func__, cparams.n_rs_seq);
+    LLAMA_LOG_INFO("%s: n_rs_cells            = %u\n",   __func__, cparams.n_rs_cells);
     LLAMA_LOG_INFO("%s: n_outputs_max         = %u\n",   __func__, cparams.n_outputs_max);
     LLAMA_LOG_INFO("%s: n_outputs_max_per_seq = %u\n",   __func__, cparams.n_outputs_max_per_seq);
 
@@ -592,7 +607,7 @@ void llama_context::sched_reserve() {
 
     const int64_t t_start_us = ggml_time_us();
 
-    const uint32_t n_seqs = cparams.n_seq_max;
+    const uint32_t n_seqs = n_seq_max_ubatch();
     const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
 
     const size_t max_nodes = this->graph_max_nodes(n_tokens);
@@ -779,6 +794,19 @@ uint32_t llama_context::n_seq_max() const {
     return cparams.n_seq_max;
 }
 
+uint32_t llama_context::n_seq_max_ubatch() const {
+    // only a context whose memory holds recurrent state is limited by the cell pool;
+    // e.g. the MTP draft context of a hybrid arch uses a plain KV cache
+    // llama_memory_hybrid_idx derives from llama_memory_hybrid
+    const llama_memory_i * mem = memory.get();
+    const bool has_rs =
+        dynamic_cast<const llama_memory_recurrent *>(mem)   != nullptr ||
+        dynamic_cast<const llama_memory_hybrid *>(mem)      != nullptr ||
+        dynamic_cast<const llama_memory_hybrid_iswa *>(mem) != nullptr;
+
+    return has_rs ? cparams.n_rs_cells : cparams.n_seq_max;
+}
+
 uint32_t llama_context::n_threads() const {
     return cparams.n_threads;
 }
@@ -833,7 +861,7 @@ bool llama_context::memory_update(bool optimize) {
             throw std::runtime_error("failed to initialize memory context");
         }
 
-        const uint32_t n_seqs = cparams.n_seq_max;
+        const uint32_t n_seqs = n_seq_max_ubatch();
         const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
 
         const uint32_t n_outputs_max = std::min(n_tokens, cparams.n_outputs_max);
@@ -948,12 +976,14 @@ float * llama_context::get_embeddings_seq(llama_seq_id seq_id) {
 
 float * llama_context::get_embeddings_nextn() {
     output_reorder();
+    embd_nextn_reorder();
 
     return embd_nextn.data;
 }
 
 float * llama_context::get_embeddings_nextn_ith(int32_t i) {
     output_reorder();
+    embd_nextn_reorder();
 
     try {
         if (embd_nextn.data == nullptr) {
@@ -1347,6 +1377,8 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
+    n_graph_computes++;
+
     if (!graph_reuse_disable && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
@@ -1738,6 +1770,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
     n_queued_tokens += n_tokens_all;
 
     output_swaps.clear();
+    embd_nextn_tok_ids.clear();
 
     sched_reserve();
 
@@ -1984,6 +2017,19 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     // set to total number of outputs in the batch, for use in llama_get_logits_ith
     n_outputs = n_outputs_all;
+
+    if (embd_nextn.data && !cparams.embeddings_nextn_masked && cparams.pooling_type == LLAMA_POOLING_TYPE_NONE) {
+        const auto & tok_ids = balloc->get_tok_ids();
+
+        GGML_ASSERT(tok_ids.size() == (size_t) n_tokens_all);
+
+        for (int64_t k = 0; k < n_tokens_all; ++k) {
+            if (tok_ids[k] != k) {
+                embd_nextn_tok_ids = tok_ids;
+                break;
+            }
+        }
+    }
 
     // set output mappings
     if (n_outputs > 0) {
@@ -2253,7 +2299,8 @@ void llama_context::output_reorder() {
             }
         }
 
-        if (embd_nextn.size > 0) {
+        // unmasked nextn rows are per token, not per output, see embd_nextn_reorder()
+        if (embd_nextn.size > 0 && cparams.embeddings_nextn_masked) {
             for (uint64_t k = 0; k < n_embd_out; k++) {
                 std::swap(embd_nextn.data[i0*n_embd_out + k], embd_nextn.data[i1*n_embd_out + k]);
             }
@@ -2298,6 +2345,25 @@ void llama_context::output_reorder() {
     }
 
     output_swaps.clear();
+}
+
+void llama_context::embd_nextn_reorder() {
+    if (embd_nextn_tok_ids.empty()) {
+        return;
+    }
+
+    const size_t n_embd_out = model.hparams.n_embd_out();
+    const size_t n_rows     = embd_nextn_tok_ids.size();
+
+    GGML_ASSERT(n_rows*n_embd_out <= embd_nextn.size);
+
+    std::vector<float> rows(embd_nextn.data, embd_nextn.data + n_rows*n_embd_out);
+
+    for (size_t k = 0; k < n_rows; ++k) {
+        std::memcpy(embd_nextn.data + (size_t) embd_nextn_tok_ids[k]*n_embd_out, rows.data() + k*n_embd_out, n_embd_out*sizeof(float));
+    }
+
+    embd_nextn_tok_ids.clear();
 }
 
 //
@@ -3347,6 +3413,7 @@ llama_perf_context_data llama_context::perf_get_data() const {
     data.n_p_eval    = std::max(1, n_p_eval);
     data.n_eval      = std::max(1, n_eval);
     data.n_reused    = std::max(0, n_reused);
+    data.n_graph_computes = std::max(0, n_graph_computes);
 
     return data;
 }
@@ -3356,6 +3423,7 @@ void llama_context::perf_reset() {
     t_eval_us   = n_eval = 0;
     t_p_eval_us = n_p_eval = 0;
     n_reused    = 0;
+    n_graph_computes = 0;
 }
 
 llama_memory_breakdown llama_context::memory_breakdown() const {
@@ -3622,6 +3690,7 @@ llama_context_params llama_context_default_params() {
         /*.n_ubatch                    =*/ 512,
         /*.n_seq_max                   =*/ 1,
         /*.n_rs_seq                    =*/ 0,
+        /*.n_rs_cells                  =*/ 0,
         /*.n_outputs_max               =*/ 0,
         /*.n_outputs_max_per_seq       =*/ 1,
         /*.n_threads                   =*/ GGML_DEFAULT_N_THREADS, // TODO: better default
@@ -3799,6 +3868,10 @@ uint32_t llama_n_seq_max(const llama_context * ctx) {
 
 uint32_t llama_n_rs_seq(const llama_context * ctx) {
     return ctx->get_cparams().n_rs_seq;
+}
+
+uint32_t llama_n_rs_cells(const llama_context * ctx) {
+    return ctx->get_cparams().n_rs_cells;
 }
 
 const llama_model * llama_get_model(const llama_context * ctx) {
@@ -4284,7 +4357,9 @@ void llama_perf_context_print(const llama_context * ctx) {
     LLAMA_LOG_INFO("%s:        eval time = %10.2f ms / %5d runs   (%8.2f ms per token, %8.2f tokens per second)\n",
             __func__, data.t_eval_ms, data.n_eval, data.t_eval_ms / data.n_eval, 1e3 / data.t_eval_ms * data.n_eval);
     LLAMA_LOG_INFO("%s:       total time = %10.2f ms / %5d tokens\n", __func__, (t_end_ms - data.t_start_ms), (data.n_p_eval + data.n_eval));
-    LLAMA_LOG_INFO("%s:    graphs reused = %10d\n", __func__, data.n_reused);
+    LLAMA_LOG_INFO("%s:    graphs reused = %10d / %5d computes (%5.1f %%)\n",
+            __func__, data.n_reused, data.n_graph_computes,
+            data.n_graph_computes > 0 ? 100.0 * data.n_reused / data.n_graph_computes : 0.0);
 }
 
 void llama_perf_context_reset(llama_context * ctx) {

@@ -68,6 +68,10 @@ struct llama_context {
     uint32_t n_ubatch()  const;
     uint32_t n_seq_max() const;
 
+    // max seqs a single ubatch can hold: on models with recurrent state this is the number of
+    // recurrent-state cells, since each seq in a ubatch needs its own cell
+    uint32_t n_seq_max_ubatch() const;
+
     uint32_t n_threads()       const;
     uint32_t n_threads_batch() const;
 
@@ -341,6 +345,12 @@ private:
 
     std::vector<swap_info> output_swaps;
 
+    // unmasked nextn rows are written in ubatch order; tok_ids[k] is the batch index of row k
+    // applied lazily by embd_nextn_reorder(), empty when the rows are already in batch order
+    std::vector<int32_t> embd_nextn_tok_ids;
+
+    void embd_nextn_reorder();
+
     ggml_backend_sched_ptr sched;
 
     bool sched_need_reserve = true;
@@ -391,4 +401,5 @@ private:
     mutable int32_t n_eval   = 0; // number of eval calls
 
     mutable int32_t n_reused = 0; // number of times the previous graph was reused
+    mutable int32_t n_graph_computes = 0; // number of graph evaluations, reused or rebuilt
 };

@@ -65,6 +65,9 @@ public:
     // prioritize tasks that use the specified slot (otherwise, pop the first deferred task)
     void pop_deferred_task(int id_slot);
 
+    // move up to n deferred tasks, oldest first, to the front of the main queue, keeping their order
+    void pop_deferred_tasks(size_t n);
+
     // if sleeping, request exiting sleep state and wait until it is done
     // returns immediately if not sleeping
     void wait_until_no_sleep();

@@ -2557,6 +2557,19 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         ).set_env("LLAMA_ARG_N_PARALLEL"));
     }
     add_opt(common_arg(
+        {"--rs-cells"}, "N",
+        string_format("recurrent-state cells shared by all sequences, for recurrent and hybrid models; "
+                      "fewer cells than --parallel lets idle slots cost no recurrent-state memory, and "
+                      "requests wait when all cells are busy; requires --kv-unified when below --parallel "
+                      "(default: %d, 0 = --parallel)", params.n_rs_cells),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("error: --rs-cells must be >= 0\n");
+            }
+            params.n_rs_cells = value;
+        }
+    ).set_env("LLAMA_ARG_RS_CELLS").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_BATCHED, LLAMA_EXAMPLE_PARALLEL}));
+    add_opt(common_arg(
         {"-ns", "--sequences"}, "N",
         string_format("number of sequences to decode (default: %d)", params.n_sequences),
         [](common_params & params, int value) {

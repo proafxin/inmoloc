@@ -112,6 +112,22 @@ void server_queue::pop_deferred_task(int id_slot) {
     condition_tasks.notify_one();
 }
 
+void server_queue::pop_deferred_tasks(size_t n) {
+    std::unique_lock<std::mutex> lock(mutex_tasks);
+    n = std::min(n, queue_tasks_deferred.size());
+    if (n == 0) {
+        return;
+    }
+    QUE_DBG("pop %zu deferred tasks\n", n);
+    // insert in reverse so the oldest deferred task ends up first
+    for (size_t i = n; i-- > 0;) {
+        queue_tasks.emplace_front(std::move(queue_tasks_deferred[i]));
+    }
+    queue_tasks_deferred.erase(queue_tasks_deferred.begin(), queue_tasks_deferred.begin() + n);
+    time_last_task = ggml_time_ms();
+    condition_tasks.notify_one();
+}
+
 void server_queue::wait_until_no_sleep() {
     std::unique_lock<std::mutex> lock(mutex_tasks);
     if (!sleeping) {

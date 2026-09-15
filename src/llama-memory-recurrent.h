@@ -89,7 +89,6 @@ public:
         llama_pos pos  = -1;
         int32_t   src  = -1; // used to know where states should be copied from
         int32_t   src0 = -1; // like src, but only used when setting the inputs (allowing to copy once)
-        int32_t   tail = -1;
 
         std::set<llama_seq_id> seq_id;
 
@@ -107,6 +106,13 @@ public:
     };
 
     std::vector<mem_cell> cells;
+
+    // per-seq index of the cell holding that seq's state, or -1
+    // kept apart from `cells` so the cell pool can be smaller than n_seq_max
+    std::vector<int32_t> seq_tails;
+
+    // number of free cells, i.e. cells not owned by any seq
+    uint32_t n_free_cells() const;
 
     // per layer
     std::vector<ggml_tensor *> r_l;
