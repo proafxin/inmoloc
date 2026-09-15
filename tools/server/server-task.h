@@ -153,6 +153,9 @@ struct server_task {
     task_params   params;
     server_tokens tokens;
 
+    // set when the task is first posted to the queue, kept when it is deferred, used for latency metrics
+    int64_t t_arrival_us = 0;
+
     // only used by CLI, this allow tokenizing CLI inputs on server side
     // we need this because mtmd_context and vocab are not accessible outside of server_context
     bool                    cli = false;
@@ -493,7 +496,16 @@ struct server_task_result_error : server_task_result {
 struct server_task_result_metrics : server_task_result {
     // these are immediate stats, not accumulated (server_metrics is cumulative)
     int n_processing_slots = 0;
+    int n_preempted_slots  = 0;
     int n_tasks_deferred = 0;
+
+    uint64_t n_idle_cached_tokens = 0; // tokens of idle slot prompts still held in memory
+
+    llama_memory_usage mem_usage = {};
+
+    // from the target context perf data, cumulative
+    int32_t n_graph_reused   = 0;
+    int32_t n_graph_computes = 0;
 
     server_metrics metrics;
 

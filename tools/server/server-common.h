@@ -10,6 +10,7 @@
 
 #include "json.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -481,8 +482,50 @@ struct server_metrics {
     uint64_t n_draft_verif_steps = 0; // Total draft token verification steps by the target model
     std::vector<uint64_t> n_accepted_per_pos; // Accepted tokens per draft position
 
+    // prometheus histogram, values in seconds
+    struct histogram {
+        std::vector<double>   bounds; // bucket upper bounds, ascending; +Inf is implicit
+        std::vector<uint64_t> counts; // per bucket, not cumulative, last one is +Inf
+        double   sum   = 0.0;
+        uint64_t count = 0;
+
+        void set_bounds(std::vector<double> b) {
+            bounds = std::move(b);
+            counts.assign(bounds.size() + 1, 0);
+        }
+
+        void observe(double v, uint64_t n = 1) {
+            const size_t i = std::lower_bound(bounds.begin(), bounds.end(), v) - bounds.begin();
+            counts[i] += n;
+            sum       += v*n;
+            count     += n;
+        }
+    };
+
+    histogram time_to_first_token; // request arrival -> first generated token
+    histogram inter_token_latency; // per generated token, a step that yields several tokens (speculative) splits its time
+    histogram e2e_request_latency; // request arrival -> final response
+    histogram request_queue_time;  // request arrival -> slot launch
+
+    uint64_t n_preemptions       = 0;
+    uint64_t n_resumes           = 0;
+    uint64_t n_recomputed_tokens = 0; // tokens recomputed to resume preempted slots
+
+    // media work runs inline in the main loop, other slots wait while it runs
+    // timed only when the metrics endpoint is enabled
+    uint64_t t_mtmd_encode_us      = 0; // media encoder
+    uint64_t n_mtmd_encoded_chunks = 0;
+    uint64_t n_mtmd_encoded_tokens = 0;
+    uint64_t t_mtmd_decode_us      = 0; // media embeddings through the model, including the draft context
+    uint64_t n_mtmd_decoded_tokens = 0;
+
     void init() {
         t_start = ggml_time_us();
+
+        time_to_first_token.set_bounds({0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0, 160.0, 640.0});
+        inter_token_latency.set_bounds({0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 2.5, 5.0, 10.0, 20.0, 40.0, 80.0});
+        e2e_request_latency.set_bounds({0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0});
+        request_queue_time .set_bounds({0.01, 0.05, 0.1, 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0, 120.0, 240.0, 480.0, 960.0});
     }
 
     void reset_bucket() {

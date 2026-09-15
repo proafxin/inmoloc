@@ -32,6 +32,9 @@ int server_queue::post(server_task && task, bool front) {
     if (task.type == SERVER_TASK_TYPE_CANCEL) {
         cleanup_pending_task(task.id_target);
     }
+    if (task.t_arrival_us == 0) {
+        task.t_arrival_us = ggml_time_us();
+    }
     const int  task_id     = task.id;
     const bool reset_timer = task_resets_idle_timer(task.type);
     QUE_DBG("new task, id = %d, front = %d\n", task_id, front);
@@ -50,9 +53,13 @@ int server_queue::post(server_task && task, bool front) {
 int server_queue::post(std::vector<server_task> && tasks, bool front) {
     std::unique_lock<std::mutex> lock(mutex_tasks);
     bool reset_timer = false;
+    const int64_t t_now_us = ggml_time_us();
     for (auto & task : tasks) {
         if (task.id == -1) {
             task.id = id++;
+        }
+        if (task.t_arrival_us == 0) {
+            task.t_arrival_us = t_now_us;
         }
         // if this is cancel task make sure to clean up pending tasks
         if (task.type == SERVER_TASK_TYPE_CANCEL) {

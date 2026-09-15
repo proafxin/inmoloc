@@ -1562,6 +1562,46 @@ std::string server_task_result_metrics::to_metrics() {
             "spec_decode_num_drafts_total",
             "Speculative: Total speculative decoding verification steps",
             (double) metrics.n_draft_verif_steps
+        }, {
+            "preemptions_total",
+            "Number of times a slot was preempted to free memory",
+            (double) metrics.n_preemptions
+        }, {
+            "resumes_total",
+            "Number of times a preempted slot was resumed",
+            (double) metrics.n_resumes
+        }, {
+            "recomputed_tokens_total",
+            "Number of tokens recomputed to resume preempted slots",
+            (double) metrics.n_recomputed_tokens
+        }, {
+            "mtmd_encode_seconds_total",
+            "Time in the media encoder; runs inline, other slots wait",
+            metrics.t_mtmd_encode_us / 1.e6
+        }, {
+            "mtmd_encoded_chunks_total",
+            "Number of media chunks encoded",
+            (double) metrics.n_mtmd_encoded_chunks
+        }, {
+            "mtmd_encoded_tokens_total",
+            "Number of tokens of the encoded media chunks",
+            (double) metrics.n_mtmd_encoded_tokens
+        }, {
+            "mtmd_decode_seconds_total",
+            "Time decoding media embeddings through the model, including the speculative draft context; runs inline, other slots wait",
+            metrics.t_mtmd_decode_us / 1.e6
+        }, {
+            "mtmd_decoded_tokens_total",
+            "Number of media tokens decoded through the model",
+            (double) metrics.n_mtmd_decoded_tokens
+        }, {
+            "graphs_reused_total",
+            "Number of graph computes that reused the previous graph",
+            (double) n_graph_reused
+        }, {
+            "graph_computes_total",
+            "Number of graph computes, reused or rebuilt",
+            (double) n_graph_computes
         },
     };
 
@@ -1586,6 +1626,34 @@ std::string server_task_result_metrics::to_metrics() {
             "n_busy_slots_per_decode",
             "Average number of busy slots per llama_decode() call",
             (double) metrics.n_busy_slots / std::max((double) metrics.n_decode, 1.0)
+        }, {
+            "requests_preempted",
+            "Number of requests preempted and waiting to be recomputed",
+            (double) n_preempted_slots
+        }, {
+            "kv_cells_total",
+            "KV cache cells (0 = no KV cache)",
+            (double) mem_usage.kv_size
+        }, {
+            "kv_cells_used",
+            "KV cache cells holding at least one sequence",
+            (double) mem_usage.kv_used
+        }, {
+            "kv_cells_span",
+            "Highest used KV cache cell + 1, the range attention reads; span / used measures fragmentation",
+            (double) mem_usage.kv_span
+        }, {
+            "kv_idle_cached_tokens",
+            "Tokens of idle slot prompts still held in memory",
+            (double) n_idle_cached_tokens
+        }, {
+            "rs_cells_total",
+            "Recurrent-state cells (0 = no recurrent state)",
+            (double) mem_usage.rs_size
+        }, {
+            "rs_cells_used",
+            "Recurrent-state cells owned by a sequence",
+            (double) mem_usage.rs_used
         },
     };
 
@@ -1601,6 +1669,31 @@ std::string server_task_result_metrics::to_metrics() {
 
     add_items("counter", counters);
     add_items("gauge",   gauges);
+
+    auto add_histogram = [&prometheus](const char * name, const char * description, const server_metrics::histogram & h) {
+        prometheus << "# HELP llamacpp:" << name << " " << description << "\n"
+                   << "# TYPE llamacpp:" << name << " histogram\n";
+
+        uint64_t cumulative = 0;
+        for (size_t i = 0; i < h.counts.size(); i++) {
+            cumulative += h.counts[i];
+            prometheus << "llamacpp:" << name << "_bucket{le=\"";
+            if (i < h.bounds.size()) {
+                prometheus << h.bounds[i];
+            } else {
+                prometheus << "+Inf";
+            }
+            prometheus << "\"} " << cumulative << "\n";
+        }
+
+        prometheus << "llamacpp:" << name << "_sum "   << h.sum   << "\n"
+                   << "llamacpp:" << name << "_count " << h.count << "\n";
+    };
+
+    add_histogram("time_to_first_token_seconds", "Time from request arrival to the first generated token", metrics.time_to_first_token);
+    add_histogram("inter_token_latency_seconds", "Time between generated tokens, a multi-token speculative step is split evenly", metrics.inter_token_latency);
+    add_histogram("e2e_request_latency_seconds", "Time from request arrival to the final response", metrics.e2e_request_latency);
+    add_histogram("request_queue_time_seconds",  "Time from request arrival to slot launch", metrics.request_queue_time);
 
     // labeled counter: one time series per draft position
     if (!metrics.n_accepted_per_pos.empty()) {

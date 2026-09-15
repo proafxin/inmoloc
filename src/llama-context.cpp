@@ -6,6 +6,8 @@
 #include "llama-impl.h"
 #include "llama-batch.h"
 #include "llama-io.h"
+#include "llama-kv-cache.h"
+#include "llama-kv-cache-iswa.h"
 #include "llama-memory.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
@@ -4187,6 +4189,39 @@ bool llama_memory_can_shift(llama_memory_t mem) {
     }
 
     return mem->get_can_shift();
+}
+
+llama_memory_usage llama_memory_get_usage(llama_memory_t mem) {
+    llama_memory_usage res = {};
+
+    const llama_kv_cache         * kv = nullptr;
+    const llama_memory_recurrent * rs = nullptr;
+
+    if (const auto * m = dynamic_cast<const llama_kv_cache *>(mem)) {
+        kv = m;
+    } else if (const auto * m = dynamic_cast<const llama_kv_cache_iswa *>(mem)) {
+        kv = m->get_base();
+    } else if (const auto * m = dynamic_cast<const llama_memory_recurrent *>(mem)) {
+        rs = m;
+    } else if (const auto * m = dynamic_cast<const llama_memory_hybrid *>(mem)) {
+        kv = m->get_mem_attn();
+        rs = m->get_mem_recr();
+    } else if (const auto * m = dynamic_cast<const llama_memory_hybrid_iswa *>(mem)) {
+        kv = m->get_mem_attn()->get_base();
+        rs = m->get_mem_recr();
+    }
+
+    if (kv) {
+        res.kv_size = kv->get_size()*kv->get_n_stream();
+        kv->get_usage(res.kv_used, res.kv_span);
+    }
+
+    if (rs) {
+        res.rs_size = rs->size;
+        res.rs_used = rs->size - rs->n_free_cells();
+    }
+
+    return res;
 }
 
 // llama state API

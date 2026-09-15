@@ -307,6 +307,9 @@ struct server_slot {
     bool          preempted = false; // preempted at least once, the client already got the response headers
     server_tokens resume_tokens;
 
+    // time of the last generated token, 0 before the first one; kept across preemption so the resume gap counts as latency
+    int64_t t_token_last_us = 0;
+
     const server_tokens & input_tokens() const {
         return resuming ? resume_tokens : task->tokens;
     }
@@ -427,6 +430,8 @@ struct server_slot {
         resuming  = false;
         preempted = false;
         resume_tokens.clear();
+
+        t_token_last_us = 0;
     }
 
     void init_sampler() const {
@@ -760,17 +765,39 @@ struct server_slot {
     }
 };
 
+// time spent on media, for metrics
+// the contexts are synchronized around each part, so the times are compute times and not submit times
+struct mtmd_chunk_timing {
+    int64_t  t_encode_us       = 0; // media encoder (e.g. vision tower)
+    uint64_t n_encoded_chunks  = 0;
+    uint64_t n_encoded_tokens  = 0;
+    int64_t  t_decode_us       = 0; // media embeddings through the model, including the speculative draft context
+};
+
+static void synchronize_slot_contexts(const server_slot & slot) {
+    llama_synchronize(slot.ctx_tgt);
+    if (slot.ctx_dft) {
+        llama_synchronize(slot.ctx_dft);
+    }
+}
+
 // returns 0 on success
 // caller need to update prompt.tokens after a successful call to keep track of the processing progress
 // note: this is not a member of server_slot because we want to run it inside yield_to_queue
 //       slot is passed as const to avoid accidental modification of the slot state
 //       some pointers are allowed to be used, they are not used by to_json()
-static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, size_t & n_tokens_out) {
+//       timing is optional, when set the contexts are synchronized to measure compute time
+static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, size_t & n_tokens_out, mtmd_chunk_timing * timing) {
     GGML_ASSERT(slot.mctx);
     const auto & mctx = slot.mctx;
     const auto & input_tokens = slot.input_tokens();
     const auto & chunk = input_tokens.find_chunk(idx);
     int32_t res = 0;
+
+    if (timing) {
+        // wait for earlier async work, so it is not counted as media time
+        synchronize_slot_contexts(slot);
+    }
 
     auto try_decode = [&]() -> int32_t {
         if (mbatch) {
@@ -785,6 +812,8 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
                     return 0;
                 };
 
+                const int64_t t_decode_start_us = ggml_time_us();
+
                 llama_pos new_n_past; // unused for now
                 res = mtmd_helper_decode_image_chunk(
                     mctx,
@@ -798,6 +827,10 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
                     cb,
                     cb_data
                 );
+                if (timing) {
+                    synchronize_slot_contexts(slot);
+                    timing->t_decode_us += ggml_time_us() - t_decode_start_us;
+                }
                 if (res != 0) {
                     SLT_ERR(slot, "failed to decode mtmd chunk, idx = %zu, res = %d\n", idx, res);
                     return -1;
@@ -827,6 +860,7 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
 
     // try batching as much as possible
     int n_added = 1;
+    size_t n_added_tokens = mtmd_input_chunk_get_n_tokens(chunk.get());
     size_t idx_cur = idx;
     while (res == 0) {
         auto [next_chunk, next_idx] = input_tokens.find_next_media_chunk(idx_cur);
@@ -834,7 +868,10 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
             break;
         }
         res = mtmd_batch_add_chunk(mbatch.get(), next_chunk->get());
-        n_added += (res == 0 ? 1 : 0);
+        if (res == 0) {
+            n_added++;
+            n_added_tokens += mtmd_input_chunk_get_n_tokens(next_chunk->get());
+        }
         idx_cur = next_idx;
         SLT_DBG(slot, "try adding media chunk idx = %zu to batch, res = %d\n", next_idx, res);
         // if res != 0, batch is full or chunk is not compatible -> this loop breaks
@@ -843,10 +880,18 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
     // TODO @ngxson : move this log line to debug when it become more stable
     SLT_TRC(slot, "encoding mtmd batch from idx = %zu, n_chunks = %d\n", idx, n_added);
 
+    const int64_t t_encode_start_us = ggml_time_us();
+
     res = mtmd_batch_encode(mbatch.get());
     if (res != 0) {
         SLT_ERR(slot, "failed to encode mtmd batch for chunk idx = %zu, res = %d\n", idx, res);
         return -1;
+    }
+
+    if (timing) {
+        timing->t_encode_us      += ggml_time_us() - t_encode_start_us;
+        timing->n_encoded_chunks += n_added;
+        timing->n_encoded_tokens += n_added_tokens;
     }
 
     return try_decode();
@@ -1865,6 +1910,8 @@ private:
         }
         // a slot preempted while processing its prompt (or its resume tokens) simply starts that over
 
+        metrics.n_preemptions++;
+
         SLT_WRN(slot, "preempted to free %d KV cells, n_gen = %d, resume from %d tokens\n",
                 slot.prompt.n_tokens(), (int) slot.stats.n_gen, slot.n_input_tokens());
 
@@ -1945,6 +1992,9 @@ private:
             }
 
             SLT_INF(*slot, "resuming, recompute %d tokens\n", slot->n_input_tokens());
+
+            metrics.n_resumes++;
+            metrics.n_recomputed_tokens += slot->n_input_tokens();
 
             slot->state = SLOT_STATE_STARTED;
 
@@ -2150,6 +2200,11 @@ private:
         slot.task = std::make_unique<const server_task>(std::move(task));
 
         slot.n_launch = n_launch_next++;
+
+        // child tasks are never posted on their own, so they have no arrival time
+        if (slot.task->t_arrival_us > 0) {
+            metrics.request_queue_time.observe((ggml_time_us() - slot.task->t_arrival_us)/1e6);
+        }
 
         slot.state = slot.task->is_child()
             ? SLOT_STATE_WAIT_OTHER // wait for the parent to process prompt
@@ -2418,7 +2473,26 @@ private:
         queue_results.send(std::move(res));
     }
 
+    // latency metrics for the tokens one decode step of the slot generated
+    void metrics_on_tokens(server_slot & slot, size_t n_tokens) {
+        const int64_t t_now_us = ggml_time_us();
+
+        if (slot.t_token_last_us == 0) {
+            if (slot.task->t_arrival_us > 0) {
+                metrics.time_to_first_token.observe((t_now_us - slot.task->t_arrival_us)/1e6);
+            }
+        } else if (n_tokens > 0) {
+            metrics.inter_token_latency.observe((t_now_us - slot.t_token_last_us)/1e6/n_tokens, n_tokens);
+        }
+
+        slot.t_token_last_us = t_now_us;
+    }
+
     void send_final_response(server_slot & slot) {
+        if (slot.task->t_arrival_us > 0) {
+            metrics.e2e_request_latency.observe((ggml_time_us() - slot.task->t_arrival_us)/1e6);
+        }
+
         auto res = std::make_unique<server_task_result_cmpl_final>();
 
         res->id      = slot.task->id;
@@ -2884,19 +2958,34 @@ private:
             case SERVER_TASK_TYPE_METRICS:
                 {
                     int n_processing_slots = 0;
+                    int n_preempted_slots  = 0;
+
+                    uint64_t n_idle_cached_tokens = 0;
 
                     for (server_slot & slot : slots) {
                         if (slot.is_processing()) {
                             n_processing_slots++;
+                            if (slot.state == SLOT_STATE_PREEMPTED) {
+                                n_preempted_slots++;
+                            }
+                        } else {
+                            n_idle_cached_tokens += slot.prompt.n_tokens();
                         }
                     }
                     SRV_DBG("n_processing_slots = %d\n", n_processing_slots);
 
+                    const auto perf_tgt = llama_perf_context(ctx_tgt);
+
                     auto res = std::make_unique<server_task_result_metrics>();
-                    res->id                  = task.id;
-                    res->n_processing_slots  = n_processing_slots;
-                    res->n_tasks_deferred    = queue_tasks.queue_tasks_deferred_size();
-                    res->metrics             = metrics;
+                    res->id                   = task.id;
+                    res->n_processing_slots   = n_processing_slots;
+                    res->n_preempted_slots    = n_preempted_slots;
+                    res->n_tasks_deferred     = queue_tasks.queue_tasks_deferred_size();
+                    res->n_idle_cached_tokens = n_idle_cached_tokens;
+                    res->mem_usage            = llama_memory_get_usage(llama_get_memory(ctx_tgt));
+                    res->n_graph_reused       = perf_tgt.n_reused;
+                    res->n_graph_computes     = perf_tgt.n_graph_computes;
+                    res->metrics              = metrics;
 
                     if (task.metrics_reset_bucket) {
                         metrics.reset_bucket();
@@ -3893,8 +3982,9 @@ private:
                         // encode on the worker thread, so we can still handle metrics tasks
                         size_t n_tokens_out = 0;
                         int32_t res = 0;
+                        mtmd_chunk_timing timing;
                         queue_tasks.yield_to_queue([&]() {
-                            res = process_mtmd_chunk(slot, slot.mbatch, cur_token_idx, n_tokens_out);
+                            res = process_mtmd_chunk(slot, slot.mbatch, cur_token_idx, n_tokens_out, params_base.endpoint_metrics ? &timing : nullptr);
                         });
 
                         if (res != 0) {
@@ -3903,6 +3993,12 @@ private:
                             slot.release();
                             return; // the slot is done, skip it entirely
                         }
+
+                        metrics.t_mtmd_encode_us       += timing.t_encode_us;
+                        metrics.n_mtmd_encoded_chunks  += timing.n_encoded_chunks;
+                        metrics.n_mtmd_encoded_tokens  += timing.n_encoded_tokens;
+                        metrics.t_mtmd_decode_us       += timing.t_decode_us;
+                        metrics.n_mtmd_decoded_tokens  += n_tokens_out;
 
                         metrics_queue_prompt(n_tokens_out);
                         slot.stats.n_prompt_processed += n_tokens_out;
@@ -4295,6 +4391,8 @@ private:
 
             slot.stats.update_gen_last();
 
+            metrics_on_tokens(slot, 1);
+
             completion_token_output result;
             result.tok          = id;
             result.text_to_send = common_token_to_piece(slot.ctx_tgt, result.tok, accept_special_token(slot, result.tok));
@@ -4418,6 +4516,8 @@ private:
             SLT_DBG(slot, "add accepted tokens: sampled=%d, ids.size=%zu, n_draft=%zu\n", slot.sampled, ids.size(), n_draft);
 
             slot.mem.seq_rm(slot.id, slot.prompt.tokens.pos_next(), -1);
+
+            metrics_on_tokens(slot, ids.size());
 
             for (size_t i = 0; i < ids.size(); ++i) {
                 completion_token_output result;

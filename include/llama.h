@@ -806,6 +806,17 @@ extern "C" {
     // Check if the memory supports shifting
     LLAMA_API bool llama_memory_can_shift(llama_memory_t mem);
 
+    struct llama_memory_usage {
+        uint32_t kv_size; // KV cells over all streams (0 = no KV cache); for iSWA, the full-attention cache
+        uint32_t kv_used; // KV cells that hold at least one sequence
+        uint32_t kv_span; // highest used KV cell + 1, largest over streams: the range attention reads
+        uint32_t rs_size; // recurrent-state cells (0 = no recurrent state)
+        uint32_t rs_used; // recurrent-state cells owned by a sequence
+    };
+
+    // Returns the cell usage of the memory
+    LLAMA_API struct llama_memory_usage llama_memory_get_usage(llama_memory_t mem);
+
     //
     // State / sessions
     //

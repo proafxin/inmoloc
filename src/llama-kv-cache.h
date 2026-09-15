@@ -158,6 +158,9 @@ public:
     uint32_t get_size()     const;
     uint32_t get_n_stream() const;
 
+    // used cells summed over streams, and the largest used range (highest used cell + 1) of any stream
+    void get_usage(uint32_t & n_used, uint32_t & n_span) const;
+
     bool get_has_shift() const;
 
     ggml_type type_k() const;

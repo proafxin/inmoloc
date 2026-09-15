@@ -1206,6 +1206,16 @@ uint32_t llama_kv_cache::get_n_stream() const {
     return n_stream;
 }
 
+void llama_kv_cache::get_usage(uint32_t & n_used, uint32_t & n_span) const {
+    n_used = 0;
+    n_span = 0;
+
+    for (uint32_t s = 0; s < n_stream; ++s) {
+        n_used += v_cells[s].get_used();
+        n_span  = std::max(n_span, v_cells[s].used_max_p1());
+    }
+}
+
 bool llama_kv_cache::get_has_shift() const {
     bool result = false;
 
