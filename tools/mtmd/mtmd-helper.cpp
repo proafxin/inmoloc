@@ -126,6 +126,29 @@ int32_t mtmd_helper_decode_image_chunk(
         llama_pos * new_n_past,
         mtmd_helper_post_decode_callback callback,
         void * user_data) {
+    const int32_t ret = mtmd_helper_decode_image_chunk_range(ctx, lctx, chunk, encoded_embd, n_past, seq_id,
+            0, (int32_t) mtmd_input_chunk_get_n_tokens(chunk), n_batch, callback, user_data);
+    if (ret != 0) {
+        return ret;
+    }
+
+    *new_n_past = n_past + mtmd_input_chunk_get_n_pos(chunk);
+
+    return 0;
+}
+
+int32_t mtmd_helper_decode_image_chunk_range(
+        mtmd_context * ctx,
+        struct llama_context * lctx,
+        const mtmd_input_chunk * chunk,
+        float * encoded_embd,
+        llama_pos n_past,
+        llama_seq_id seq_id,
+        int32_t i_start,
+        int32_t n_range,
+        int32_t n_batch,
+        mtmd_helper_post_decode_callback callback,
+        void * user_data) {
     GGML_ASSERT(n_batch > 0);
     auto chunk_type = mtmd_input_chunk_get_type(chunk);
     const char * name = chunk_type == MTMD_INPUT_CHUNK_TYPE_IMAGE ? "image" : "audio";
@@ -139,8 +162,19 @@ int32_t mtmd_helper_decode_image_chunk(
     int n_pos_per_embd = mtmd_decode_use_mrope(ctx) ? 4 : 1;
 
     int32_t n_tokens = mtmd_input_chunk_get_n_tokens(chunk);
+    if (i_start < 0 || n_range <= 0 || i_start + n_range > n_tokens) {
+        LOG_ERR("failed to decode chunk: invalid range [%d, %d) for %d tokens\n", i_start, i_start + n_range, n_tokens);
+        return -1;
+    }
+
+    const bool use_non_causal = mtmd_decode_use_non_causal(ctx, chunk);
+    if (use_non_causal && n_range != n_tokens) {
+        LOG_ERR("failed to decode chunk: a chunk with non-causal attention must be decoded as a whole\n");
+        return -1;
+    }
+
     int32_t i_batch = 0;
-    int32_t n_img_batches = (n_tokens + n_batch - 1) / n_batch;
+    int32_t n_img_batches = (n_range + n_batch - 1) / n_batch;
     decode_embd_batch batch_embd(encoded_embd, n_tokens, n_pos_per_embd, n_mmproj_embd);
 
     if (mtmd_decode_use_mrope(ctx)) {
@@ -163,12 +197,11 @@ int32_t mtmd_helper_decode_image_chunk(
         batch_embd.set_position_normal(n_past, seq_id);
     }
 
-    const bool use_non_causal = mtmd_decode_use_non_causal(ctx, chunk);
     const scope_non_causal non_causal(lctx, use_non_causal);
 
     while (i_batch < n_img_batches) { // split into batches
-        int pos_offset = i_batch*n_batch;
-        int n_tokens_batch = std::min(n_batch, n_tokens - pos_offset);
+        int pos_offset = i_start + i_batch*n_batch;
+        int n_tokens_batch = std::min(n_batch, i_start + n_range - pos_offset);
         llama_batch batch_embd_view = batch_embd.get_view(pos_offset, n_tokens_batch);
 
         LOG_INF("decoding %s batch %d/%d, n_tokens_batch = %d\n", name, i_batch+1, n_img_batches, n_tokens_batch);
@@ -192,9 +225,6 @@ int32_t mtmd_helper_decode_image_chunk(
 
         i_batch++;
     }
-
-    n_past += mtmd_input_chunk_get_n_pos(chunk);
-    *new_n_past = n_past;
 
     return 0;
 }

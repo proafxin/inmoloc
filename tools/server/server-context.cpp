@@ -310,6 +310,20 @@ struct server_slot {
     // time of the last generated token, 0 before the first one; kept across preemption so the resume gap counts as latency
     int64_t t_token_last_us = 0;
 
+    // tokens of the current media chunk already decoded into memory
+    // the chunk is added to prompt.tokens only when it is complete, so these tokens are in memory but not in the prompt
+    int32_t media_n_decoded = 0;
+
+    // tokens to decode for the next piece of a media chunk
+    // a chunk with causal attention is decoded one ubatch per iteration, so the other slots keep generating in between
+    // a chunk with non-causal attention, or a slot that cannot split its input, decodes the whole chunk at once
+    int32_t media_n_next(const mtmd_input_chunk * chunk, int32_t n_ubatch) const {
+        const int32_t n_left = (int32_t) mtmd_input_chunk_get_n_tokens(chunk) - media_n_decoded;
+        const bool    split  = can_split() && !mtmd_decode_use_non_causal(mctx, chunk);
+
+        return split ? std::min(n_ubatch, n_left) : n_left;
+    }
+
     const server_tokens & input_tokens() const {
         return resuming ? resume_tokens : task->tokens;
     }
@@ -359,6 +373,8 @@ struct server_slot {
         mem.seq_rm(id, -1, -1);
 
         prompt.clear();
+
+        media_n_decoded = 0;
     }
 
     std::vector<common_adapter_lora_info> lora;
@@ -432,6 +448,7 @@ struct server_slot {
         resume_tokens.clear();
 
         t_token_last_us = 0;
+        media_n_decoded = 0;
     }
 
     void init_sampler() const {
@@ -580,7 +597,8 @@ struct server_slot {
             state = SLOT_STATE_IDLE;
 
             // do not keep context of the child slots - the parent's context is enough
-            if (task->is_child()) {
+            // a partly decoded media chunk is in memory but not in the prompt, so that prompt cannot be reused either
+            if (task->is_child() || media_n_decoded > 0) {
                 prompt_clear();
             }
 
@@ -786,8 +804,9 @@ static void synchronize_slot_contexts(const server_slot & slot) {
 // note: this is not a member of server_slot because we want to run it inside yield_to_queue
 //       slot is passed as const to avoid accidental modification of the slot state
 //       some pointers are allowed to be used, they are not used by to_json()
+//       it decodes the chunk tokens [i_start, i_start + n_range), n_range tokens are reported in n_tokens_out
 //       timing is optional, when set the contexts are synchronized to measure compute time
-static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, size_t & n_tokens_out, mtmd_chunk_timing * timing) {
+static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, int32_t i_start, int32_t n_range, size_t & n_tokens_out, mtmd_chunk_timing * timing) {
     GGML_ASSERT(slot.mctx);
     const auto & mctx = slot.mctx;
     const auto & input_tokens = slot.input_tokens();
@@ -814,16 +833,17 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
 
                 const int64_t t_decode_start_us = ggml_time_us();
 
-                llama_pos new_n_past; // unused for now
-                res = mtmd_helper_decode_image_chunk(
+                // the chunk is not in prompt.tokens until it is complete, so pos_next() is still the chunk start
+                res = mtmd_helper_decode_image_chunk_range(
                     mctx,
                     slot.ctx_tgt,
                     chunk.get(),
                     embd,
                     slot.prompt.tokens.pos_next(),
                     slot.id,
+                    i_start,
+                    n_range,
                     llama_n_batch(slot.ctx_tgt),
-                    &new_n_past,
                     cb,
                     cb_data
                 );
@@ -832,10 +852,10 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
                     timing->t_decode_us += ggml_time_us() - t_decode_start_us;
                 }
                 if (res != 0) {
-                    SLT_ERR(slot, "failed to decode mtmd chunk, idx = %zu, res = %d\n", idx, res);
+                    SLT_ERR(slot, "failed to decode mtmd chunk, idx = %zu, range = [%d, %d), res = %d\n", idx, i_start, i_start + n_range, res);
                     return -1;
                 }
-                n_tokens_out = mtmd_input_chunk_get_n_tokens(chunk.get());
+                n_tokens_out = n_range;
                 return 0; // success
             }
         }
@@ -1817,7 +1837,7 @@ private:
     int32_t kv_cells_held() const {
         int32_t n = 0;
         for (const auto & slot : slots) {
-            n += slot.prompt.n_tokens();
+            n += slot.prompt.n_tokens() + slot.media_n_decoded;
         }
         return n;
     }
@@ -1856,11 +1876,11 @@ private:
                 }
             case SLOT_STATE_PROCESSING_PROMPT:
                 {
-                    // the next input chunk: a whole media chunk, or at least one text token
+                    // the next input: a media piece, or at least one text token
                     const int32_t idx = slot.prompt.n_tokens();
                     const auto & input_tokens = slot.input_tokens();
                     if (idx < (int32_t) input_tokens.size() && input_tokens[idx] == LLAMA_TOKEN_NULL) {
-                        return (int32_t) mtmd_input_chunk_get_n_tokens(input_tokens.find_chunk(idx).get());
+                        return slot.media_n_next(input_tokens.find_chunk(idx).get(), llama_n_ubatch(ctx_tgt));
                     }
                     return 1;
                 }
@@ -3586,6 +3606,9 @@ private:
         if (params_base.cont_batching || batch.size() == 0) {
             bool add_ok = true; // false means the batch is full, skip remaining slots
 
+            // true once a piece of a split media chunk was decoded in this iteration, see server_slot::media_n_next()
+            bool media_piece_decoded = false;
+
             iterate(slots, [&](server_slot & slot) {
                 if (!add_ok || batch.size() >= n_batch) {
                     return; // batch is full, skip remaining slots
@@ -3920,9 +3943,12 @@ private:
                     // truncate any tokens that are beyond n_past for this slot
                     const llama_pos p0 = slot.prompt.tokens.pos_next();
 
-                    SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
+                    // a partly decoded media chunk sits beyond p0 in memory, it must be kept
+                    if (slot.media_n_decoded == 0) {
+                        SLT_TRC(slot, "cached n_tokens = %d, memory_seq_rm [%d, end)\n", slot.prompt.n_tokens(), p0);
 
-                    slot.mem.seq_rm(slot.id, p0, -1);
+                        slot.mem.seq_rm(slot.id, p0, -1);
+                    }
 
                     // If using an alora, there may be uncached tokens that come
                     // before the invocation sequence. When this happens, the
@@ -3965,13 +3991,22 @@ private:
                             break;
                         }
 
-                        // the chunk is decoded as a whole, wait until the KV cache has room for all of it
+                        const auto &  chunk   = input_tokens.find_chunk(cur_token_idx);
+                        const int32_t n_chunk = (int32_t) mtmd_input_chunk_get_n_tokens(chunk.get());
+                        const int32_t n_piece = slot.media_n_next(chunk.get(), n_ubatch);
+
+                        // a piece of a split chunk: at most one per iteration over all slots, to bound the wait of the generating slots
+                        if (n_piece < n_chunk && media_piece_decoded) {
+                            has_mtmd = true;
+                            break;
+                        }
+
+                        // wait until the KV cache has room for the piece
                         if (kv_budget_prompt >= 0) {
-                            const int32_t n_chunk = (int32_t) mtmd_input_chunk_get_n_tokens(input_tokens.find_chunk(cur_token_idx).get());
-                            if (n_chunk > kv_budget_prompt) {
+                            if (n_piece > kv_budget_prompt) {
                                 break;
                             }
-                            kv_budget_prompt -= n_chunk;
+                            kv_budget_prompt -= n_piece;
                         }
 
                         // process the mtmd chunk
@@ -3984,7 +4019,7 @@ private:
                         int32_t res = 0;
                         mtmd_chunk_timing timing;
                         queue_tasks.yield_to_queue([&]() {
-                            res = process_mtmd_chunk(slot, slot.mbatch, cur_token_idx, n_tokens_out, params_base.endpoint_metrics ? &timing : nullptr);
+                            res = process_mtmd_chunk(slot, slot.mbatch, cur_token_idx, slot.media_n_decoded, n_piece, n_tokens_out, params_base.endpoint_metrics ? &timing : nullptr);
                         });
 
                         if (res != 0) {
@@ -4004,14 +4039,24 @@ private:
                         slot.stats.n_prompt_processed += n_tokens_out;
                         slot.stats.update_prompt_last();
 
-                        // add the mtmd chunk to cache
-                        {
-                            const auto & chunk = input_tokens.find_chunk(cur_token_idx);
-                            // the chunk is already in the KV cache at this point, so we don't need to keep its data around
-                            slot.prompt.tokens.push_back_placeholder(chunk.get());
+                        has_mtmd = true;
+
+                        // decoding media is progress even when the text batch stays empty
+                        n_empty_consecutive = 0;
+
+                        slot.media_n_decoded += (int32_t) n_tokens_out;
+
+                        if (slot.media_n_decoded < n_chunk) {
+                            // continue this chunk in a later iteration
+                            media_piece_decoded = true;
+                            break;
                         }
 
-                        has_mtmd = true;
+                        slot.media_n_decoded = 0;
+
+                        // add the mtmd chunk to cache
+                        // the chunk is already in the KV cache at this point, so we don't need to keep its data around
+                        slot.prompt.tokens.push_back_placeholder(chunk.get());
                     }
 
                     const auto & spans = slot.task->params.message_spans;

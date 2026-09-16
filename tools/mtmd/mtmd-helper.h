@@ -133,6 +133,21 @@ MTMD_API int32_t mtmd_helper_decode_image_chunk(mtmd_context * ctx,
                                                 mtmd_helper_post_decode_callback callback,
                                                 void * user_data);
 
+// same as mtmd_helper_decode_image_chunk, but decodes only the tokens [i_start, i_start + n_range) of the chunk
+// n_past is the position of the chunk start, the ranges must be decoded in order to fill the chunk
+// a chunk that needs non-causal attention (mtmd_decode_use_non_causal) must be decoded as a whole
+MTMD_API int32_t mtmd_helper_decode_image_chunk_range(mtmd_context * ctx,
+                                                      struct llama_context * lctx,
+                                                      const mtmd_input_chunk * chunk,
+                                                      float * encoded_embd,
+                                                      llama_pos n_past,
+                                                      llama_seq_id seq_id,
+                                                      int32_t i_start,
+                                                      int32_t n_range,
+                                                      int32_t n_batch,
+                                                      mtmd_helper_post_decode_callback callback,
+                                                      void * user_data);
+
 //
 // video input helpers (requires ffmpeg/ffprobe installed on the system)
 // the notion of video only exists at the helper level, it is not visible to the core mtmd library
