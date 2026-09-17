@@ -1624,13 +1624,21 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
             }
         }
 
+        const int64_t t_sync_us = ggml_time_us();
+
         // the re-allocation may cause the split inputs to be moved to a different address
         // synchronize without ggml_backend_sched_synchronize to avoid changing cur_copy
         for (int i = 0; i < sched->n_backends; i++) {
             ggml_backend_synchronize(sched->backends[i]);
         }
 
+        const int64_t t_reserve_us = ggml_time_us();
+
         ggml_gallocr_reserve_n(sched->galloc, &sched->graph, sched->node_backend_ids, sched->leaf_backend_ids);
+
+        // the synchronize waits for work already submitted, only the reserve is added by the reallocation
+        GGML_LOG_DEBUG("%s: graph reallocation: synchronize = %.2f ms, reserve = %.2f ms (nodes = %d, leafs = %d)\n", __func__,
+                (t_reserve_us - t_sync_us)/1000.0, (ggml_time_us() - t_reserve_us)/1000.0, sched->graph.n_nodes, sched->graph.n_leafs);
         if (!ggml_gallocr_alloc_graph(sched->galloc, &sched->graph)) {
             GGML_LOG_ERROR("%s: failed to allocate graph\n", __func__);
             return false;

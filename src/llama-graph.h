@@ -33,6 +33,24 @@ class llama_memory_recurrent_context;
 class llama_memory_hybrid_context;
 class llama_memory_hybrid_iswa_context;
 
+// a run of consecutive ubatch tokens [t0, t1) and the KV cells their attention reads
+//   gather == false: the whole KV view [0, n_kv) with the regular mask
+//   gather == true : only the cells that carry seq_id, copied into a compact tensor of n_idx cells (padded)
+// attention reads a mask entry for every cell it is given, so a sequence scattered over a large pool is cheaper
+// to attend after copying its own cells, as long as that copy is small next to the view it replaces
+struct llama_kv_attn_run {
+    uint32_t     t0;
+    uint32_t     t1;
+    bool         gather;
+    llama_seq_id seq_id;
+    uint32_t     n_idx;
+
+    // the graph depends on the shape of a run only, seq_id just selects which cells fill its inputs
+    bool same_shape(const llama_kv_attn_run & other) const {
+        return t0 == other.t0 && t1 == other.t1 && gather == other.gather && n_idx == other.n_idx;
+    }
+};
+
 // certain models (typically multi-modal) can produce different types of graphs
 enum llm_graph_type {
     LLM_GRAPH_TYPE_DEFAULT,
@@ -348,6 +366,12 @@ public:
     // note: assumes v_rot^2 == I
     ggml_tensor * self_k_rot = nullptr;
     ggml_tensor * self_v_rot = nullptr;
+
+    // attention runs, empty when the whole ubatch attends the full view, see llama_kv_attn_run
+    // per run: the cell indices (I32 [n_idx]) and the mask (F16 [n_idx, t1 - t0, 1, 1]) of a gather run, nullptr otherwise
+    std::vector<llama_kv_attn_run> attn_runs;
+    std::vector<ggml_tensor *>     attn_run_idxs;
+    std::vector<ggml_tensor *>     attn_run_mask;
 
     // note: these have to be copies because in order to be able to reuse a graph, its inputs
     //       need to carry these parameters with them. otherwise, they can point to freed

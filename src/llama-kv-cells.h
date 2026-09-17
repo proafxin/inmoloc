@@ -3,6 +3,7 @@
 #include "llama.h"
 #include "llama-cparams.h"
 
+#include <algorithm>
 #include <bitset>
 #include <cassert>
 #include <cstring>
@@ -384,6 +385,45 @@ public:
         }
 
         return seq_pos[seq_id].rbegin()->first;
+    }
+
+    // number of cells that carry sequence seq_id
+    uint32_t seq_n_cells(llama_seq_id seq_id) const {
+        assert(seq_id >= 0);
+        assert(seq_id < LLAMA_MAX_SEQ);
+
+        return (uint32_t) seq_pos[seq_id].size();
+    }
+
+    // the range of cell indices [lo, hi) that carry sequence seq_id, {0, 0} if the sequence is not present
+    std::pair<uint32_t, uint32_t> seq_cell_range(llama_seq_id seq_id) const {
+        assert(seq_id >= 0);
+        assert(seq_id < LLAMA_MAX_SEQ);
+
+        uint32_t lo = UINT32_MAX;
+        uint32_t hi = 0;
+
+        for (const auto & [p, i] : seq_pos[seq_id]) {
+            lo = std::min(lo, i);
+            hi = std::max(hi, i + 1);
+        }
+
+        return lo < hi ? std::make_pair(lo, hi) : std::make_pair(0u, 0u);
+    }
+
+    // the indices of the cells that carry sequence seq_id, in ascending order
+    void seq_cells(llama_seq_id seq_id, std::vector<uint32_t> & res) const {
+        assert(seq_id >= 0);
+        assert(seq_id < LLAMA_MAX_SEQ);
+
+        res.clear();
+        res.reserve(seq_pos[seq_id].size());
+
+        for (const auto & [p, i] : seq_pos[seq_id]) {
+            res.push_back(i);
+        }
+
+        std::sort(res.begin(), res.end());
     }
 
     // note: call only if the cell is not empty

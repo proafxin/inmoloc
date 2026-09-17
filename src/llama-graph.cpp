@@ -45,6 +45,39 @@ static ggml_tensor * build_attn_inp_kq_mask(
     return res;
 }
 
+// gathering copies the K/V cells of a sequence to attend only those, see llama_kv_attn_run
+// the gathered mask is F16 and the per-token mask rows come from the full mask, which needs flash attention,
+// a single stream, causal attention and no alibi bias
+static std::vector<llama_kv_attn_run> build_attn_runs(
+        const llama_kv_cache_context * mctx,
+        const llama_ubatch & ubatch,
+        const llama_hparams & hparams,
+        const llama_cparams & cparams) {
+    if (!cparams.flash_attn || !cparams.kv_unified || !cparams.causal_attn || hparams.use_alibi) {
+        return {};
+    }
+
+    return mctx->get_attn_runs(ubatch);
+}
+
+// a graph can be reused when the new runs have the same shapes; the reused input then takes the new runs,
+// since their sequences decide which cells set_input() copies
+static bool reuse_attn_runs(std::vector<llama_kv_attn_run> & cur, std::vector<llama_kv_attn_run> && next) {
+    if (cur.size() != next.size()) {
+        return false;
+    }
+
+    for (size_t r = 0; r < cur.size(); ++r) {
+        if (!cur[r].same_shape(next[r])) {
+            return false;
+        }
+    }
+
+    cur = std::move(next);
+
+    return true;
+}
+
 static bool can_reuse_kq_mask(
         ggml_tensor * kq_mask,
         const llama_kv_cache_context * mctx,
@@ -472,9 +505,25 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
     mctx->set_input_v_idxs(self_v_idxs, ubatch);
 
     // the mask is left unallocated when the graph only stores K/V without attending
-    // (e.g. DFlash's KV-injection pass)
+    // (e.g. DFlash's KV-injection pass), or when every attention run is gathered
+    const ggml_fp16_t * full_mask = nullptr;
+
     if (self_kq_mask && self_kq_mask->buffer) {
         mctx->set_input_kq_mask(self_kq_mask, ubatch, cparams.causal_attn);
+
+        if (self_kq_mask->type == GGML_TYPE_F16) {
+            full_mask = (const ggml_fp16_t *) self_kq_mask->data;
+        }
+    }
+
+    // the masks of the gather runs are taken from the full mask
+    for (size_t r = 0; r < attn_runs.size(); ++r) {
+        if (attn_runs[r].gather && attn_run_idxs[r]->buffer) {
+            if (!full_mask) {
+                full_mask = mctx->fill_kq_mask_scratch(ubatch, cparams.causal_attn);
+            }
+            mctx->set_input_attn_run(attn_run_idxs[r], attn_run_mask[r], full_mask, mctx->get_n_kv(), ubatch, attn_runs[r]);
+        }
     }
 
     if (self_k_rot && self_k_rot->buffer) {
@@ -497,6 +546,9 @@ bool llm_graph_input_attn_kv::can_reuse(const llm_graph_params & params) {
   //res &= self_v_idxs->ne[0] == params.ubatch.n_tokens; // TODO: need to move this to the unified cache and check there
 
     res &= can_reuse_kq_mask(self_kq_mask, mctx, params.ubatch, params.cparams);
+
+    // the attention runs shape the graph
+    res &= reuse_attn_runs(attn_runs, build_attn_runs(mctx, params.ubatch, params.hparams, params.cparams));
 
     return res;
 }
@@ -1090,7 +1142,26 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
     mctx->get_attn()->set_input_k_idxs(inp_attn->self_k_idxs, ubatch);
     mctx->get_attn()->set_input_v_idxs(inp_attn->self_v_idxs, ubatch);
 
-    mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
+    // the full mask is left unallocated when every attention run is gathered
+    const ggml_fp16_t * full_mask = nullptr;
+
+    if (inp_attn->self_kq_mask->buffer) {
+        mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
+
+        if (inp_attn->self_kq_mask->type == GGML_TYPE_F16) {
+            full_mask = (const ggml_fp16_t *) inp_attn->self_kq_mask->data;
+        }
+    }
+
+    // the masks of the gather runs are taken from the full mask
+    for (size_t r = 0; r < inp_attn->attn_runs.size(); ++r) {
+        if (inp_attn->attn_runs[r].gather && inp_attn->attn_run_idxs[r]->buffer) {
+            if (!full_mask) {
+                full_mask = mctx->get_attn()->fill_kq_mask_scratch(ubatch, cparams.causal_attn);
+            }
+            mctx->get_attn()->set_input_attn_run(inp_attn->attn_run_idxs[r], inp_attn->attn_run_mask[r], full_mask, mctx->get_attn()->get_n_kv(), ubatch, inp_attn->attn_runs[r]);
+        }
+    }
 
     if (inp_attn->self_k_rot) {
         mctx->get_attn()->set_input_k_rot(inp_attn->self_k_rot);
@@ -1124,6 +1195,9 @@ bool llm_graph_input_mem_hybrid::can_reuse(const llm_graph_params & params) {
   //res &= inp_attn->self_v_idxs->ne[0] == params.ubatch.n_tokens; // TODO: need to move this to the unified cache and check there
 
     res &= can_reuse_kq_mask(inp_attn->self_kq_mask, mctx->get_attn(), params.ubatch, params.cparams);
+
+    // the attention runs shape the graph
+    res &= reuse_attn_runs(inp_attn->attn_runs, build_attn_runs(mctx->get_attn(), params.ubatch, params.hparams, params.cparams));
 
     res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
 
@@ -2822,6 +2896,26 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
         inp->self_kq_mask_cnv = inp->self_kq_mask;
     }
 
+    inp->attn_runs = build_attn_runs(mctx_cur, ubatch, hparams, cparams);
+
+    for (const auto & run : inp->attn_runs) {
+        ggml_tensor * idxs = nullptr;
+        ggml_tensor * mask = nullptr;
+
+        if (run.gather) {
+            idxs = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, run.n_idx);
+            ggml_set_input(idxs);
+            ggml_set_name(idxs, "attn_inp_run_idxs");
+
+            mask = ggml_new_tensor_4d(ctx0, GGML_TYPE_F16, run.n_idx, run.t1 - run.t0, 1, 1);
+            ggml_set_input(mask);
+            ggml_set_name(mask, "attn_inp_run_mask");
+        }
+
+        inp->attn_run_idxs.push_back(idxs);
+        inp->attn_run_mask.push_back(mask);
+    }
+
     inp->self_k_rot = mctx_cur->build_input_k_rot(ctx0);
     inp->self_v_rot = mctx_cur->build_input_v_rot(ctx0);
 
@@ -2880,11 +2974,54 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * kq_mask = inp->get_kq_mask();
 
-    ggml_tensor * q = q_cur;
-    ggml_tensor * k = mctx_cur->get_k(ctx0, il);
-    ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+    ggml_tensor * cur = nullptr;
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
+    if (inp->attn_runs.empty() || kq_b != nullptr) {
+        ggml_tensor * q = q_cur;
+        ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+        ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+
+        cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
+    } else {
+        // attend each run separately and join the outputs in token order, see llama_kv_attn_run
+        GGML_ASSERT(q_cur->ne[3] == 1);
+
+        ggml_tensor * k_full = nullptr;
+        ggml_tensor * v_full = nullptr;
+
+        for (size_t r = 0; r < inp->attn_runs.size(); ++r) {
+            const auto & run = inp->attn_runs[r];
+
+            const int64_t n_run = run.t1 - run.t0;
+
+            ggml_tensor * q = ggml_view_3d(ctx0, q_cur, q_cur->ne[0], q_cur->ne[1], n_run,
+                    q_cur->nb[1], q_cur->nb[2], run.t0*q_cur->nb[2]);
+
+            ggml_tensor * k    = nullptr;
+            ggml_tensor * v    = nullptr;
+            ggml_tensor * mask = nullptr;
+
+            if (run.gather) {
+                k    = mctx_cur->get_k_rows(ctx0, il, inp->attn_run_idxs[r]);
+                v    = mctx_cur->get_v_rows(ctx0, il, inp->attn_run_idxs[r]);
+                mask = inp->attn_run_mask[r];
+            } else {
+                if (!k_full) {
+                    k_full = mctx_cur->get_k(ctx0, il);
+                    v_full = mctx_cur->get_v(ctx0, il);
+                }
+
+                k    = k_full;
+                v    = v_full;
+                mask = ggml_view_2d(ctx0, kq_mask, kq_mask->ne[0], n_run, kq_mask->nb[1], run.t0*kq_mask->nb[1]);
+            }
+
+            ggml_tensor * out = build_attn_mha(q, k, v, nullptr, mask, sinks, v_mla, 0, kq_scale, il);
+
+            cur = cur ? ggml_concat(ctx0, cur, out, 1) : out;
+        }
+    }
+
     cb(cur, "kqv_out", il);
 
     if (inp->self_v_rot) {

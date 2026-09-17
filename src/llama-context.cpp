@@ -1398,11 +1398,9 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         ggml_backend_sched_reset(sched.get());
         ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
 
-        //const auto t_start_us = ggml_time_us();
+        const auto t_start_us = ggml_time_us();
 
         gf = model.build_graph(gparams);
-
-        //LLAMA_LOG_INFO("graph build time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
 
         if (!gf) {
             LLAMA_LOG_ERROR("%s: failed to initialize graph\n", __func__);
@@ -1410,11 +1408,16 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             return nullptr;
         }
 
+        const auto t_alloc_us = ggml_time_us();
+
         if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
             LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
             ret = GGML_STATUS_ALLOC_FAILED;
             return nullptr;
         }
+
+        t_graph_build_us += t_alloc_us - t_start_us;
+        t_graph_alloc_us += ggml_time_us() - t_alloc_us;
     }
 
     // set the input data for the input tensors
@@ -2399,6 +2402,12 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         for (const auto & lora : model.loras) {
             res += lora->get_n_nodes();
         }
+    }
+
+    // attention split into runs (see llama_kv_attn_run): up to 4 gather runs and the full runs between them,
+    // about 16 nodes each per layer
+    if (cparams.flash_attn && cparams.kv_unified) {
+        res += 16u*9u*model.hparams.n_layer();
     }
 
     uint32_t n_sampling_nodes = 0;
@@ -3416,6 +3425,8 @@ llama_perf_context_data llama_context::perf_get_data() const {
     data.n_eval      = std::max(1, n_eval);
     data.n_reused    = std::max(0, n_reused);
     data.n_graph_computes = std::max(0, n_graph_computes);
+    data.t_graph_build_ms = 1e-3 * t_graph_build_us;
+    data.t_graph_alloc_ms = 1e-3 * t_graph_alloc_us;
 
     return data;
 }
@@ -3426,6 +3437,8 @@ void llama_context::perf_reset() {
     t_p_eval_us = n_p_eval = 0;
     n_reused    = 0;
     n_graph_computes = 0;
+    t_graph_build_us = 0;
+    t_graph_alloc_us = 0;
 }
 
 llama_memory_breakdown llama_context::memory_breakdown() const {
@@ -4214,6 +4227,11 @@ llama_memory_usage llama_memory_get_usage(llama_memory_t mem) {
     if (kv) {
         res.kv_size = kv->get_size()*kv->get_n_stream();
         kv->get_usage(res.kv_used, res.kv_span);
+
+        const auto stats = kv->get_attn_stats();
+        res.attn_cells_read  = stats.read;
+        res.attn_cells_range = stats.range;
+        res.attn_cells_owned = stats.owned;
     }
 
     if (rs) {
@@ -4392,9 +4410,10 @@ void llama_perf_context_print(const llama_context * ctx) {
     LLAMA_LOG_INFO("%s:        eval time = %10.2f ms / %5d runs   (%8.2f ms per token, %8.2f tokens per second)\n",
             __func__, data.t_eval_ms, data.n_eval, data.t_eval_ms / data.n_eval, 1e3 / data.t_eval_ms * data.n_eval);
     LLAMA_LOG_INFO("%s:       total time = %10.2f ms / %5d tokens\n", __func__, (t_end_ms - data.t_start_ms), (data.n_p_eval + data.n_eval));
-    LLAMA_LOG_INFO("%s:    graphs reused = %10d / %5d computes (%5.1f %%)\n",
+    LLAMA_LOG_INFO("%s:    graphs reused = %10d / %5d computes (%5.1f %%), build time = %8.2f ms, alloc time = %8.2f ms\n",
             __func__, data.n_reused, data.n_graph_computes,
-            data.n_graph_computes > 0 ? 100.0 * data.n_reused / data.n_graph_computes : 0.0);
+            data.n_graph_computes > 0 ? 100.0 * data.n_reused / data.n_graph_computes : 0.0,
+            data.t_graph_build_ms, data.t_graph_alloc_ms);
 }
 
 void llama_perf_context_reset(llama_context * ctx) {

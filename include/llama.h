@@ -812,6 +812,11 @@ extern "C" {
         uint32_t kv_span; // highest used KV cell + 1, largest over streams: the range attention reads
         uint32_t rs_size; // recurrent-state cells (0 = no recurrent state)
         uint32_t rs_used; // recurrent-state cells owned by a sequence
+
+        // cumulative attention cost over all filled KQ masks, in (token, cell) pairs
+        uint64_t attn_cells_read;  // cells attention reads
+        uint64_t attn_cells_range; // cells in each token's sequence range [lowest, highest] cell
+        uint64_t attn_cells_owned; // cells each token's sequence owns
     };
 
     // Returns the cell usage of the memory
@@ -1595,6 +1600,8 @@ extern "C" {
         int32_t n_eval;     // number of generated tokens
         int32_t n_reused;   // number of times a ggml compute graph had been reused
         int32_t n_graph_computes; // number of graph evaluations; the denominator for n_reused
+        double  t_graph_build_ms; // time spent building graphs that could not be reused
+        double  t_graph_alloc_ms; // time spent allocating them; includes waiting for queued GPU work when the scheduler re-plans a graph, so it is not all overhead
     };
 
     struct llama_perf_sampler_data {

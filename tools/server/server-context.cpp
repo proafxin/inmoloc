@@ -315,11 +315,12 @@ struct server_slot {
     int32_t media_n_decoded = 0;
 
     // tokens to decode for the next piece of a media chunk
-    // a chunk with causal attention is decoded one ubatch per iteration, so the other slots keep generating in between
+    // a chunk with causal attention is decoded one ubatch per iteration, so slots that generate are not held up by it
+    // splitting costs graph rebuilds, so it is only worth it while another slot generates
     // a chunk with non-causal attention, or a slot that cannot split its input, decodes the whole chunk at once
-    int32_t media_n_next(const mtmd_input_chunk * chunk, int32_t n_ubatch) const {
+    int32_t media_n_next(const mtmd_input_chunk * chunk, int32_t n_ubatch, bool any_generating) const {
         const int32_t n_left = (int32_t) mtmd_input_chunk_get_n_tokens(chunk) - media_n_decoded;
-        const bool    split  = can_split() && !mtmd_decode_use_non_causal(mctx, chunk);
+        const bool    split  = any_generating && can_split() && !mtmd_decode_use_non_causal(mctx, chunk);
 
         return split ? std::min(n_ubatch, n_left) : n_left;
     }
@@ -1852,6 +1853,15 @@ private:
         return n;
     }
 
+    bool any_slot_generating() const {
+        for (const auto & slot : slots) {
+            if (slot.state == SLOT_STATE_GENERATING) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool any_slot_preempted() const {
         for (const auto & slot : slots) {
             if (slot.state == SLOT_STATE_PREEMPTED) {
@@ -1880,7 +1890,7 @@ private:
                     const int32_t idx = slot.prompt.n_tokens();
                     const auto & input_tokens = slot.input_tokens();
                     if (idx < (int32_t) input_tokens.size() && input_tokens[idx] == LLAMA_TOKEN_NULL) {
-                        return slot.media_n_next(input_tokens.find_chunk(idx).get(), llama_n_ubatch(ctx_tgt));
+                        return slot.media_n_next(input_tokens.find_chunk(idx).get(), llama_n_ubatch(ctx_tgt), any_slot_generating());
                     }
                     return 1;
                 }
@@ -3005,6 +3015,8 @@ private:
                     res->mem_usage            = llama_memory_get_usage(llama_get_memory(ctx_tgt));
                     res->n_graph_reused       = perf_tgt.n_reused;
                     res->n_graph_computes     = perf_tgt.n_graph_computes;
+                    res->t_graph_build_ms     = perf_tgt.t_graph_build_ms;
+                    res->t_graph_alloc_ms     = perf_tgt.t_graph_alloc_ms;
                     res->metrics              = metrics;
 
                     if (task.metrics_reset_bucket) {
@@ -3609,6 +3621,9 @@ private:
             // true once a piece of a split media chunk was decoded in this iteration, see server_slot::media_n_next()
             bool media_piece_decoded = false;
 
+            // media chunks are split only while another slot generates, so that its tokens do not wait for a whole image
+            const bool any_generating = any_slot_generating();
+
             iterate(slots, [&](server_slot & slot) {
                 if (!add_ok || batch.size() >= n_batch) {
                     return; // batch is full, skip remaining slots
@@ -3993,7 +4008,7 @@ private:
 
                         const auto &  chunk   = input_tokens.find_chunk(cur_token_idx);
                         const int32_t n_chunk = (int32_t) mtmd_input_chunk_get_n_tokens(chunk.get());
-                        const int32_t n_piece = slot.media_n_next(chunk.get(), n_ubatch);
+                        const int32_t n_piece = slot.media_n_next(chunk.get(), n_ubatch, any_generating);
 
                         // a piece of a split chunk: at most one per iteration over all slots, to bound the wait of the generating slots
                         if (n_piece < n_chunk && media_piece_decoded) {

@@ -1602,6 +1602,26 @@ std::string server_task_result_metrics::to_metrics() {
             "graph_computes_total",
             "Number of graph computes, reused or rebuilt",
             (double) n_graph_computes
+        }, {
+            "graph_build_seconds_total",
+            "Time spent building graphs that could not be reused",
+            t_graph_build_ms / 1.e3
+        }, {
+            "graph_alloc_seconds_total",
+            "Time spent allocating those graphs; includes waiting for queued GPU work when a graph is re-planned, so it is not all overhead",
+            t_graph_alloc_ms / 1.e3
+        }, {
+            "kv_attn_cells_read_total",
+            "Attention cost today: (token, KV cell) pairs read, n_kv per token",
+            (double) mem_usage.attn_cells_read
+        }, {
+            "kv_attn_cells_range_total",
+            "Attention cost if each token read only its sequence's cell range",
+            (double) mem_usage.attn_cells_range
+        }, {
+            "kv_attn_cells_owned_total",
+            "Attention cost if each token read only its sequence's own cells",
+            (double) mem_usage.attn_cells_owned
         },
     };
 

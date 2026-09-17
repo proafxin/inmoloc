@@ -161,6 +161,18 @@ public:
     // used cells summed over streams, and the largest used range (highest used cell + 1) of any stream
     void get_usage(uint32_t & n_used, uint32_t & n_span) const;
 
+    // attention cost counters, accumulated over every KQ mask that was filled, in (token, cell) pairs:
+    //   read : cells attention reads today, n_kv per token
+    //   range: cells in the range [lo, hi) of the token's sequence, what reading only that range would need
+    //   owned: cells that carry the token's sequence, what reading only those cells would need
+    struct attn_stats {
+        uint64_t read  = 0;
+        uint64_t range = 0;
+        uint64_t owned = 0;
+    };
+
+    attn_stats get_attn_stats() const;
+
     bool get_has_shift() const;
 
     ggml_type type_k() const;
@@ -191,6 +203,21 @@ public:
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+
+    // split the ubatch into attention runs, see llama_kv_attn_run
+    // returns an empty list when no run is worth gathering, i.e. the whole ubatch attends the full view
+    std::vector<llama_kv_attn_run> get_attn_runs(const llama_ubatch & ubatch, uint32_t n_kv) const;
+
+    // copies of the cells listed in idxs (I32 [n_idx]): [n_embd_head, n_head_kv, n_idx, 1], F32
+    ggml_tensor * get_k_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs, const slot_info & sinfo) const;
+    ggml_tensor * get_v_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs, const slot_info & sinfo) const;
+
+    // fill the cell indices and the mask of a gather run, the mask rows are taken from the full F16 mask [n_kv, n_tokens]
+    void set_input_attn_run(ggml_tensor * idxs, ggml_tensor * mask, const ggml_fp16_t * full_mask, int64_t n_kv, const llama_ubatch * ubatch, const llama_kv_attn_run & run) const;
+
+    // the full F16 mask in host memory owned by the cache, for when no graph node reads the full mask tensor
+    // (every run is gathered) and so the tensor is not allocated
+    const ggml_fp16_t * fill_kq_mask_scratch(const llama_ubatch * ubatch, int64_t n_kv, bool causal_attn) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
@@ -298,6 +325,15 @@ private:
     // note: this is not part of the KV state and it's only used to speed-up the find_slot() method
     std::vector<uint32_t> v_heads;
 
+    // updated while filling KQ masks, see get_attn_stats()
+    mutable attn_stats stats_attn;
+
+    // see fill_kq_mask_scratch()
+    mutable std::vector<ggml_fp16_t> kq_mask_scratch;
+
+    // fills a KQ mask [n_kv, n_tokens/n_stream, 1, n_stream] of type F16 or F32 at data
+    void fill_kq_mask(ggml_type type, void * data, int64_t n_kv, int64_t n_stream, const llama_ubatch * ubatch, bool causal_attn) const;
+
     // TODO: temporary until we refactor to be able to share the same cells between 2 kv caches [TAG_KV_CACHE_SHARE_CELLS]
     llama_kv_cache * other;
 
@@ -400,6 +436,17 @@ public:
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
+
+    // see llama_kv_cache::get_attn_runs()
+    std::vector<llama_kv_attn_run> get_attn_runs(const llama_ubatch & ubatch) const;
+
+    ggml_tensor * get_k_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs) const;
+    ggml_tensor * get_v_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs) const;
+
+    void set_input_attn_run(ggml_tensor * idxs, ggml_tensor * mask, const ggml_fp16_t * full_mask, int64_t n_kv, const llama_ubatch * ubatch, const llama_kv_attn_run & run) const;
+
+    // see llama_kv_cache::fill_kq_mask_scratch()
+    const ggml_fp16_t * fill_kq_mask_scratch(const llama_ubatch * ubatch, bool causal_attn) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     // note: the heads in k_cur and v_cur should be laid out contiguously in memory
