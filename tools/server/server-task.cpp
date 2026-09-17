@@ -1575,6 +1575,14 @@ std::string server_task_result_metrics::to_metrics() {
             "Number of tokens recomputed to resume preempted slots",
             (double) metrics.n_recomputed_tokens
         }, {
+            "prefix_shares_total",
+            "Number of prompts that adopted a prefix held by another slot",
+            (double) metrics.n_prefix_shares
+        }, {
+            "prefix_shared_tokens_total",
+            "Number of prompt tokens taken from another slot instead of being computed",
+            (double) metrics.n_prefix_shared_tokens
+        }, {
             "mtmd_encode_seconds_total",
             "Time in the media encoder; runs inline, other slots wait",
             metrics.t_mtmd_encode_us / 1.e6

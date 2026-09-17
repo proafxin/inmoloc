@@ -511,6 +511,9 @@ struct server_metrics {
     uint64_t n_resumes           = 0;
     uint64_t n_recomputed_tokens = 0; // tokens recomputed to resume preempted slots
 
+    uint64_t n_prefix_shares        = 0; // prompts that adopted the cells of another slot
+    uint64_t n_prefix_shared_tokens = 0; // tokens those prompts did not have to compute
+
     // media work runs inline in the main loop, other slots wait while it runs
     // timed only when the metrics endpoint is enabled
     uint64_t t_mtmd_encode_us      = 0; // media encoder

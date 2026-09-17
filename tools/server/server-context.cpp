@@ -1836,6 +1836,12 @@ private:
     }
 
     int32_t kv_cells_held() const {
+        // a shared prefix puts the same cells in several slots, so count the cells the cache actually uses
+        const auto usage = llama_memory_get_usage(llama_get_memory(ctx_tgt));
+        if (usage.kv_size > 0) {
+            return (int32_t) usage.kv_used;
+        }
+
         int32_t n = 0;
         for (const auto & slot : slots) {
             n += slot.prompt.n_tokens() + slot.media_n_decoded;
@@ -1845,12 +1851,136 @@ private:
 
     // cells held, plus the rest of every prompt (or recompute after preemption) that is still being processed
     int32_t kv_cells_committed() const {
-        int32_t n = 0;
+        int32_t n = kv_cells_held();
         for (const auto & slot : slots) {
             const bool in_prompt = slot.state == SLOT_STATE_STARTED || slot.state == SLOT_STATE_PROCESSING_PROMPT;
-            n += in_prompt ? std::max(slot.prompt.n_tokens(), slot.n_input_tokens()) : slot.prompt.n_tokens();
+            if (in_prompt) {
+                n += std::max(0, slot.n_input_tokens() - slot.prompt.n_tokens() - slot.media_n_decoded);
+            }
         }
         return n;
+    }
+
+    // cross-slot prefix sharing
+    //
+    // a unified KV cache can put one cell in several sequences (seq_cp only tags the cells), so a new prompt that
+    // starts with tokens another slot already holds can adopt that slot's cells instead of computing them again
+    // the slot takes over the other slot's cells and prompt, then the regular prompt reuse trims them to the common
+    // prefix; memory that cannot be cut at any position (recurrent, SWA) is cut at a checkpoint of the other slot,
+    // loading its state into a new cell for this slot and leaving the other slot's state untouched
+    // returns the number of tokens the slot can reuse
+    int32_t try_share_prefix(server_slot & slot, const server_tokens & input_tokens, int32_t n_past) {
+        // LLAMA_PREFIX_SHARE=0 disables sharing, LLAMA_PREFIX_SHARE_MIN sets the least gain in tokens worth sharing
+        static const bool enabled = []() {
+            const char * env = getenv("LLAMA_PREFIX_SHARE");
+            return env == nullptr || atoi(env) != 0;
+        }();
+        static const int32_t min_gain = []() {
+            const char * env = getenv("LLAMA_PREFIX_SHARE_MIN");
+            return env ? std::max(1, atoi(env)) : 256;
+        }();
+
+        if (!enabled || !params_base.kv_unified || params_base.ctx_shift || slot.task->type != SERVER_TASK_TYPE_COMPLETION) {
+            return n_past;
+        }
+
+        const bool need_ckpt = ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_PART || n_swa > 0;
+
+        server_slot * best       = nullptr;
+        int32_t       best_share = n_past;
+        int32_t       best_lcp   = 0;
+        int32_t       best_mem   = 0;
+
+        const common_prompt_checkpoint * best_ckpt = nullptr;
+
+        for (auto & other : slots) {
+            if (&other == &slot || other.state == SLOT_STATE_PREEMPTED || other.media_n_decoded > 0 || other.prompt.n_tokens() == 0) {
+                continue;
+            }
+
+            if (!are_lora_equal(other.lora, slot.lora)) {
+                continue;
+            }
+
+            // the prompt of a running slot also lists the tokens queued for this iteration, only share what is in memory
+            const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), other.id);
+            if (pos_max < 0) {
+                continue;
+            }
+
+            const int32_t n_mem = std::min<int32_t>(other.prompt.n_tokens(), other.prompt.tokens.size_up_to_pos(pos_max + 1));
+            const int32_t n_lcp = std::min<int32_t>(other.prompt.tokens.get_common_prefix(input_tokens), n_mem);
+
+            int32_t n_share = 0;
+
+            const common_prompt_checkpoint * ckpt = nullptr;
+
+            if (!need_ckpt || n_lcp == n_mem) {
+                // the state at the end of the other slot's memory is the state at the end of the prefix
+                n_share = n_lcp;
+            } else {
+                for (const auto & cur : other.prompt.checkpoints) {
+                    if (cur.n_tokens <= n_lcp && cur.n_tokens > n_share) {
+                        n_share = cur.n_tokens;
+                        ckpt    = &cur;
+                    }
+                }
+            }
+
+            if (n_share >= best_share + min_gain) {
+                best       = &other;
+                best_share = n_share;
+                best_lcp   = n_lcp;
+                best_mem   = n_mem;
+                best_ckpt  = ckpt;
+            }
+        }
+
+        if (best == nullptr) {
+            return n_past;
+        }
+
+        if (need_ckpt) {
+            // the slot gets its own recurrent-state cell below: loading state without a free cell would fail
+            const auto usage = llama_memory_get_usage(llama_get_memory(ctx_tgt));
+            const uint32_t n_free = usage.rs_size - usage.rs_used + (slot.prompt.n_tokens() > 0 ? 1 : 0);
+            if (usage.rs_size > 0 && n_free == 0) {
+                SLT_DBG(slot, "not sharing the prefix of slot %d: no free recurrent-state cell\n", best->id);
+                return n_past;
+            }
+        }
+
+        SLT_INF(slot, "sharing prefix of slot %d: %d tokens (own cache %d), checkpoint = %d\n",
+                best->id, best_share, n_past, best_ckpt ? 1 : 0);
+
+        slot.mem.seq_rm(slot.id, -1, -1);
+        slot.mem.seq_cp(best->id, slot.id, -1, -1);
+
+        slot.prompt.tokens = best->prompt.tokens.clone();
+        slot.prompt.tokens.keep_first(best_mem);
+
+        slot.prompt.checkpoints.clear();
+        if (best_ckpt) {
+            slot.prompt.checkpoints.push_back(*best_ckpt);
+        } else if (need_ckpt) {
+            // seq_cp shares the other slot's recurrent-state cell, and two sequences decoding from one cell need a
+            // second cell in the middle of a batch, which the recurrent memory refuses; the other slot's state is the
+            // state at the end of the shared prefix, so copy it into a cell of this slot now
+            common_prompt_checkpoint cur;
+
+            cur.update_tgt(ctx_tgt, best->id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            cur.update_dft(ctx_dft, best->id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            common_speculative_get_state(spec.get(), best->id, cur.data_spec);
+
+            cur.load_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            cur.load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            common_speculative_set_state(spec.get(), slot.id, cur.data_spec);
+        }
+
+        metrics.n_prefix_shares++;
+        metrics.n_prefix_shared_tokens += best_share;
+
+        return best_lcp;
     }
 
     bool any_slot_generating() const {
@@ -3740,6 +3870,11 @@ private:
                                 }
 
                                 const auto n_cache_reuse = slot.task->params.n_cache_reuse;
+
+                                // shifting the cells of a shared prefix would move them for the other slot too
+                                if (slot.alora_invocation_start <= 0 && n_cache_reuse <= 0) {
+                                    n_past = try_share_prefix(slot, input_tokens, n_past);
+                                }
 
                                 const bool can_cache_reuse =
                                     llama_memory_can_shift(llama_get_memory(ctx_tgt)) &&
