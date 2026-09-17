@@ -1502,7 +1502,15 @@ private:
 
         // wiring up server queues
         queue_tasks.on_new_task([this](server_task && task, bool is_yielding) {
-            return process_single_task(std::move(task), is_yielding);
+            if (is_yielding) {
+                return process_single_task(std::move(task), is_yielding);
+            }
+            const bool    is_launch  = task.type == SERVER_TASK_TYPE_COMPLETION || task.type == SERVER_TASK_TYPE_INFILL;
+            const int64_t t_start_us = ggml_time_us();
+            const bool    res        = process_single_task(std::move(task), is_yielding);
+            loop_t.t_tasks_us += ggml_time_us() - t_start_us;
+            loop_t.n_launches += is_launch;
+            return res;
         });
         queue_tasks.on_update_slots([this]() {
             update_slots();
@@ -1742,7 +1750,19 @@ private:
 
                 ret->prompt_save(*prompt_cache);
 
-                if (!ret->prompt_load(*prompt_cache, task.tokens)) {
+                // a slot in memory that can share a long enough prefix makes the copy from the RAM cache unnecessary,
+                // and sharing keeps a single copy of the prefix in the KV cache; a lora in the task could make the
+                // other slot's cells unusable, so only skip the copy for tasks without one
+                bool from_memory = false;
+                if (prefix_share_allowed(task.type) && task.params.lora.empty()) {
+                    prefix_share share;
+                    const int32_t n_own = ret->prompt.tokens.get_common_prefix(task.tokens);
+                    from_memory = prefix_share_find(ret, task.tokens, n_own, share) != nullptr;
+                }
+
+                if (from_memory) {
+                    SLT_DBG(*ret, "%s", "not loading from the prompt cache, a slot in memory can share the prefix\n");
+                } else if (!ret->prompt_load(*prompt_cache, task.tokens)) {
                     ret->prompt_clear();
                 }
 
@@ -1868,73 +1888,110 @@ private:
     // the slot takes over the other slot's cells and prompt, then the regular prompt reuse trims them to the common
     // prefix; memory that cannot be cut at any position (recurrent, SWA) is cut at a checkpoint of the other slot,
     // loading its state into a new cell for this slot and leaving the other slot's state untouched
-    // returns the number of tokens the slot can reuse
-    int32_t try_share_prefix(server_slot & slot, const server_tokens & input_tokens, int32_t n_past) {
-        // LLAMA_PREFIX_SHARE=0 disables sharing, LLAMA_PREFIX_SHARE_MIN sets the least gain in tokens worth sharing
+
+    // LLAMA_PREFIX_SHARE=0 disables sharing, LLAMA_PREFIX_SHARE_MIN sets the least gain in tokens worth sharing
+    static bool prefix_share_enabled() {
         static const bool enabled = []() {
             const char * env = getenv("LLAMA_PREFIX_SHARE");
             return env == nullptr || atoi(env) != 0;
         }();
+        return enabled;
+    }
+
+    static int32_t prefix_share_min_gain() {
         static const int32_t min_gain = []() {
             const char * env = getenv("LLAMA_PREFIX_SHARE_MIN");
             return env ? std::max(1, atoi(env)) : 256;
         }();
+        return min_gain;
+    }
 
-        if (!enabled || !params_base.kv_unified || params_base.ctx_shift || slot.task->type != SERVER_TASK_TYPE_COMPLETION) {
+    bool prefix_share_allowed(server_task_type type) const {
+        return prefix_share_enabled() && params_base.kv_unified && !params_base.ctx_shift && type == SERVER_TASK_TYPE_COMPLETION;
+    }
+
+    // recurrent or SWA state cannot be cut at any position, only at a checkpoint
+    bool prefix_share_need_ckpt() const {
+        return ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_PART || n_swa > 0;
+    }
+
+    struct prefix_share {
+        int32_t n_share = 0; // tokens that can be adopted
+        int32_t n_lcp   = 0; // common prefix, capped to what the other slot holds in memory
+        int32_t n_mem   = 0; // tokens the other slot holds in memory
+
+        const common_prompt_checkpoint * ckpt = nullptr; // where recurrent/SWA state is cut, nullptr = at n_mem
+    };
+
+    // how much of `tokens` the memory of `other` can provide
+    prefix_share prefix_share_from(const server_slot & other, const server_tokens & tokens) const {
+        prefix_share res;
+
+        if (other.state == SLOT_STATE_PREEMPTED || other.media_n_decoded > 0 || other.prompt.n_tokens() == 0) {
+            return res;
+        }
+
+        // the prompt of a running slot also lists the tokens queued for this iteration, only share what is in memory
+        const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), other.id);
+        if (pos_max < 0) {
+            return res;
+        }
+
+        res.n_mem = std::min<int32_t>(other.prompt.n_tokens(), other.prompt.tokens.size_up_to_pos(pos_max + 1));
+        res.n_lcp = std::min<int32_t>(other.prompt.tokens.get_common_prefix(tokens), res.n_mem);
+
+        if (!prefix_share_need_ckpt() || res.n_lcp == res.n_mem) {
+            // the state at the end of the other slot's memory is the state at the end of the prefix
+            res.n_share = res.n_lcp;
+        } else {
+            for (const auto & cur : other.prompt.checkpoints) {
+                if (cur.n_tokens <= res.n_lcp && cur.n_tokens > res.n_share) {
+                    res.n_share = cur.n_tokens;
+                    res.ckpt    = &cur;
+                }
+            }
+        }
+
+        return res;
+    }
+
+    // the best prefix another slot can share with a prompt of `tokens`, gaining at least the minimum over n_own tokens
+    server_slot * prefix_share_find(const server_slot * slot, const server_tokens & tokens, int32_t n_own, prefix_share & best) {
+        server_slot * res = nullptr;
+
+        for (auto & other : slots) {
+            if (&other == slot || (slot && !are_lora_equal(other.lora, slot->lora))) {
+                continue;
+            }
+
+            const auto cur = prefix_share_from(other, tokens);
+
+            if (cur.n_share >= std::max(n_own, best.n_share) + prefix_share_min_gain()) {
+                res  = &other;
+                best = cur;
+            }
+        }
+
+        return res;
+    }
+
+    // returns the number of tokens the slot can reuse
+    int32_t try_share_prefix(server_slot & slot, const server_tokens & input_tokens, int32_t n_past) {
+        if (!prefix_share_allowed(slot.task->type)) {
             return n_past;
         }
 
-        const bool need_ckpt = ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_PART || n_swa > 0;
+        const bool need_ckpt = prefix_share_need_ckpt();
 
-        server_slot * best       = nullptr;
-        int32_t       best_share = n_past;
-        int32_t       best_lcp   = 0;
-        int32_t       best_mem   = 0;
+        prefix_share share;
 
-        const common_prompt_checkpoint * best_ckpt = nullptr;
+        server_slot * best = prefix_share_find(&slot, input_tokens, n_past, share);
 
-        for (auto & other : slots) {
-            if (&other == &slot || other.state == SLOT_STATE_PREEMPTED || other.media_n_decoded > 0 || other.prompt.n_tokens() == 0) {
-                continue;
-            }
+        const int32_t best_share = share.n_share;
+        const int32_t best_lcp   = share.n_lcp;
+        const int32_t best_mem   = share.n_mem;
 
-            if (!are_lora_equal(other.lora, slot.lora)) {
-                continue;
-            }
-
-            // the prompt of a running slot also lists the tokens queued for this iteration, only share what is in memory
-            const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), other.id);
-            if (pos_max < 0) {
-                continue;
-            }
-
-            const int32_t n_mem = std::min<int32_t>(other.prompt.n_tokens(), other.prompt.tokens.size_up_to_pos(pos_max + 1));
-            const int32_t n_lcp = std::min<int32_t>(other.prompt.tokens.get_common_prefix(input_tokens), n_mem);
-
-            int32_t n_share = 0;
-
-            const common_prompt_checkpoint * ckpt = nullptr;
-
-            if (!need_ckpt || n_lcp == n_mem) {
-                // the state at the end of the other slot's memory is the state at the end of the prefix
-                n_share = n_lcp;
-            } else {
-                for (const auto & cur : other.prompt.checkpoints) {
-                    if (cur.n_tokens <= n_lcp && cur.n_tokens > n_share) {
-                        n_share = cur.n_tokens;
-                        ckpt    = &cur;
-                    }
-                }
-            }
-
-            if (n_share >= best_share + min_gain) {
-                best       = &other;
-                best_share = n_share;
-                best_lcp   = n_lcp;
-                best_mem   = n_mem;
-                best_ckpt  = ckpt;
-            }
-        }
+        const common_prompt_checkpoint * best_ckpt = share.ckpt;
 
         if (best == nullptr) {
             return n_past;
@@ -3061,8 +3118,28 @@ private:
                                 }
 
                                 if (params_base.kv_unified) {
+                                    // keep an idle slot that a starting slot can share a prefix from, see try_share_prefix()
+                                    // it is cleared on a later launch, or earlier when memory runs short
+                                    bool donor = false;
+                                    for (auto & other : slots) {
+                                        if (other.state != SLOT_STATE_STARTED || !other.task || !prefix_share_allowed(other.task->type) ||
+                                            !are_lora_equal(other.lora, slot.lora)) {
+                                            continue;
+                                        }
+
+                                        const int32_t n_own = other.prompt.tokens.get_common_prefix(other.task->tokens);
+                                        if (prefix_share_from(slot, other.task->tokens).n_share >= n_own + prefix_share_min_gain()) {
+                                            donor = true;
+                                            break;
+                                        }
+                                    }
+
                                     // [TAG_IDLE_SLOT_CLEAR]
-                                    slot.prompt_clear();
+                                    if (donor) {
+                                        SLT_DBG(slot, "%s", "keeping idle slot in memory, a starting slot can share its prefix\n");
+                                    } else {
+                                        slot.prompt_clear();
+                                    }
                                 }
                             }
                         }
@@ -3403,6 +3480,52 @@ private:
     int64_t n_decode      = 0;
     int64_t n_post_decode = 0;
     int64_t n_sampl       = 0;
+    // breakdown of the current main loop iteration, logged when it holds up generating slots or task handling is slow
+    // threshold: LLAMA_SLOW_LOOP_MS (default 1000, 0 = off)
+    // the GPU works asynchronously: its time mostly shows up where the loop waits for results (sampling in post_decode)
+    struct loop_timing {
+        int64_t t_tasks_us  = 0; // handling tasks since the previous iteration (launches, prompt cache save/load)
+        int64_t t_pre_us    = 0; // pre_decode(), including t_media_us
+        int64_t t_media_us  = 0; // decoding media embeddings through the model
+        int64_t t_decode_us = 0; // submitting the batch
+        int64_t t_post_us   = 0; // post_decode(), including sampling
+        int32_t n_launches  = 0;
+        int32_t n_media     = 0; // media tokens decoded
+    } loop_t;
+
+    int64_t t_loop_end_us = 0;
+
+    static int64_t slow_loop_ms() {
+        static const int64_t v = [] {
+            const char * env = getenv("LLAMA_SLOW_LOOP_MS");
+            return env ? (int64_t) atoll(env) : 1000;
+        }();
+        return v;
+    }
+
+    void loop_timing_report(int32_t n_batch_tokens) {
+        const int64_t t_now = ggml_time_us();
+        const int64_t t_iter_us = loop_t.t_tasks_us + loop_t.t_pre_us + loop_t.t_decode_us + loop_t.t_post_us;
+
+        int n_generating = 0;
+        for (const auto & slot : slots) {
+            n_generating += slot.state == SLOT_STATE_GENERATING;
+        }
+
+        // a long prompt-only iteration is expected, it is only a stall when a slot waits for its next token
+        // or when handling the tasks alone is slow
+        const int64_t t_slow_us = slow_loop_ms() * 1000;
+        if (slow_loop_ms() > 0 && ((n_generating > 0 && t_iter_us >= t_slow_us) || loop_t.t_tasks_us >= t_slow_us)) {
+            SRV_INF("slow iteration: %.0f ms = tasks %.0f ms (%d launches) + pre_decode %.0f ms (media %.0f ms / %d tokens) + decode %.0f ms + post_decode %.0f ms; "
+                    "batch = %d tokens, generating = %d, since previous iteration = %.0f ms\n",
+                    t_iter_us / 1e3, loop_t.t_tasks_us / 1e3, loop_t.n_launches, loop_t.t_pre_us / 1e3, loop_t.t_media_us / 1e3, loop_t.n_media,
+                    loop_t.t_decode_us / 1e3, loop_t.t_post_us / 1e3, n_batch_tokens, n_generating,
+                    t_loop_end_us > 0 ? (t_now - t_loop_end_us) / 1e3 : 0.0);
+        }
+        loop_t = {};
+        t_loop_end_us = t_now;
+    }
+
 // #define DEBUG_TIMINGS
 #ifdef DEBUG_TIMINGS
     struct scoped_timer {
@@ -3454,6 +3577,9 @@ private:
 
                 metrics_flush_idle();
 
+                loop_t = {};
+                t_loop_end_us = 0;
+
                 return; // skip further processing
 
             } else {
@@ -3465,6 +3591,7 @@ private:
             }
         }
 
+        const int64_t t_pre_start_us = ggml_time_us();
         try {
             scoped_timer t(t_pre_decode, n_pre_decode);
             pre_decode();
@@ -3478,6 +3605,8 @@ private:
         }
 
         GGML_ASSERT(batch.slot_batched || batch.size() == 0);
+
+        loop_t.t_pre_us += ggml_time_us() - t_pre_start_us;
 
         if (batch.slot_batched) {
             auto & slot_batched      = batch.slot_batched;
@@ -3508,7 +3637,9 @@ private:
                 // TODO @ngxson : maybe handle n_batch == 1 here instead of inside decode()
 
                 batch_view = batch.get_view(off, n_tokens);
+                const int64_t t_decode_start_us = ggml_time_us();
                 bool ok = decode(n_batch, off, batch_view);
+                loop_t.t_decode_us += ggml_time_us() - t_decode_start_us;
 #ifdef DEBUG_TIMINGS
                 llama_synchronize(ctx_tgt);
 #endif
@@ -3531,13 +3662,17 @@ private:
 
             try {
                 scoped_timer t(t_post_decode, n_post_decode);
+                const int64_t t_post_start_us = ggml_time_us();
                 post_decode(n_tokens, off, batch_view);
+                loop_t.t_post_us += ggml_time_us() - t_post_start_us;
             } catch (const std::exception & e) {
                 SRV_ERR("post_decode() failed: %s\n", e.what());
                 abort_all_slots("post_decode() failed: " + std::string(e.what()));
                 break; // stop any further processing
             }
         }
+
+        loop_timing_report(batch.size());
     }
 
     void pre_decode() {
@@ -4168,6 +4303,7 @@ private:
                         size_t n_tokens_out = 0;
                         int32_t res = 0;
                         mtmd_chunk_timing timing;
+                        const int64_t t_media_start_us = ggml_time_us();
                         queue_tasks.yield_to_queue([&]() {
                             res = process_mtmd_chunk(slot, slot.mbatch, cur_token_idx, slot.media_n_decoded, n_piece, n_tokens_out, params_base.endpoint_metrics ? &timing : nullptr);
                         });
@@ -4178,6 +4314,9 @@ private:
                             slot.release();
                             return; // the slot is done, skip it entirely
                         }
+
+                        loop_t.t_media_us += ggml_time_us() - t_media_start_us;
+                        loop_t.n_media    += (int32_t) n_tokens_out;
 
                         metrics.t_mtmd_encode_us       += timing.t_encode_us;
                         metrics.n_mtmd_encoded_chunks  += timing.n_encoded_chunks;

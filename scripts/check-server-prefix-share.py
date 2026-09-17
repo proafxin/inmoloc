@@ -10,6 +10,10 @@
 # Start the server with --kv-unified and --parallel above --n-followers, e.g. --parallel 8, then:
 #   python3 scripts/check-server-prefix-share.py --url http://localhost:8100 --n-followers 4
 # Run it again against a server started with LLAMA_PREFIX_SHARE=0 to compare prompt_n and time to first token.
+#
+# --mode idle checks sharing from an idle slot: two requests in a row share short instructions ahead of long, different
+# documents, so the second one is not routed to the slot of the first (keep --n-facts small next to --doc-facts):
+#   python3 scripts/check-server-prefix-share.py --url http://localhost:8100 --mode idle --n-facts 30 --doc-facts 480
 
 import argparse
 import difflib
@@ -76,14 +80,49 @@ def metric(url: str, name: str) -> float:
     return float("nan")
 
 
+def run_idle(args: argparse.Namespace) -> int:
+    # short shared instructions ahead of a long unique document: the prompts are too different for the server to route
+    # the second request to the slot of the first, so it can only reuse the instructions by sharing from the idle slot
+    nonce = random.randint(10**8, 10**9)
+    system = build_system_prompt(nonce, args.n_facts)
+    docs = [build_system_prompt(nonce + 1 + k, args.doc_facts) for k in range(2)]
+    question = "What is fact 3 of the document?"
+
+    shares_before = metric(args.url, "prefix_shares_total")
+
+    first = chat(args.url, system, docs[0] + "\n" + question, args.max_tokens)
+    second = chat(args.url, system, docs[1] + "\n" + question, args.max_tokens)
+
+    shares_after = metric(args.url, "prefix_shares_total")
+
+    # reference: the second request again, now served from its own slot cache
+    reference = chat(args.url, system, docs[1] + "\n" + question, args.max_tokens)
+
+    same = second["text"] == reference["text"]
+    print(f"first:  cache_n = {first['timings'].get('cache_n')}, prompt_n = {first['timings'].get('prompt_n')}")
+    print(f"second: cache_n = {second['timings'].get('cache_n')}, prompt_n = {second['timings'].get('prompt_n')}, "
+          f"prompt_ms = {second['timings'].get('prompt_ms', 0):.0f}, output {'identical' if same else 'differs'}")
+    if not same:
+        print(f"    second:    {second['text']!r}")
+        print(f"    reference: {reference['text']!r}")
+    print(f"prefix_shares_total: {shares_before:.0f} -> {shares_after:.0f}")
+    print("OK" if same and shares_after > shares_before else "CHECK: no share or output differs")
+    return 0 if same and shares_after > shares_before else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://localhost:8100")
+    parser.add_argument("--mode", choices=["concurrent", "idle"], default="concurrent")
     parser.add_argument("--n-followers", type=int, default=4)
     parser.add_argument("--n-facts", type=int, default=120)
+    parser.add_argument("--doc-facts", type=int, default=480, help="idle mode: facts in each long document")
     parser.add_argument("--max-tokens", type=int, default=48)
     parser.add_argument("--leader-tokens", type=int, default=400)
     args = parser.parse_args()
+
+    if args.mode == "idle":
+        return run_idle(args)
 
     nonce = random.randint(10**8, 10**9)
     system = build_system_prompt(nonce, args.n_facts)
