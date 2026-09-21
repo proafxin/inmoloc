@@ -5583,6 +5583,33 @@ void ggml_flash_attn_ext_add_sinks(
     a->src[4] = sinks;
 }
 
+void ggml_flash_attn_ext_set_kv_idx(
+        struct ggml_tensor * a,
+        struct ggml_tensor * kv_idx,
+        struct ggml_tensor * q_rng) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(a->src[3] == NULL && "kv_idx replaces the mask");
+    GGML_ASSERT(a->src[5] == NULL && a->src[6] == NULL);
+
+    float max_bias = 0.0f;
+    memcpy(&max_bias, (const float *) a->op_params + 1, sizeof(float));
+    GGML_ASSERT(max_bias == 0.0f && "kv_idx does not support ALiBi");
+
+    const struct ggml_tensor * q = a->src[0];
+    const struct ggml_tensor * k = a->src[1];
+    const struct ggml_tensor * v = a->src[2];
+    GGML_ASSERT(q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1);
+
+    GGML_ASSERT(kv_idx->type == GGML_TYPE_I32 && ggml_is_contiguous(kv_idx));
+    GGML_ASSERT(kv_idx->ne[2] == 1 && kv_idx->ne[3] == 1);
+
+    GGML_ASSERT(q_rng->type == GGML_TYPE_I32 && ggml_is_contiguous(q_rng));
+    GGML_ASSERT(q_rng->ne[0] == 3 && q_rng->ne[1] >= q->ne[1] && q_rng->ne[2] == 1 && q_rng->ne[3] == 1);
+
+    a->src[5] = kv_idx;
+    a->src[6] = q_rng;
+}
+
 // ggml_flash_attn_back
 
 struct ggml_tensor * ggml_flash_attn_back(

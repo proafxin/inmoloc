@@ -633,6 +633,15 @@ ggml_backend_buffer_t ggml_backend_dev_buffer_from_host_ptr(ggml_backend_dev_t d
 
 bool ggml_backend_dev_supports_op(ggml_backend_dev_t device, const struct ggml_tensor * op) {
     GGML_ASSERT(device);
+
+    // indexed flash attention is opt-in: a backend that does not know it would ignore the index lists
+    if (op->op == GGML_OP_FLASH_ATTN_EXT && op->src[5] != NULL) {
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(device);
+        if (reg == NULL || ggml_backend_reg_get_proc_address(reg, "ggml_backend_flash_attn_ext_kv_idx") == NULL) {
+            return false;
+        }
+    }
+
     return device->iface.supports_op(device, op);
 }
 

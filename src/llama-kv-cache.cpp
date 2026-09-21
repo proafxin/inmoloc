@@ -6,7 +6,9 @@
 #include "llama-context.h"
 
 #include <algorithm>
+#include <bitset>
 #include <cassert>
+#include <cinttypes>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -1972,6 +1974,211 @@ void llama_kv_cache::fill_kq_mask(ggml_type type, void * data, int64_t n_kv, int
     //LLAMA_LOG_ERROR("%s: kq mask time: %0.3f ms\n", __func__, (t_end - t_start)/1000.0);
 }
 
+bool llama_kv_cache::kv_idx_supported() const {
+    // one stream, flash attention layout (V not transposed) and no ALiBi bias, which needs the mask values
+    return n_stream == 1 && !v_trans && !hparams.use_alibi;
+}
+
+void llama_kv_cache::get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const {
+    GGML_ASSERT(n_stream == 1);
+
+    const auto & cells = v_cells[0];
+
+    std::bitset<LLAMA_MAX_SEQ> seen;
+
+    uint32_t n_max = 0;
+    for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+        const llama_seq_id seq_id = ubatch.seq_id[i][0];
+        if (!seen.test(seq_id)) {
+            seen.set(seq_id);
+            n_max = std::max(n_max, cells.seq_n_cells(seq_id));
+        }
+    }
+
+    // padded like n_kv, so that the graph can be reused while the sequences grow
+    n_idx   = std::min(get_size(), std::max<uint32_t>(256, GGML_PAD(n_max, 256)));
+    n_group = std::min(n_seq_max, ubatch.n_tokens);
+}
+
+void llama_kv_cache::set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const {
+    GGML_ASSERT(n_stream == 1);
+    GGML_ASSERT(ggml_backend_buffer_is_host(kv_idx->buffer));
+    GGML_ASSERT(ggml_backend_buffer_is_host(q_rng->buffer));
+
+    const uint32_t n_tokens = ubatch->n_tokens;
+
+    GGML_ASSERT(q_rng->ne[0] == 3 && q_rng->ne[1] == n_tokens);
+
+    // see llama_non_causal_type
+    if (!causal_attn && hparams.non_causal_type == LLAMA_NON_CAUSAL_TYPE_SWA_ONLY) {
+        causal_attn = swa_type == LLAMA_SWA_TYPE_NONE;
+    }
+
+    const bool swa      = swa_type != LLAMA_SWA_TYPE_NONE;
+    const bool is_2d    = ubatch->is_pos_2d();
+    const bool swa_full = !causal_attn && hparams.non_causal_type == LLAMA_NON_CAUSAL_TYPE_SWA_FULL;
+
+    const auto & cells = v_cells[0];
+
+    const int64_t n_idx   = kv_idx->ne[0];
+    const int64_t n_group = kv_idx->ne[1];
+
+    int32_t * idx = (int32_t *) kv_idx->data;
+    int32_t * rng = (int32_t *) q_rng->data;
+
+    std::fill(idx, idx + n_idx*n_group, 0);
+
+    kv_idx_pos.resize(n_idx*n_group);
+
+    // group and list length of each sequence of the ubatch, the min position of the sequence in the ubatch
+    std::vector<int32_t>   seq_group(LLAMA_MAX_SEQ, -1);
+    std::vector<int32_t>   group_n(n_group, 0);
+    std::vector<llama_pos> seq_pos_min(LLAMA_MAX_SEQ, std::numeric_limits<llama_pos>::max());
+
+    int32_t n_group_used = 0;
+
+    for (uint32_t i = 0; i < n_tokens; ++i) {
+        const llama_seq_id seq_id = ubatch->seq_id[i][0];
+
+        seq_pos_min[seq_id] = std::min(seq_pos_min[seq_id], ubatch->pos[i]);
+
+        if (seq_group[seq_id] >= 0) {
+            continue;
+        }
+
+        GGML_ASSERT(n_group_used < n_group);
+
+        const int32_t g = n_group_used++;
+        seq_group[seq_id] = g;
+
+        const auto & sp = cells.seq_pos_cells(seq_id);
+        GGML_ASSERT((int64_t) sp.size() <= n_idx);
+
+        int32_t   * dst  = idx + g*n_idx;
+        llama_pos * pdst = kv_idx_pos.data() + g*n_idx;
+
+        int32_t n = 0;
+        for (const auto & [p, c] : sp) {
+            dst[n]  = (int32_t) c;
+            pdst[n] = p;
+            n++;
+        }
+        group_n[g] = n;
+
+        // M-RoPE: cells with the same position are ordered by (y, x), the order of the 2D causal mask
+        if (is_2d) {
+            for (int32_t a = 0; a < n;) {
+                int32_t b = a + 1;
+                while (b < n && pdst[b] == pdst[a]) {
+                    b++;
+                }
+                if (b - a > 1) {
+                    std::sort(dst + a, dst + b, [&](int32_t c0, int32_t c1) {
+                        const auto & e0 = cells.ext_get(c0);
+                        const auto & e1 = cells.ext_get(c1);
+                        return e0.y < e1.y || (e0.y == e1.y && e0.x < e1.x);
+                    });
+                }
+                a = b;
+            }
+        }
+    }
+
+    for (uint32_t i = 0; i < n_tokens; ++i) {
+        const llama_seq_id seq_id = ubatch->seq_id[i][0];
+
+        const int32_t g = seq_group[seq_id];
+        const int32_t n = group_n[g];
+
+        const int32_t   * cid = idx + g*n_idx;
+        const llama_pos * pos = kv_idx_pos.data() + g*n_idx;
+
+        const llama_pos p1 = ubatch->pos[i];
+
+        // first entry with a position after p1
+        const int32_t m = (int32_t) (std::upper_bound(pos, pos + n, p1) - pos);
+
+        int32_t lo = 0;
+        int32_t hi = causal_attn ? m : n;
+
+        // M-RoPE causal mask: of the cells at p1, keep the ones not after the token in 2D order
+        if (causal_attn && is_2d) {
+            const llama_pos p1_x = ubatch->pos[i + n_tokens*2];
+            const llama_pos p1_y = ubatch->pos[i + n_tokens];
+
+            const int32_t a = (int32_t) (std::lower_bound(pos, pos + m, p1) - pos);
+
+            hi = (int32_t) (std::partition_point(cid + a, cid + m, [&](int32_t c) {
+                return !cells.ext_get(c).is_2d_gt(p1_x, p1_y);
+            }) - cid);
+        }
+
+        if (swa) {
+            const auto masked = [&](llama_pos p0) {
+                return llama_hparams::is_masked_swa(n_swa, swa_type, p0, p1);
+            };
+
+            // the masked cells before p1 are a prefix, the ones after p1 a suffix
+            lo = (int32_t) (std::partition_point(pos, pos + m, masked) - pos);
+
+            if (!causal_attn) {
+                hi = (int32_t) (std::partition_point(pos + m, pos + n, [&](llama_pos p0) { return !masked(p0); }) - pos);
+            }
+
+            // see llama_non_causal_type: the cells of the sequence from its first token in the ubatch stay visible
+            if (swa_full) {
+                lo = std::min(lo, (int32_t) (std::lower_bound(pos, pos + n, seq_pos_min[seq_id]) - pos));
+                hi = n;
+            }
+        }
+
+        lo = std::min(lo, hi);
+
+        rng[3*i + 0] = g;
+        rng[3*i + 1] = lo;
+        rng[3*i + 2] = hi;
+
+        stats_attn.read  += hi - lo;
+        stats_attn.range += n;
+        stats_attn.owned += n;
+    }
+
+    // LLAMA_KV_IDX_CHECK=1 compares the ranges with the mask, for testing
+    static const bool check = [] {
+        const char * env = getenv("LLAMA_KV_IDX_CHECK");
+        return env != nullptr && atoi(env) != 0;
+    }();
+
+    if (check) {
+        const int64_t n_kv = get_size();
+
+        std::vector<ggml_fp16_t> mask(n_kv*n_tokens);
+        fill_kq_mask(GGML_TYPE_F16, mask.data(), n_kv, 1, ubatch, causal_attn);
+
+        const ggml_fp16_t drop = ggml_fp32_to_fp16(-INFINITY);
+
+        std::vector<uint8_t> in_rng(n_kv);
+
+        for (uint32_t i = 0; i < n_tokens; ++i) {
+            std::fill(in_rng.begin(), in_rng.end(), 0);
+
+            const int32_t * cid = idx + rng[3*i]*n_idx;
+            for (int32_t j = rng[3*i + 1]; j < rng[3*i + 2]; ++j) {
+                in_rng[cid[j]] = 1;
+            }
+
+            for (int64_t j = 0; j < n_kv; ++j) {
+                const bool keep = mask[i*n_kv + j] != drop;
+                if (keep != (in_rng[j] != 0)) {
+                    LLAMA_LOG_ERROR("%s: token %u (seq %d, pos %d), cell %" PRId64 ": mask %s, index range %s\n", __func__,
+                            i, ubatch->seq_id[i][0], ubatch->pos[i], j, keep ? "keeps" : "drops", in_rng[j] ? "keeps" : "drops");
+                    GGML_ABORT("indexed attention does not match the mask");
+                }
+            }
+        }
+    }
+}
+
 void llama_kv_cache::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
     const int64_t n_tokens = ubatch->n_tokens;
 
@@ -2963,6 +3170,26 @@ void llama_kv_cache_context::set_input_attn_run(ggml_tensor * idxs, ggml_tensor 
 
 const ggml_fp16_t * llama_kv_cache_context::fill_kq_mask_scratch(const llama_ubatch * ubatch, bool causal_attn) const {
     return kv->fill_kq_mask_scratch(ubatch, n_kv, causal_attn);
+}
+
+bool llama_kv_cache_context::kv_idx_supported() const {
+    return kv->kv_idx_supported();
+}
+
+void llama_kv_cache_context::get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const {
+    kv->get_kv_idx_shape(ubatch, n_idx, n_group);
+}
+
+void llama_kv_cache_context::set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const {
+    kv->set_input_kv_idx(kv_idx, q_rng, ubatch, causal_attn);
+}
+
+ggml_tensor * llama_kv_cache_context::get_k_all(ggml_context * ctx, int32_t il) const {
+    return kv->get_k(ctx, il, kv->get_size(), sinfos[i_cur]);
+}
+
+ggml_tensor * llama_kv_cache_context::get_v_all(ggml_context * ctx, int32_t il) const {
+    return kv->get_v(ctx, il, kv->get_size(), sinfos[i_cur]);
 }
 
 ggml_tensor * llama_kv_cache_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {

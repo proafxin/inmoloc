@@ -49,6 +49,12 @@ static const llm_fused_op_probe llm_fused_op_flash_attn_probe = {
     /*.n_tokens_per_seq =*/ 1,
 };
 
+static const llm_fused_op_probe llm_fused_op_flash_attn_kv_idx_probe = {
+    /*.op               =*/ LLM_FUSED_OP_FLASH_ATTN,
+    /*.name             =*/ "Flash Attention with indexed KV cells",
+    /*.n_tokens_per_seq =*/ 1,
+};
+
 static const llm_fused_op_probe llm_fused_op_gdn_ar_probe = {
     /*.op               =*/ LLM_FUSED_OP_GDN_AR,
     /*.name             =*/ "fused Gated Delta Net (autoregressive)",
@@ -236,6 +242,10 @@ llama_context::llama_context(
 
     cparams.flash_attn = params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED;
     cparams.auto_fa    = params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO;
+
+    // resolved with the fused ops, once flash attention is resolved
+    cparams.kv_idx      = false;
+    cparams.auto_kv_idx = true;
 
     cparams.fused_gdn_ar = true;
     cparams.fused_gdn_ch = true;
@@ -572,6 +582,22 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
     if (cparams.auto_fa) {
         resolve(llm_fused_op_flash_attn_probe, cparams.flash_attn);
         cparams.auto_fa = false;
+    }
+
+    // indexed flash attention reads only the cells of each sequence of a unified KV cache, see
+    // ggml_flash_attn_ext_set_kv_idx(); it is used when every device that runs attention supports it
+    // LLAMA_KV_IDX=0 disables it
+    if (cparams.auto_kv_idx) {
+        static const bool env_enabled = [] {
+            const char * env = getenv("LLAMA_KV_IDX");
+            return env == nullptr || atoi(env) != 0;
+        }();
+
+        cparams.kv_idx = env_enabled && cparams.flash_attn && cparams.kv_unified && !model.hparams.use_alibi;
+        if (cparams.kv_idx) {
+            resolve(llm_fused_op_flash_attn_kv_idx_probe, cparams.kv_idx);
+        }
+        cparams.auto_kv_idx = false;
     }
 
     if (cparams.auto_fgdn) {

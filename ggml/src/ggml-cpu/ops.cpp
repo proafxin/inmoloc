@@ -8625,6 +8625,10 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
     const ggml_tensor * mask  = dst->src[3];
     const ggml_tensor * sinks = dst->src[4];
 
+    // optional index lists that replace the mask, see ggml_flash_attn_ext_set_kv_idx()
+    const ggml_tensor * kv_idx = dst->src[5];
+    const ggml_tensor * q_rng  = dst->src[6];
+
     GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)
     GGML_TENSOR_LOCALS(size_t,  nbq, q,   nb)
     GGML_TENSOR_LOCALS(int64_t, nek, k,   ne)
@@ -8695,6 +8699,10 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
 
     int ith = params->ith;
 
+    // an F16 V is accumulated in F16, unless the K/V rows are indexed: F16 keeps too few digits to make the sum
+    // independent of the order of the rows, so the indexed path converts V rows and accumulates in F32
+    const bool v_acc_f16 = v->type == GGML_TYPE_F16 && kv_idx == nullptr;
+
     for (int ir = ir0; ir < ir1; ++ir) {
         // q indices
         const int iq3 = ir/(neq2*neq1);
@@ -8712,7 +8720,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
         ggml_fp16_t * VKQ16 = (ggml_fp16_t *) (VKQ32 + 1*DV); // (temporary) FP16 VKQ accumulator
         ggml_fp16_t * Q_q   = (ggml_fp16_t *) (VKQ32 + 2*DV); // (temporary) buffer for Q converted to quantized/FP16
 
-        if (v->type == GGML_TYPE_F16) {
+        if (v_acc_f16) {
             memset(VKQ16, 0, DV*sizeof(ggml_fp16_t));
         } else {
             memset(VKQ32, 0, DV*sizeof(float));
@@ -8731,11 +8739,30 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
         const float * pq = (const float *) ((char *) q->data + (iq1*nbq1 + iq2*nbq2 + iq3*nbq3));
         q_to_vec_dot(pq, Q_q, DK);
 
+        // K/V rows to visit: [ic_start, ic_end), or a range of the index list of the query's group
+        const int32_t * idx      = nullptr;
+        int64_t         it_start = ic_start;
+        int64_t         it_end   = ic_end;
+
+        if (kv_idx) {
+            const int32_t * rng = (const int32_t *) ((const char *) q_rng->data + iq1*q_rng->nb[1]);
+
+            GGML_ASSERT(rng[0] >= 0 && rng[0] < kv_idx->ne[1]);
+            GGML_ASSERT(rng[1] >= 0 && rng[1] <= rng[2] && rng[2] <= kv_idx->ne[0]);
+
+            idx      = (const int32_t *) ((const char *) kv_idx->data + rng[0]*kv_idx->nb[1]);
+            it_start = rng[1];
+            it_end   = rng[2];
+        }
+
         // online softmax / attention
         // loop over n_kv and n_head_kv
         // ref: https://arxiv.org/pdf/2112.05682.pdf
 
-        for (int64_t ic = ic_start; ic < ic_end; ++ic) {
+        for (int64_t it = it_start; it < it_end; ++it) {
+            const int64_t ic = idx ? idx[it] : it;
+            GGML_ASSERT(ic >= 0 && ic < nek1);
+
             const float mv = mp ? slope*GGML_CPU_FP16_TO_FP32(mp[ic]) : 0.0f;
             if (mv == -INFINITY) {
                 continue;
@@ -8761,7 +8788,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
 
             const char * v_data = ((const char *) v->data + (ic*nbv1 + iv2*nbv2 + iv3*nbv3));
 
-            if (v->type == GGML_TYPE_F16) {
+            if (v_acc_f16) {
                 if (s > M) {
                     // s is new maximum, ms < 1.0f, vs == expf(s - s) == 1.0f
                     M = s;
@@ -8802,7 +8829,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
             S = S*ms + vs; // scale and increment sum with partial sum
         }
 
-        if (v->type == GGML_TYPE_F16) {
+        if (v_acc_f16) {
             for (int64_t d = 0; d < DV; ++d) {
                 VKQ32[d] = GGML_CPU_FP16_TO_FP32(VKQ16[d]);
             }
@@ -9258,7 +9285,10 @@ static void ggml_compute_forward_flash_attn_ext_f16(
     const bool use_ref = params->use_ref;
 
     const bool kv_is_f32_or_f16 = (k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16);
-    const bool use_split_kv_path = !use_ref && (neq1 == 1 && neq3 == 1) && kv_is_f32_or_f16 && (k->type == v->type) && q->type == GGML_TYPE_F32 && nek1 >= 512;
+    // indexed K/V rows (see ggml_flash_attn_ext_set_kv_idx) are only handled by the vec path
+    const bool use_kv_idx = dst->src[5] != nullptr;
+
+    const bool use_split_kv_path = !use_ref && !use_kv_idx && (neq1 == 1 && neq3 == 1) && kv_is_f32_or_f16 && (k->type == v->type) && q->type == GGML_TYPE_F32 && nek1 >= 512;
 
     if (use_split_kv_path) {
         const int64_t chunk_size = (nek1 + nth - 1) / nth;
@@ -9315,7 +9345,7 @@ static void ggml_compute_forward_flash_attn_ext_f16(
         const int64_t dr = (nr + nchunk - 1) / nchunk;
 
         static constexpr int64_t Q_TILE_SZ  = ggml_fa_tile_config::Q;
-        bool use_tiled = !use_ref &&
+        bool use_tiled = !use_ref && !use_kv_idx &&
                                (q->type == GGML_TYPE_F32 &&
                                 kv_is_f32_or_f16 &&
                                 k->type == v->type &&

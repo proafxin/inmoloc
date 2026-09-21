@@ -282,6 +282,17 @@ bool llama_hparams::is_ple(uint32_t il) const {
     GGML_ABORT("%s: il (%u) out of bounds (n_layer_all: %u)\n", __func__, il, n_layer_all);
 }
 
+uint32_t llama_hparams::n_embd_gdn_inp() const {
+    // q, k: [ssm_d_state, ssm_n_group], v: [ssm_d_inner], g: [ssm_dt_rank] (or [ssm_d_inner] for KDA), beta: [ssm_dt_rank]
+    if (ssm_d_state == 0 || ssm_n_group == 0 || ssm_dt_rank == 0 || ssm_d_inner == 0) {
+        return 0;
+    }
+
+    const uint32_t n_g = n_embd_head_kda != 0 ? ssm_d_inner : ssm_dt_rank;
+
+    return 2*ssm_d_state*ssm_n_group + ssm_d_inner + n_g + ssm_dt_rank;
+}
+
 uint32_t llama_hparams::n_pos_per_embd() const {
     return rope_type == LLAMA_ROPE_TYPE_MROPE || rope_type == LLAMA_ROPE_TYPE_IMROPE ? 4 : 1;
 }

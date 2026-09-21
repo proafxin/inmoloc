@@ -219,6 +219,19 @@ public:
     // (every run is gathered) and so the tensor is not allocated
     const ggml_fp16_t * fill_kq_mask_scratch(const llama_ubatch * ubatch, int64_t n_kv, bool causal_attn) const;
 
+    // indexed attention, see ggml_flash_attn_ext_set_kv_idx()
+    // each sequence of the ubatch is a group: the list of its cells sorted by position (then by the 2D position),
+    // and each token attends to the range of that list that the mask would keep
+    // the attention reads only the cells of the sequence, and the host fills O(cells of the sequences + tokens)
+    // instead of the O(tokens * n_kv) mask
+    bool kv_idx_supported() const;
+
+    // shape of the index lists of the ubatch: [n_idx, n_group], padded so that graphs can be reused
+    void get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const;
+
+    // kv_idx: I32 [n_idx, n_group], q_rng: I32 [3, n_tokens]
+    void set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const;
+
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
@@ -330,6 +343,9 @@ private:
 
     // see fill_kq_mask_scratch()
     mutable std::vector<ggml_fp16_t> kq_mask_scratch;
+
+    // see set_input_kv_idx()
+    mutable std::vector<llama_pos> kv_idx_pos;
 
     // fills a KQ mask [n_kv, n_tokens/n_stream, 1, n_stream] of type F16 or F32 at data
     void fill_kq_mask(ggml_type type, void * data, int64_t n_kv, int64_t n_stream, const llama_ubatch * ubatch, bool causal_attn) const;
@@ -447,6 +463,15 @@ public:
 
     // see llama_kv_cache::fill_kq_mask_scratch()
     const ggml_fp16_t * fill_kq_mask_scratch(const llama_ubatch * ubatch, bool causal_attn) const;
+
+    // see llama_kv_cache::set_input_kv_idx()
+    bool kv_idx_supported() const;
+    void get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const;
+    void set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const;
+
+    // views of all cells of the cache, for indexed attention
+    ggml_tensor * get_k_all(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_v_all(ggml_context * ctx, int32_t il) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     // note: the heads in k_cur and v_cur should be laid out contiguously in memory

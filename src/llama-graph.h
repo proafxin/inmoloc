@@ -286,12 +286,34 @@ public:
 
     bool can_reuse(const llm_graph_params & params) override;
 
+    // like can_reuse, for the wrappers that hold this input next to an attention one
+    bool can_reuse_impl(const llm_graph_params & params, const llama_memory_recurrent_context * mctx_cur);
+
     ggml_tensor * s_copy;  // I32 [n_rs]
 
     // views of s_copy, computed once per graph
     // and shared across layers which use build_rs
     ggml_tensor * s_copy_main;   // I32 [n_seqs]
     ggml_tensor * s_copy_extra;  // I32 [n_rs - n_seqs]
+
+    // rows of the scan state, which alternates between two rows when a rollback replays the cached inputs
+    // rs_s_write_all holds the row every cell of the range ends up in: the computed cells first, then the others
+    ggml_tensor * rs_s_write_all   = nullptr; // I32 [n_rs]
+    ggml_tensor * rs_s_write       = nullptr; // I32 [n_seqs]         view of rs_s_write_all
+    ggml_tensor * rs_s_write_extra = nullptr; // I32 [n_rs - n_seqs]  view of rs_s_write_all
+    ggml_tensor * rs_s_prev        = nullptr; // I32 [n_seqs]         rows for the state before the step's own tokens
+    ggml_tensor * rs_s_copy       = nullptr; // I32 [n_rs]
+    ggml_tensor * rs_s_copy_main  = nullptr; // I32 [n_seqs]
+    ggml_tensor * rs_s_copy_extra = nullptr; // I32 [n_rs - n_seqs]
+
+    // rows of the cached scan inputs, see llama_memory_recurrent::rs_replay
+    // nullptr when the rollback keeps a state snapshot per draft position instead
+    ggml_tensor * rs_x_read  = nullptr; // I32 [n_seqs]        rows a replay reads
+    ggml_tensor * rs_x_write = nullptr; // I32 [n_seqs]        rows this step writes
+    ggml_tensor * rs_x_mask  = nullptr; // F32 [1, 1, n_replay, n_seqs] 1 for replayed tokens, 0 for padding
+
+    // tokens replayed before this step, 0 when no rollback is pending; shapes the graph
+    uint32_t n_replay = 0;
 
     const llama_memory_recurrent_context * mctx;
 
@@ -366,6 +388,11 @@ public:
     // note: assumes v_rot^2 == I
     ggml_tensor * self_k_rot = nullptr;
     ggml_tensor * self_v_rot = nullptr;
+
+    // indexed attention (see llama_kv_cache::set_input_kv_idx), nullptr when the mask is used
+    // the mask tensor still exists for graphs that need it; tensors that no node reads are not allocated
+    ggml_tensor * self_kv_idx = nullptr; // I32 [n_idx, n_group]
+    ggml_tensor * self_q_rng  = nullptr; // I32 [3, n_batch]
 
     // attention runs, empty when the whole ubatch attends the full view, see llama_kv_attn_run
     // per run: the cell indices (I32 [n_idx]) and the mask (F16 [n_idx, t1 - t0, 1, 1]) of a gather run, nullptr otherwise
@@ -1211,7 +1238,9 @@ struct llm_graph_context {
             ggml_tensor * v_mla,   // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
                 int64_t   n_kv_max,
                   float   kq_scale,
-                    int   il) const;
+                    int   il,
+            ggml_tensor * kv_idx = nullptr,  // I32 [n_idx, n_group], see ggml_flash_attn_ext_set_kv_idx()
+            ggml_tensor * q_rng  = nullptr) const; // I32 [3, n_tokens]
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 
@@ -1354,7 +1383,9 @@ struct llm_graph_context {
                uint32_t   rs_head,
                uint32_t   rs_size,
                 int32_t   rs_zero,
-            const llm_graph_get_rows_fn & get_state_rows = ggml_get_rows) const;
+            const llm_graph_get_rows_fn & get_state_rows = ggml_get_rows,
+                   bool   zero_both = false,
+            ggml_tensor * state_copy_extra_dst = nullptr) const;
 
     llm_graph_input_rs * build_rs_inp() const;
 

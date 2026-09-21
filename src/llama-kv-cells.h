@@ -395,6 +395,14 @@ public:
         return (uint32_t) seq_pos[seq_id].size();
     }
 
+    // the (pos, cell) pairs of the cells that carry sequence seq_id, ordered by position
+    const std::set<std::pair<llama_pos, uint32_t>> & seq_pos_cells(llama_seq_id seq_id) const {
+        assert(seq_id >= 0);
+        assert(seq_id < LLAMA_MAX_SEQ);
+
+        return seq_pos[seq_id];
+    }
+
     // the range of cell indices [lo, hi) that carry sequence seq_id, {0, 0} if the sequence is not present
     std::pair<uint32_t, uint32_t> seq_cell_range(llama_seq_id seq_id) const {
         assert(seq_id >= 0);

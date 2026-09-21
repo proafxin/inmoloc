@@ -1527,7 +1527,7 @@ private:
                 params_base.cache_idle_slots = false;
             } else {
                 if (params_base.kv_unified) {
-                    SRV_TRC("%s", "idle slots will be saved to prompt cache and cleared upon starting a new task\n");
+                    SRV_TRC("%s", "idle slots stay in memory, they are saved to prompt cache and cleared when the memory is needed\n");
                 } else {
                     // without a unified KV cache, clearing a slot frees no reusable room, so we only
                     // publish a RAM-cache copy of idle slots (their KV stays in VRAM) [TAG_IDLE_SLOT_CLEAR]
@@ -1714,8 +1714,10 @@ private:
         }
 
         // find the slot that has been least recently used
+        // with a unified KV cache, idle slots keep their prompts in memory, so an empty slot goes first
         if (ret == nullptr) {
             int64_t t_last = -1;
+            bool    empty  = false;
 
             for (server_slot & slot : slots) {
                 // skip the slot if it is not available
@@ -1723,8 +1725,14 @@ private:
                     continue;
                 }
 
+                const bool slot_empty = params_base.kv_unified && slot.prompt.n_tokens() == 0;
+                if (ret && empty && !slot_empty) {
+                    continue;
+                }
+
                 // select the current slot if the criteria match
-                if (!ret || slot.t_last_used <= t_last) {
+                if (!ret || (slot_empty && !empty) || slot.t_last_used <= t_last) {
+                    empty  = slot_empty;
                     t_last = slot.t_last_used;
                     ret = &slot;
                 }
@@ -1762,8 +1770,22 @@ private:
 
                 if (from_memory) {
                     SLT_DBG(*ret, "%s", "not loading from the prompt cache, a slot in memory can share the prefix\n");
-                } else if (!ret->prompt_load(*prompt_cache, task.tokens)) {
-                    ret->prompt_clear();
+                } else {
+                    // idle slots in memory give up room for the load: its cells replace the ones of this slot
+                    if (kv_preemption_enabled()) {
+                        while (kv_cells_committed() - ret->prompt.n_tokens() + task.n_tokens() > kv_cells_total() &&
+                               try_clear_idle_slot_rs(ret, "KV cells for a prompt cache load")) {
+                        }
+                    }
+                    if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
+                        const uint32_t n_new = ret->prompt.n_tokens() > 0 ? 0 : 1;
+                        while (n_rs_cells_held() + n_new > llama_n_rs_cells(ctx_tgt) && try_clear_idle_slot_rs(ret)) {
+                        }
+                    }
+
+                    if (!ret->prompt_load(*prompt_cache, task.tokens)) {
+                        ret->prompt_clear();
+                    }
                 }
 
                 prompt_cache->update();
@@ -1776,35 +1798,12 @@ private:
     }
 
     // return true if at least one slot has been cleared
-    // TODO: improve logic
-    //       - smarter decision which slot to clear (LRU or longest prompt?)
-    //       - move slot to level 2 cache instead of removing?
-    //       - instead of purging, try to store and resume later?
     bool try_clear_idle_slots() {
-        bool res = false;
-
         if (!params_base.kv_unified) {
-            return res;
+            return false;
         }
 
-        for (auto & slot : slots) {
-            if (slot.is_processing()) {
-                continue;
-            }
-
-            if (slot.prompt.n_tokens() > 0) {
-                SRV_WRN("purging slot %d with %zu tokens\n", slot.id, slot.prompt.tokens.size());
-
-                slot.prompt_clear();
-
-                res = true;
-
-                // clear slots one by one
-                break;
-            }
-        }
-
-        return res;
+        return try_clear_idle_slot_rs(nullptr, "KV cells");
     }
 
     // recurrent/hybrid models hold one recurrent-state cell per sequence still in memory:
@@ -1820,22 +1819,60 @@ private:
         return n;
     }
 
-    // free the memory of one idle slot, never touching `keep`
-    // unlike try_clear_idle_slots this does not require a unified KV cache, recurrent cells are always shared
-    bool try_clear_idle_slot_rs(const server_slot * keep, const char * reason = "a recurrent-state cell") {
-        for (auto & slot : slots) {
-            if (&slot == keep || slot.is_processing() || slot.prompt.n_tokens() == 0) {
+    // true if a starting slot can share a long enough prefix from this idle slot, see try_share_prefix()
+    bool idle_slot_is_donor(const server_slot & slot) const {
+        for (const auto & other : slots) {
+            if (other.state != SLOT_STATE_STARTED || !other.task || !prefix_share_allowed(other.task->type) ||
+                !are_lora_equal(other.lora, slot.lora)) {
                 continue;
             }
 
-            SRV_WRN("purging slot %d with %zu tokens to free %s\n", slot.id, slot.prompt.tokens.size(), reason);
-
-            slot.prompt_clear();
-
-            return true;
+            const int32_t n_own = other.prompt.tokens.get_common_prefix(other.task->tokens);
+            if (prefix_share_from(slot, other.task->tokens).n_share >= n_own + prefix_share_min_gain()) {
+                return true;
+            }
         }
 
         return false;
+    }
+
+    // free the memory of one idle slot, never touching `keep` and `keep_donor`
+    // idle slots keep their prompts in memory, so they can be reused or shared, until the memory is needed:
+    // the victim is the least recently used slot, sparing the donors of starting slots when possible,
+    // and its prompt goes to the prompt cache before it is cleared
+    // unlike a KV cache, recurrent cells are always shared, so this does not require a unified KV cache
+    bool try_clear_idle_slot_rs(const server_slot * keep, const char * reason = "a recurrent-state cell", const server_slot * keep_donor = nullptr) {
+        server_slot * victim       = nullptr;
+        bool          victim_donor = false;
+
+        for (auto & slot : slots) {
+            if (&slot == keep || &slot == keep_donor || slot.is_processing() || slot.prompt.n_tokens() == 0) {
+                continue;
+            }
+
+            const bool donor = idle_slot_is_donor(slot);
+
+            if (victim == nullptr || (victim_donor && !donor) ||
+                (donor == victim_donor && slot.t_last_used < victim->t_last_used)) {
+                victim       = &slot;
+                victim_donor = donor;
+            }
+        }
+
+        if (victim == nullptr) {
+            return false;
+        }
+
+        SLT_INF(*victim, "evicting idle slot with %zu tokens to free %s\n", victim->prompt.tokens.size(), reason);
+
+        if (params_base.cache_idle_slots && prompt_cache && victim->prompt_save(*prompt_cache)) {
+            SLT_DBG(*victim, "%s", "__TEST_TAG_CACHE_IDLE_SLOT__\n");
+            prompt_cache->update();
+        }
+
+        victim->prompt_clear();
+
+        return true;
     }
 
     //
@@ -2286,6 +2323,20 @@ private:
         }
 
         kv_budget_prompt = std::max(0, n_total - kv_cells_held() - n_step_gen);
+
+        // prompts wait for room instead of preempting, but idle slots give up theirs
+        int32_t n_prompt_left = 0;
+        for (const auto * slot : running) {
+            if (slot->state == SLOT_STATE_STARTED || slot->state == SLOT_STATE_PROCESSING_PROMPT) {
+                n_prompt_left += std::max(0, slot->n_input_tokens() - slot->prompt.n_tokens() - slot->media_n_decoded);
+            }
+        }
+
+        const int32_t n_prompt_want = std::min(n_prompt_left, (int32_t) llama_n_batch(ctx_tgt));
+
+        while (kv_budget_prompt < n_prompt_want && try_clear_idle_slot_rs(nullptr, "KV cells for prompts")) {
+            kv_budget_prompt = std::max(0, n_total - kv_cells_held() - n_step_gen);
+        }
     }
 
     std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
@@ -3038,6 +3089,19 @@ private:
                         break;
                     }
 
+                    // the prompt needs no new cells for what the slot already holds or can share from another slot,
+                    // and that other slot must not be evicted to make room
+                    int32_t n_reuse = slot->prompt.tokens.get_common_prefix(task.tokens);
+
+                    const server_slot * donor = nullptr;
+                    if (params_base.kv_unified && prefix_share_allowed(task.type) && task.params.lora.empty()) {
+                        prefix_share share;
+                        donor = prefix_share_find(slot, task.tokens, n_reuse, share);
+                        if (donor) {
+                            n_reuse = share.n_share;
+                        }
+                    }
+
                     // with --rs-cells below --parallel there can be fewer recurrent-state cells than slots:
                     // wait for a free cell here, because a decode that cannot get one errors every active slot
                     if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
@@ -3051,7 +3115,7 @@ private:
                             break;
                         }
 
-                        while (n_rs_cells_held() + n_rs_new > n_rs_cells && try_clear_idle_slot_rs(slot)) {
+                        while (n_rs_cells_held() + n_rs_new > n_rs_cells && try_clear_idle_slot_rs(slot, "a recurrent-state cell", donor)) {
                         }
 
                         if (n_rs_cells_held() + n_rs_new > n_rs_cells) {
@@ -3073,7 +3137,9 @@ private:
 
                         const int32_t n_total = kv_cells_total();
 
-                        while (kv_cells_committed() + task.n_tokens() > n_total && try_clear_idle_slot_rs(slot, "KV cells")) {
+                        const int32_t n_need = std::max(0, task.n_tokens() - n_reuse);
+
+                        while (kv_cells_committed() + n_need > n_total && try_clear_idle_slot_rs(slot, "KV cells", donor)) {
                         }
 
                         bool any_running = false;
@@ -3081,9 +3147,9 @@ private:
                             any_running = any_running || other.is_processing();
                         }
 
-                        if (any_running && kv_cells_committed() + task.n_tokens() > n_total) {
-                            SRV_DBG("not enough free KV cells (committed = %d, prompt = %d, total = %d), defer task, id_task = %d\n",
-                                    kv_cells_committed(), task.n_tokens(), n_total, id_task);
+                        if (any_running && kv_cells_committed() + n_need > n_total) {
+                            SRV_DBG("not enough free KV cells (committed = %d, prompt = %d, reused = %d, total = %d), defer task, id_task = %d\n",
+                                    kv_cells_committed(), task.n_tokens(), n_reuse, n_total, id_task);
                             queue_tasks.defer(std::move(task));
                             break;
                         }
@@ -3107,7 +3173,8 @@ private:
                         break; // drop the task
                     }
 
-                    if (params_base.cache_idle_slots) {
+                    // with a unified KV cache, idle slots stay in memory until it is needed, see try_clear_idle_slot_rs()
+                    if (params_base.cache_idle_slots && !params_base.kv_unified) {
                         for (auto & slot : slots) {
                             if (!slot.is_processing()) {
                                 SLT_TRC(slot, "%s", "saving idle slot to prompt cache\n");
@@ -3115,31 +3182,6 @@ private:
                                 if (slot.prompt_save(*prompt_cache)) {
                                     SLT_DBG(slot, "%s", "__TEST_TAG_CACHE_IDLE_SLOT__\n");
                                     prompt_cache->update();
-                                }
-
-                                if (params_base.kv_unified) {
-                                    // keep an idle slot that a starting slot can share a prefix from, see try_share_prefix()
-                                    // it is cleared on a later launch, or earlier when memory runs short
-                                    bool donor = false;
-                                    for (auto & other : slots) {
-                                        if (other.state != SLOT_STATE_STARTED || !other.task || !prefix_share_allowed(other.task->type) ||
-                                            !are_lora_equal(other.lora, slot.lora)) {
-                                            continue;
-                                        }
-
-                                        const int32_t n_own = other.prompt.tokens.get_common_prefix(other.task->tokens);
-                                        if (prefix_share_from(slot, other.task->tokens).n_share >= n_own + prefix_share_min_gain()) {
-                                            donor = true;
-                                            break;
-                                        }
-                                    }
-
-                                    // [TAG_IDLE_SLOT_CLEAR]
-                                    if (donor) {
-                                        SLT_DBG(slot, "%s", "keeping idle slot in memory, a starting slot can share its prefix\n");
-                                    } else {
-                                        slot.prompt_clear();
-                                    }
                                 }
                             }
                         }
@@ -3675,6 +3717,21 @@ private:
         loop_timing_report(batch.size());
     }
 
+    // prompt tokens per iteration while slots generate, 0 = no cap
+    // default: fill up one ubatch next to the generation tokens, so that the iteration is a single ubatch
+    // (at least a quarter ubatch of prompt, so a prompt still makes progress next to many generating slots)
+    // LLAMA_PROMPT_CAP: 0 disables the cap, a positive value sets it
+    static int32_t prompt_cap_tokens(int32_t n_ubatch, int32_t n_gen_tokens) {
+        static const int32_t env = [] {
+            const char * v = getenv("LLAMA_PROMPT_CAP");
+            return v ? atoi(v) : -1;
+        }();
+        if (env >= 0) {
+            return env;
+        }
+        return std::max(n_ubatch - n_gen_tokens, n_ubatch / 4);
+    }
+
     void pre_decode() {
         // apply context-shift if needed
         // TODO: simplify and improve
@@ -3889,9 +3946,18 @@ private:
             // media chunks are split only while another slot generates, so that its tokens do not wait for a whole image
             const bool any_generating = any_slot_generating();
 
+            // while slots generate, prompt tokens (text and media) per iteration are capped, so a long prompt does not
+            // hold up their next token for a whole n_batch; see prompt_cap_tokens()
+            const int32_t n_prompt_cap = any_generating ? prompt_cap_tokens(n_ubatch, batch.size()) : 0;
+            int32_t       n_prompt_cur = 0; // prompt tokens added in this iteration
+
             iterate(slots, [&](server_slot & slot) {
                 if (!add_ok || batch.size() >= n_batch) {
                     return; // batch is full, skip remaining slots
+                }
+
+                if (n_prompt_cap > 0 && n_prompt_cur >= n_prompt_cap) {
+                    return; // the prompt tokens of this iteration are used up
                 }
 
                 if (!slot.is_processing() || slot.state == SLOT_STATE_PREEMPTED) {
@@ -4286,6 +4352,12 @@ private:
                             break;
                         }
 
+                        // a piece that does not fit the prompt cap waits for the next iteration, unless it is the first prompt input
+                        if (n_prompt_cap > 0 && n_prompt_cur > 0 && n_prompt_cur + n_piece > n_prompt_cap) {
+                            has_mtmd = true;
+                            break;
+                        }
+
                         // wait until the KV cache has room for the piece
                         if (kv_budget_prompt >= 0) {
                             if (n_piece > kv_budget_prompt) {
@@ -4325,6 +4397,7 @@ private:
                         metrics.n_mtmd_decoded_tokens  += n_tokens_out;
 
                         metrics_queue_prompt(n_tokens_out);
+                        n_prompt_cur += (int32_t) n_tokens_out;
                         slot.stats.n_prompt_processed += n_tokens_out;
                         slot.stats.update_prompt_last();
 
@@ -4352,7 +4425,8 @@ private:
                     const auto last_user_pos = spans.last_user_message_pos();
 
                     // add prompt tokens for processing in the current batch
-                    while (slot.prompt.n_tokens() < slot.n_input_tokens() && batch.size() < n_batch && kv_budget_prompt != 0) {
+                    while (slot.prompt.n_tokens() < slot.n_input_tokens() && batch.size() < n_batch && kv_budget_prompt != 0 &&
+                           (n_prompt_cap <= 0 || n_prompt_cur < n_prompt_cap)) {
                         // get next token to process
                         llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                         if (cur_tok == LLAMA_TOKEN_NULL) {
@@ -4376,6 +4450,7 @@ private:
                             /* output    = */ slot.need_embd(),
                             /* is_prompt = */ true);
                         slot.prompt.tokens.push_back(cur_tok);
+                        n_prompt_cur++;
 
                         if (kv_budget_prompt > 0) {
                             kv_budget_prompt--;

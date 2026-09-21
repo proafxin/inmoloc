@@ -444,6 +444,11 @@ struct llama_hparams {
     // dimension of the recurrent state embeddings
     uint32_t n_embd_s() const;
 
+    // dimension of the gated delta-net inputs of one token (q, k, v, g, beta), 0 when the model has none
+    // caching these lets a rollback replay the tokens instead of keeping a state snapshot per draft position,
+    // see llama_memory_recurrent
+    uint32_t n_embd_gdn_inp() const;
+
     uint32_t n_pos_per_embd() const;
 
     // note: currently only support if either all or none of the layers are MLA

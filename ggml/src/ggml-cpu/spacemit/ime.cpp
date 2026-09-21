@@ -1627,6 +1627,10 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
             case GGML_OP_MUL:
             case GGML_OP_DIV:
             case GGML_OP_FLASH_ATTN_EXT:
+                if (op->op == GGML_OP_FLASH_ATTN_EXT && op->src[5] != nullptr) {
+                    break; // indexed K/V rows run on the generic CPU path
+                }
+                // fallthrough
             case GGML_OP_CONT:
             case GGML_OP_CPY:
             case GGML_OP_REPEAT:

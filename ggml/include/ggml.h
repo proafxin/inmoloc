@@ -2512,6 +2512,23 @@ extern "C" {
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
 
+    // Attend each query to a range of an index list instead of all K/V rows with a mask.
+    // The op must have been created without a mask and without max_bias (ALiBi).
+    //
+    // kv_idx: I32 [n_kv_max, n_group, 1, 1] - per group, indices into the K/V rows (dimension 1 of k and v)
+    // q_rng:  I32 [3, n_q, 1, 1], n_q >= q->ne[1] - per query row: group, lo, hi
+    //
+    // query row i attends to the K/V rows kv_idx[lo..hi) of its group, in that order; with the indices of a group
+    // sorted by position, causal, sliding window and non-causal attention are each a single range
+    // q, k and v must have ne[3] == 1
+    //
+    // backends declare support with the proc address "ggml_backend_flash_attn_ext_kv_idx" of their registry,
+    // ggml_backend_dev_supports_op() reports the op as unsupported on the others
+    GGML_API void ggml_flash_attn_ext_set_kv_idx(
+            struct ggml_tensor * a,
+            struct ggml_tensor * kv_idx,
+            struct ggml_tensor * q_rng);
+
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(
            struct ggml_context * ctx,
