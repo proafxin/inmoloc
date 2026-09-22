@@ -100,6 +100,9 @@ def main() -> int:
     parser.add_argument("--long", type=int, default=0, help="requests per level with a long document")
     parser.add_argument("--long-tokens", type=int, default=16000, help="approximate tokens of a long document")
     parser.add_argument("--save", default="", help="JSON file for the text of every response, to compare servers")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="varies the long documents; runs with the same seed send the same documents, which the "
+                             "server may then reuse from its cache")
     args = parser.parse_args()
 
     saved = {}
@@ -111,7 +114,7 @@ def main() -> int:
         prompts = []
         for i in range(level):
             if i < n_long:
-                prompts.append("Summarize the following document in detail.\n\n" + long_document(args.long_tokens, 1000*level + i))
+                prompts.append("Summarize the following document in detail.\n\n" + long_document(args.long_tokens, 1000000*args.seed + 1000*level + i))
             else:
                 prompts.append(f"Write a detailed essay about {TOPICS[i % len(TOPICS)]}.")
 

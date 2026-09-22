@@ -2978,8 +2978,14 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
     inp->attn_runs = build_attn_runs(mctx_cur, ubatch, hparams, cparams);
 
     for (const auto & run : inp->attn_runs) {
-        ggml_tensor * idxs = nullptr;
-        ggml_tensor * mask = nullptr;
+        ggml_tensor * idxs      = nullptr;
+        ggml_tensor * mask      = nullptr;
+        ggml_tensor * mask_full = nullptr;
+
+        ggml_tensor * kq_mask = inp->get_kq_mask();
+        if (kq_mask && (!run.gather || cparams.kv_rows)) {
+            mask_full = ggml_view_2d(ctx0, kq_mask, kq_mask->ne[0], run.t1 - run.t0, kq_mask->nb[1], run.t0*kq_mask->nb[1]);
+        }
 
         if (run.gather) {
             idxs = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, run.n_idx);
@@ -2996,6 +3002,7 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
 
         inp->attn_run_idxs.push_back(idxs);
         inp->attn_run_mask.push_back(mask);
+        inp->attn_run_mask_full.push_back(mask_full);
     }
 
     inp->self_k_rot = mctx_cur->build_input_k_rot(ctx0);
@@ -3102,7 +3109,7 @@ ggml_tensor * llm_graph_context::build_attn(
 
                 k    = k_full;
                 v    = v_full;
-                mask = ggml_view_2d(ctx0, kq_mask, kq_mask->ne[0], n_run, kq_mask->nb[1], run.t0*kq_mask->nb[1]);
+                mask = inp->attn_run_mask_full[r];
 
                 if (run.gather) {
                     rows = inp->attn_run_idxs[r];
