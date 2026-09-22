@@ -3916,7 +3916,23 @@ private:
             const int32_t n_prompt_cap = any_generating ? prompt_cap_tokens(n_ubatch, batch.size()) : 0;
             int32_t       n_prompt_cur = 0; // prompt tokens added in this iteration
 
-            iterate(slots, [&](server_slot & slot) {
+            // the prompts with the fewest tokens left go first: the work is the same in any order, but a short prompt
+            // behind a long one would wait for all of it before its first token, while a long one behind short ones
+            // waits for little; once a slot generates, the cap above keeps long prompts from holding it up
+            std::vector<server_slot *> slots_by_prompt;
+            slots_by_prompt.reserve(slots.size());
+            for (auto & slot : slots) {
+                slots_by_prompt.push_back(&slot);
+            }
+            const auto n_prompt_left = [](const server_slot * slot) {
+                const bool in_prompt = slot->state == SLOT_STATE_STARTED || slot->state == SLOT_STATE_PROCESSING_PROMPT;
+                return in_prompt ? std::max(0, slot->n_input_tokens() - slot->prompt.n_tokens() - slot->media_n_decoded) : INT32_MAX;
+            };
+            std::stable_sort(slots_by_prompt.begin(), slots_by_prompt.end(), [&](const server_slot * a, const server_slot * b) {
+                return n_prompt_left(a) < n_prompt_left(b);
+            });
+
+            iterate(slots_by_prompt, [&](server_slot & slot) {
                 if (!add_ok || batch.size() >= n_batch) {
                     return; // batch is full, skip remaining slots
                 }
