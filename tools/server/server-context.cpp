@@ -1156,8 +1156,8 @@ private:
             mparams.progress_callback_user_data = &load_progress_mmproj;
         }
 
-        // optionally get the memory usage of mmproj
-        if (has_mmproj && params_base.fit_params) {
+        // the memory usage of mmproj: the concurrency computed at startup counts it, --fit leaves it free
+        if (has_mmproj) {
             int64_t t_start = ggml_time_us();
             auto mmproj_mem = mtmd_get_memory_usage(mmproj_path.c_str(), mparams);
             int64_t t_elapsed = ggml_time_us() - t_start;
@@ -1166,7 +1166,12 @@ private:
                 for (auto & [dev, size] : mmproj_mem) {
                     total += size;
                 }
-                SRV_TRC("[mtmd] estimated worst-case memory usage of mmproj is %.2f MiB (took %.2f ms)\n", total / (1024.0 * 1024.0), t_elapsed / 1000.0);
+                SRV_INF("[mtmd] estimated worst-case memory usage of mmproj is %.2f MiB (took %.2f ms)\n", total / (1024.0 * 1024.0), t_elapsed / 1000.0);
+                params_base.vram_budget_used += total;
+            } else {
+                SRV_ERR("%s", "[mtmd] failed to get memory usage of mmproj\n");
+            }
+            if (!mmproj_mem.empty() && params_base.fit_params) {
                 GGML_ASSERT(!params_base.fit_params_target.empty());
                 for (auto & [dev, size] : mmproj_mem) {
                     for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
@@ -1179,8 +1184,6 @@ private:
                         }
                     }
                 }
-            } else {
-                SRV_ERR("%s", "[mtmd] failed to get memory usage of mmproj\n");
             }
         }
 
@@ -1308,26 +1311,9 @@ private:
             // note: the capping itself is done in n_ctx_slot(), here we only report it
             const int n_ctx_seq = llama_n_ctx_seq(ctx_tgt);
 
-            if (params_base.kv_unified_per_slot > 0) {
-                if (n_ctx_seq > params_base.kv_unified_per_slot) {
-                    SRV_INF("capping per-slot context (%d) to --kv-unified-per-slot (%d)\n",
-                            n_ctx_seq, params_base.kv_unified_per_slot);
-                } else if (params_base.kv_unified_per_slot > n_ctx_seq) {
-                    // cap is above the per-slot pool capacity, so it can never bind
-                    SRV_WRN(
-                        "--kv-unified-per-slot (%d) exceeds the per-slot pool capacity (%d) - cap has no effect, "
-                        "slots are limited to %d (raise the KV pool with -c, or unset -c to size it to "
-                        "n_parallel * kv_unified_per_slot)\n",
-                        params_base.kv_unified_per_slot, n_ctx_seq, n_ctx_seq);
-                }
-            }
-
-            const int n_ctx_capped = params_base.kv_unified_per_slot > 0 ?
-                std::min(n_ctx_seq, params_base.kv_unified_per_slot) : n_ctx_seq;
-
-            if (n_ctx_capped > n_ctx_train) {
+            if (n_ctx_seq > n_ctx_train) {
                 SRV_WRN("the slot context (%d) exceeds the training context of the model (%d) - capping\n",
-                        n_ctx_capped, n_ctx_train);
+                        n_ctx_seq, n_ctx_train);
             }
         }
 
@@ -1926,25 +1912,13 @@ private:
     // prefix; memory that cannot be cut at any position (recurrent, SWA) is cut at a checkpoint of the other slot,
     // loading its state into a new cell for this slot and leaving the other slot's state untouched
 
-    // LLAMA_PREFIX_SHARE=0 disables sharing, LLAMA_PREFIX_SHARE_MIN sets the least gain in tokens worth sharing
-    static bool prefix_share_enabled() {
-        static const bool enabled = []() {
-            const char * env = getenv("LLAMA_PREFIX_SHARE");
-            return env == nullptr || atoi(env) != 0;
-        }();
-        return enabled;
-    }
-
-    static int32_t prefix_share_min_gain() {
-        static const int32_t min_gain = []() {
-            const char * env = getenv("LLAMA_PREFIX_SHARE_MIN");
-            return env ? std::max(1, atoi(env)) : 256;
-        }();
-        return min_gain;
+    // --prefix-share-min: the least gain in tokens worth sharing
+    int32_t prefix_share_min_gain() const {
+        return std::max(1, params_base.prefix_share_min);
     }
 
     bool prefix_share_allowed(server_task_type type) const {
-        return prefix_share_enabled() && params_base.kv_unified && !params_base.ctx_shift && type == SERVER_TASK_TYPE_COMPLETION;
+        return params_base.prefix_share && params_base.kv_unified && !params_base.ctx_shift && type == SERVER_TASK_TYPE_COMPLETION;
     }
 
     // recurrent or SWA state cannot be cut at any position, only at a checkpoint
@@ -3102,8 +3076,7 @@ private:
                         }
                     }
 
-                    // with --rs-cells below --parallel there can be fewer recurrent-state cells than slots:
-                    // wait for a free cell here, because a decode that cannot get one errors every active slot
+                    // wait for a free recurrent-state cell here, because a decode that cannot get one errors every active slot
                     if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
                         const uint32_t n_rs_cells = llama_n_rs_cells(ctx_tgt);
                         const uint32_t n_rs_new   = (slot->prompt.n_tokens() > 0 ? 0 : 1)
@@ -3111,7 +3084,7 @@ private:
 
                         if (n_rs_new > n_rs_cells) {
                             SRV_ERR("task needs %u recurrent-state cells but only %u exist, id_task = %d\n", n_rs_new, n_rs_cells, id_task);
-                            send_error(task, "Request needs more parallel sequences than --rs-cells allows.", ERROR_TYPE_INVALID_REQUEST);
+                            send_error(task, "Request needs more parallel sequences than the server processes at once.", ERROR_TYPE_INVALID_REQUEST);
                             break;
                         }
 
@@ -3523,7 +3496,7 @@ private:
     int64_t n_post_decode = 0;
     int64_t n_sampl       = 0;
     // breakdown of the current main loop iteration, logged when it holds up generating slots or task handling is slow
-    // threshold: LLAMA_SLOW_LOOP_MS (default 1000, 0 = off)
+    // threshold: --slow-loop-ms
     // the GPU works asynchronously: its time mostly shows up where the loop waits for results (sampling in post_decode)
     struct loop_timing {
         int64_t t_tasks_us  = 0; // handling tasks since the previous iteration (launches, prompt cache save/load)
@@ -3537,12 +3510,8 @@ private:
 
     int64_t t_loop_end_us = 0;
 
-    static int64_t slow_loop_ms() {
-        static const int64_t v = [] {
-            const char * env = getenv("LLAMA_SLOW_LOOP_MS");
-            return env ? (int64_t) atoll(env) : 1000;
-        }();
-        return v;
+    int64_t slow_loop_ms() const {
+        return params_base.slow_loop_ms;
     }
 
     void loop_timing_report(int32_t n_batch_tokens) {
@@ -3720,14 +3689,10 @@ private:
     // prompt tokens per iteration while slots generate, 0 = no cap
     // default: fill up one ubatch next to the generation tokens, so that the iteration is a single ubatch
     // (at least a quarter ubatch of prompt, so a prompt still makes progress next to many generating slots)
-    // LLAMA_PROMPT_CAP: 0 disables the cap, a positive value sets it
-    static int32_t prompt_cap_tokens(int32_t n_ubatch, int32_t n_gen_tokens) {
-        static const int32_t env = [] {
-            const char * v = getenv("LLAMA_PROMPT_CAP");
-            return v ? atoi(v) : -1;
-        }();
-        if (env >= 0) {
-            return env;
+    // --prompt-cap: 0 disables the cap, a positive value sets it
+    int32_t prompt_cap_tokens(int32_t n_ubatch, int32_t n_gen_tokens) const {
+        if (params_base.prompt_cap >= 0) {
+            return params_base.prompt_cap;
         }
         return std::max(n_ubatch - n_gen_tokens, n_ubatch / 4);
     }
@@ -4954,13 +4919,9 @@ private:
         });
     }
 
-    // context size of a single slot, capped by --kv-unified-per-slot and by the training context of the model
+    // context size of a single slot, capped by the training context of the model
     int n_ctx_slot() const {
-        int res = llama_n_ctx_seq(ctx_tgt);
-
-        if (params_base.kv_unified_per_slot > 0) {
-            res = std::min(res, params_base.kv_unified_per_slot);
-        }
+        const int res = llama_n_ctx_seq(ctx_tgt);
 
         return std::min(res, llama_model_n_ctx_train(model_tgt));
     }

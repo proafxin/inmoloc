@@ -3661,7 +3661,13 @@ struct clip_model_loader {
         clip_image_f32_batch batch;
         clip_image_f32 img;
         if (ctx_clip.model.modality == CLIP_MODALITY_VISION) {
-            const int sz = hparams.warmup_image_size;
+            // the compute buffer is reserved for the warmup image, so it is the largest image the preprocessing can
+            // produce: a smaller one lets the buffer grow when a large image arrives, when the memory may be taken
+            int sz = hparams.warmup_image_size;
+            if (hparams.image_max_pixels > 0) {
+                const int align = hparams.patch_size * std::max(1, hparams.n_merge);
+                sz = std::max(sz, (int) std::sqrt((double) hparams.image_max_pixels) / align * align);
+            }
             img.set_size({sz, sz}, false, false);
             LOG_INF("%s: warmup with image size = %d x %d\n", __func__, sz, sz);
         } else {

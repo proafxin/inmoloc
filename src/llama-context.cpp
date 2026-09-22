@@ -122,6 +122,9 @@ llama_context::llama_context(
     // a seq owns at most one recurrent-state cell, so more than n_seq_max cells can never be used
     cparams.n_rs_cells = params.n_rs_cells == 0 ? cparams.n_seq_max : std::min(params.n_rs_cells, cparams.n_seq_max);
 
+    // the memory falls back to snapshots for models that cannot replay
+    cparams.rs_replay = cparams.n_rs_seq > 0 && params.rs_rollback == LLAMA_RS_ROLLBACK_REPLAY;
+
     cparams.n_threads               = params.n_threads;
     cparams.n_threads_batch         = params.n_threads_batch;
     cparams.yarn_ext_factor         = params.yarn_ext_factor  >= 0.0f ? params.yarn_ext_factor  : hparams.yarn_ext_factor;
@@ -341,6 +344,7 @@ llama_context::llama_context(
     LLAMA_LOG_INFO("%s: freq_scale            = %g\n",   __func__, cparams.rope_freq_scale);
     LLAMA_LOG_INFO("%s: n_rs_seq              = %u\n",   __func__, cparams.n_rs_seq);
     LLAMA_LOG_INFO("%s: n_rs_cells            = %u\n",   __func__, cparams.n_rs_cells);
+    LLAMA_LOG_INFO("%s: rs_rollback           = %s\n",   __func__, llama_rs_rollback_type_name(params.rs_rollback));
     LLAMA_LOG_INFO("%s: n_outputs_max         = %u\n",   __func__, cparams.n_outputs_max);
     LLAMA_LOG_INFO("%s: n_outputs_max_per_seq = %u\n",   __func__, cparams.n_outputs_max_per_seq);
 
@@ -586,14 +590,8 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
 
     // indexed flash attention reads only the cells of each sequence of a unified KV cache, see
     // ggml_flash_attn_ext_set_kv_idx(); it is used when every device that runs attention supports it
-    // LLAMA_KV_IDX=0 disables it
     if (cparams.auto_kv_idx) {
-        static const bool env_enabled = [] {
-            const char * env = getenv("LLAMA_KV_IDX");
-            return env == nullptr || atoi(env) != 0;
-        }();
-
-        cparams.kv_idx = env_enabled && cparams.flash_attn && cparams.kv_unified && !model.hparams.use_alibi;
+        cparams.kv_idx = cparams.flash_attn && cparams.kv_unified && !model.hparams.use_alibi;
         if (cparams.kv_idx) {
             resolve(llm_fused_op_flash_attn_kv_idx_probe, cparams.kv_idx);
         }
@@ -701,6 +699,27 @@ void llama_context::sched_reserve() {
 
         n_splits_tg = ggml_backend_sched_get_n_splits(sched.get());
         n_nodes_tg  = ggml_graph_n_nodes(gf);
+    }
+
+    // a speculative step decodes 1 + n_rs_seq tokens of every seq at once, a shape that neither of the above
+    // covers: when it needs more memory, the buffers would grow during inference, when the device may be full
+    // a dry run only measures, so it keeps the largest size of any shape
+    // a step that does not fit one ubatch is split into ubatches no larger than the pp graph reserved above
+    if (cparams.n_rs_seq > 0 && n_seqs*(1 + cparams.n_rs_seq) <= n_tokens) {
+        const uint32_t n_seqs_spec = n_seqs;
+        const uint32_t n_tok_spec  = n_seqs*(1 + cparams.n_rs_seq);
+
+        std::vector<size_t> sizes(backend_buf_exp_size.size(), 0);
+
+        auto * gf = graph_reserve(n_tok_spec, n_seqs_spec, n_tok_spec, mctx.get(),
+                model.hparams.no_alloc, model.hparams.no_alloc ? sizes.data() : nullptr);
+        if (!gf) {
+            throw std::runtime_error("failed to allocate compute buffers for speculative steps");
+        }
+
+        for (size_t i = 0; i < sizes.size(); ++i) {
+            backend_buf_exp_size[i] = std::max(backend_buf_exp_size[i], sizes[i]);
+        }
     }
 
     // reserve again with pp graph to avoid ggml-alloc reallocations during inference
@@ -3732,6 +3751,7 @@ llama_context_params llama_context_default_params() {
         /*.n_seq_max                   =*/ 1,
         /*.n_rs_seq                    =*/ 0,
         /*.n_rs_cells                  =*/ 0,
+        /*.rs_rollback                 =*/ LLAMA_RS_ROLLBACK_SNAPSHOT,
         /*.n_outputs_max               =*/ 0,
         /*.n_outputs_max_per_seq       =*/ 1,
         /*.n_threads                   =*/ GGML_DEFAULT_N_THREADS, // TODO: better default

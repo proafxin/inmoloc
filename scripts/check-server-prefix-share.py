@@ -9,7 +9,7 @@
 #
 # Start the server with --kv-unified and --parallel above --n-followers, e.g. --parallel 8, then:
 #   python3 scripts/check-server-prefix-share.py --url http://localhost:8100 --n-followers 4
-# Run it again against a server started with LLAMA_PREFIX_SHARE=0 to compare prompt_n and time to first token.
+# Run it again against a server started with --no-prefix-share to compare prompt_n and time to first token.
 #
 # --mode idle checks sharing from an idle slot: two requests in a row share short instructions ahead of long, different
 # documents, so the second one is not routed to the slot of the first (keep --n-facts small next to --doc-facts):

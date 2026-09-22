@@ -208,6 +208,12 @@ public:
     // returns an empty list when no run is worth gathering, i.e. the whole ubatch attends the full view
     std::vector<llama_kv_attn_run> get_attn_runs(const llama_ubatch & ubatch, uint32_t n_kv) const;
 
+    // the largest runs a ubatch of this size can have, for the graphs reserved at startup
+    std::vector<llama_kv_attn_run> get_attn_runs_reserve(const llama_ubatch & ubatch, uint32_t n_kv) const;
+
+    // whether this cache can gather the cells of a sequence at all
+    bool attn_gather_ok() const;
+
     // copies of the cells listed in idxs (I32 [n_idx]): [n_embd_head, n_head_kv, n_idx, 1], F32
     ggml_tensor * get_k_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs, const slot_info & sinfo) const;
     ggml_tensor * get_v_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs, const slot_info & sinfo) const;
@@ -509,6 +515,9 @@ private:
 
     llama_kv_cache * kv;
     llama_context * lctx;
+
+    // the context of the whole cache, which builds the graphs reserved at startup
+    bool is_full = false;
 
     //
     // update context

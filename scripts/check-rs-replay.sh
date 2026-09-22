@@ -13,16 +13,19 @@ M=${M:-/models/Qwen3.8-27B-UD-IQ3_XXS.gguf}
 MODELS=${MODELS:-/home/masterkenway/Projects/citadel/data/gguf_models}
 IMG=${IMG:-nvidia/cuda:13.3.0-devel-ubuntu24.04}
 
+# 1 = replay rollback, 0 = snapshot rollback, see --rs-rollback
+rb() { [ "$1" = 1 ] && echo replay || echo snapshot; }
+
 mkdir -p $OUT
 
 serve() { # $1 = LLAMA_RS_REPLAY, rest = extra server args
     local replay=$1; shift
     docker rm -f lm >/dev/null 2>&1
-    docker run -d --name lm --gpus all --ulimit core=0 -p 8100:8100 -e LLAMA_KV_IDX=0 -e LLAMA_RS_REPLAY=$replay -e LLAMA_RS_REPLAY_DEBUG=1 \
+    docker run -d --name lm --gpus all --ulimit core=0 -p 8100:8100 \
         -v $SRC:/src -v $MODELS:/models:ro -e LD_LIBRARY_PATH=/src/build/bin $IMG /src/build/bin/llama-server \
         --model $M --chat-template-file /models/chat_template.jinja \
-        --host 0.0.0.0 --port 8100 --kv-unified --spec-type draft-mtp --spec-draft-n-max 2 --metrics \
-        --cache-type-k f16 --cache-type-v f16 --flash-attn on --alias lm -lv 4 "$@" >/dev/null
+        --host 0.0.0.0 --port 8100 --spec-type draft-mtp --spec-draft-n-max 2 --metrics \
+        --cache-type-k f16 --cache-type-v f16 --flash-attn on --rs-rollback $(rb $replay) --alias lm -lv 5 "$@" >/dev/null
     until curl -sf localhost:8100/health >/dev/null || [ "$(docker inspect -f '{{.State.Running}}' lm)" != "true" ]; do sleep 1; done
 }
 
@@ -47,7 +50,7 @@ echo "    concurrent natural-language requests: frequent rollbacks, idle cells b
 for RUN in 0 1 0b; do
     R=${RUN%b}
     echo "--- CPU LLAMA_RS_REPLAY=$R ($RUN, slow, a 27B model on CPU)"
-    serve $R -dev none -ngl 0 --ctx-size 4096 --parallel 4 --rs-cells 4
+    serve $R -dev none -ngl 0 --ctx-size 4096 --parallel 4
     python3 $SRC/scripts/rs-replay-load.py --url http://localhost:8100 > $OUT/cpu-$RUN.txt 2>&1
     cut -c1-110 $OUT/cpu-$RUN.txt
     docker logs lm > $OUT/cpu-server-$RUN.log 2>&1
@@ -75,7 +78,7 @@ if [ -n "${ONLY_CPU:-}" ]; then exit 0; fi
 echo "=== GPU: counting must stay correct, speed and memory are informational"
 for R in 0 1; do
     echo "--- LLAMA_RS_REPLAY=$R"
-    serve $R -ngl 999 --ctx-size 32768 --parallel 4 --rs-cells 4
+    serve $R -ngl 999 --ctx-size 32768 --parallel 4
     docker logs lm 2>&1 | grep -E 'llama_memory_recurrent: size'
     python3 $SRC/scripts/check-server-preemption.py --url http://localhost:8100 --n-requests 4 --n-predict 800
     echo "(second round, reusing the slots)"
@@ -92,7 +95,7 @@ echo "=== GPU, requests of different lengths: the short ones finish while the lo
 echo "    cells stay in memory in between, so a step's range holds cells it does not compute"
 for R in 0 1; do
     echo "--- LLAMA_RS_REPLAY=$R"
-    serve $R -ngl 999 --ctx-size 32768 --parallel 6 --rs-cells 6
+    serve $R -ngl 999 --ctx-size 32768 --parallel 6
     for round in 1 2; do
         echo "(round $round)"
         python3 $SRC/scripts/check-server-preemption.py --url http://localhost:8100 --n-requests 3 --n-predict 900 > $OUT/long-$R-$round.txt 2>&1 &

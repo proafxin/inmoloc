@@ -149,24 +149,12 @@ int llama_server(common_params & params, int argc, char ** argv) {
             params.n_batch = params.n_ubatch;
         }
 
+        // auto: as many requests at once as fit in the memory, which is computed at startup
         if (params.n_parallel < 0) {
-            SRV_TRC("%s", "n_parallel is set to auto, using n_parallel = 4 and kv_unified = true\n");
+            SRV_TRC("%s", "n_parallel is set to auto, it becomes the most requests that fit in the memory\n");
 
-            params.n_parallel = 4;
-            params.kv_unified = true;
+            params.n_parallel = (int32_t) llama_max_parallel_sequences();
         }
-    }
-
-    // size the KV pool from --kv-unified-per-slot, unless the user pinned it with -c
-    // or with -c 0 for max context
-    const bool ctx_pool_auto_sized = params.kv_unified_per_slot > 0 &&
-                                     params.n_ctx == 0 &&
-                                     (uint32_t) params.fit_params_min_ctx != UINT32_MAX;
-
-    if (ctx_pool_auto_sized) {
-        params.n_ctx = params.n_parallel * params.kv_unified_per_slot;
-        SRV_INF("--kv-unified-per-slot: sizing KV pool to n_parallel * kv_unified_per_slot = %d * %d = %d\n", params.n_parallel,
-                params.kv_unified_per_slot, params.n_ctx);
     }
 
     // for consistency between server router mode and single-model mode, we set the same model name as alias

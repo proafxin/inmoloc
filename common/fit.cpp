@@ -1070,3 +1070,225 @@ void common_fit_print(
     printf("%zu ", dmd.back().mb.compute/1024/1024);
     printf("\n");
 }
+
+// device memory of a context, without the host buffers, which do not count against a device budget
+struct common_budget_mem {
+    size_t model   = 0;
+    size_t context = 0; // KV cache and per-sequence state
+    size_t compute = 0;
+
+    size_t total() const {
+        return model + context + compute;
+    }
+};
+
+static common_budget_mem common_budget_device_mem(llama_context * ctx, bool with_model) {
+    common_budget_mem res;
+
+    for (const auto & [buft, mb] : llama_get_memory_breakdown(ctx)) {
+        if (ggml_backend_buft_is_host(buft)) {
+            continue;
+        }
+        if (with_model) {
+            res.model += mb.model;
+        }
+        res.context += mb.context;
+        res.compute += mb.compute;
+    }
+
+    return res;
+}
+
+bool common_budget_params(
+                   const char * path_model,
+     const llama_model_params * mparams,
+         llama_context_params * cparams,
+ const common_fit_extra_model * extra,
+                         size_t   budget,
+                         size_t   budget_used,
+                 ggml_log_level   log_level) {
+    constexpr double MiB = 1024.0*1024.0;
+
+    // the dry runs print what a real load prints; below log_level it goes to the debug log
+    struct user_data_t {
+        ggml_log_callback callback;
+        void *            user_data;
+        ggml_log_level    min_level;
+    };
+    user_data_t ud;
+    llama_log_get(&ud.callback, &ud.user_data);
+    ud.min_level = log_level;
+
+    llama_log_set([](ggml_log_level level, const char * text, void * user_data) {
+        const user_data_t * ud = (const user_data_t *) user_data;
+        ud->callback(level >= ud->min_level ? level : GGML_LOG_LEVEL_DEBUG, text, ud->user_data);
+    }, &ud);
+
+    const auto restore_log = [&]() {
+        llama_log_set(ud.callback, ud.user_data);
+    };
+
+    const auto load_dry = [](const char * path, const llama_model_params * mp) {
+        llama_model_params mp_dry = *mp;
+        mp_dry.no_alloc  = true;
+        mp_dry.load_mode = LLAMA_LOAD_MODE_NONE;
+        return llama_model_load_from_file(path, mp_dry);
+    };
+
+    llama_model * model     = load_dry(path_model, mparams);
+    llama_model * model_dft = extra && !extra->shares_model ? load_dry(extra->path_model, extra->mparams) : nullptr;
+
+    const auto cleanup = [&]() {
+        if (model_dft) {
+            llama_model_free(model_dft);
+        }
+        if (model) {
+            llama_model_free(model);
+        }
+        restore_log();
+    };
+
+    if (model == nullptr || (extra && !extra->shares_model && model_dft == nullptr)) {
+        cleanup();
+        LOG_ERR("%s: failed to load the model to measure its memory\n", __func__);
+        return false;
+    }
+
+    // the memory of n_seq concurrent sequences, for the main and the draft context
+    struct measured {
+        common_budget_mem main;
+        common_budget_mem dft;
+
+        size_t total() const {
+            return main.total() + dft.total();
+        }
+    };
+
+    const auto measure = [&](uint32_t n_seq, measured & res) {
+        llama_context_params cp = *cparams;
+        cp.n_seq_max  = n_seq;
+        cp.n_rs_cells = 0; // one recurrent state per sequence
+
+        llama_context * ctx = llama_init_from_model(model, cp);
+        if (ctx == nullptr) {
+            return false;
+        }
+        res.main = common_budget_device_mem(ctx, true);
+        llama_free(ctx);
+
+        res.dft = {};
+        if (extra) {
+            // the draft context follows the main one: same context size and number of sequences
+            llama_context_params cpd = *extra->cparams;
+            cpd.n_ctx      = cp.n_ctx;
+            cpd.n_seq_max  = n_seq;
+            cpd.kv_unified = cp.kv_unified;
+
+            llama_context * ctx_dft = llama_init_from_model(extra->shares_model ? model : model_dft, cpd);
+            if (ctx_dft == nullptr) {
+                return false;
+            }
+            // an MTP context runs on the weights of the main model, which are counted already
+            res.dft = common_budget_device_mem(ctx_dft, !extra->shares_model);
+            llama_free(ctx_dft);
+        }
+
+        return true;
+    };
+
+    // without a budget, the free memory of the devices is the budget, less a margin on each of them
+    constexpr size_t margin_per_dev = 1024*1024*1024; // the default margin of --fit
+    const bool budget_auto = budget == 0;
+
+    size_t free_sum = 0;
+    for (int i = 0; i < llama_model_n_devices(model); i++) {
+        size_t free  = 0;
+        size_t total = 0;
+        ggml_backend_dev_memory(llama_model_get_device(model, i), &free, &total);
+        free_sum += free;
+        if (budget_auto) {
+            budget += free > margin_per_dev ? free - margin_per_dev : 0;
+        }
+    }
+
+    // a model that runs on the host alone is not limited by device memory
+    if (budget_auto && llama_model_n_devices(model) == 0) {
+        cleanup();
+        return true;
+    }
+
+    if (budget_auto) {
+        LOG_INF("%s: memory budget: %.0f MiB, the free device memory less %.0f MiB per device\n",
+                __func__, budget/MiB, margin_per_dev/MiB);
+    }
+
+    const size_t avail = budget > budget_used ? budget - budget_used : 0;
+
+    const uint32_t n_seq_cap = std::max<uint32_t>(1, cparams->n_seq_max);
+
+    measured m_one;
+    if (!measure(1, m_one)) {
+        cleanup();
+        LOG_ERR("%s: failed to create a context to measure its memory\n", __func__);
+        return false;
+    }
+
+    const char * func = __func__;
+
+    const auto print = [&](const char * what, uint32_t n_seq, const measured & m) {
+        LOG_INF("%s: %s: %u sequences, %u tokens of context: model %.0f + context %.0f + compute %.0f + draft %.0f"
+                " + other %.0f = %.0f MiB of %.0f MiB\n", func, what, n_seq, cparams->n_ctx,
+                m.main.model/MiB, m.main.context/MiB, m.main.compute/MiB, m.dft.total()/MiB,
+                budget_used/MiB, (m.total() + budget_used)/MiB, budget/MiB);
+    };
+
+    if (m_one.total() > avail) {
+        restore_log();
+        print("does not fit", 1, m_one);
+        LOG_ERR("%s: not even one sequence fits in the memory budget, lower --ctx-size%s\n", __func__,
+                budget_auto ? "" : " or raise --vram-budget");
+        cleanup();
+        return false;
+    }
+
+    // the memory grows with the number of sequences (state, compute buffers), so the largest that fits is found by
+    // bisection between one sequence and the cap
+    uint32_t lo = 1;
+    uint32_t hi = n_seq_cap;
+
+    measured m_best = m_one;
+
+    while (lo < hi) {
+        const uint32_t mid = lo + (hi - lo + 1)/2;
+
+        measured m;
+        if (measure(mid, m) && m.total() <= avail) {
+            lo     = mid;
+            m_best = m;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    restore_log();
+
+    print(lo < n_seq_cap ? "limited by the budget" : "at the requested maximum", lo, m_best);
+    if (lo > 1) {
+        LOG_INF("%s: each sequence adds %.0f MiB (its state and compute), the context of %u tokens takes %.0f MiB\n",
+                __func__, (double) (m_best.total() - m_one.total())/(lo - 1)/MiB, cparams->n_ctx,
+                (m_one.main.context + m_one.dft.context)/MiB);
+    }
+
+    // a given budget can only be used if the devices have that much free
+    if (!budget_auto && m_best.total() + budget_used > free_sum) {
+        LOG_WRN("%s: the devices have only %.0f MiB free, less than the %.0f MiB this configuration needs\n",
+                __func__, free_sum/MiB, (m_best.total() + budget_used)/MiB);
+    }
+
+    cparams->n_seq_max  = lo;
+    cparams->n_rs_cells = 0;
+
+    cleanup();
+
+    return true;
+}

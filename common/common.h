@@ -453,7 +453,8 @@ struct common_params {
     int32_t n_keep                =     0; // number of tokens to keep from initial prompt
     int32_t n_chunks              =    -1; // max number of chunks to process (-1 = unlimited)
     int32_t n_parallel            =     1; // number of parallel sequences to decode
-    int32_t n_rs_cells            =     0; // recurrent-state cells shared by all sequences (0 = n_parallel)
+
+    enum llama_rs_rollback_type rs_rollback = LLAMA_RS_ROLLBACK_SNAPSHOT; // how the recurrent state rolls back drafts
     int32_t n_sequences           =     1; // number of sequences to decode
     int32_t n_outputs_max         =     0; // max outputs in a batch (0 = n_batch)
     int32_t n_outputs_max_per_seq =     1; // max outputs per sequence
@@ -475,6 +476,12 @@ struct common_params {
     int32_t main_gpu           = 0;     // the GPU that is used for scratch and small tensors
     float   tensor_split[128]  = {0};   // how split tensors should be distributed across GPUs
     bool    fit_params         = true;  // whether to fit unset model/context parameters to free device memory
+
+    // device memory the model may use, summed over its devices (0 = the free device memory); at startup n_parallel
+    // becomes the most concurrent sequences that fit next to a unified cache of n_ctx tokens, at most its value,
+    // see common_budget_params()
+    size_t  vram_budget        = 0;
+    size_t  vram_budget_used   = 0;     // memory taken from the budget by something else, e.g. the vision encoder
     bool    fit_params_print   = false; // print the estimated required memory to run the model
     int32_t fit_params_min_ctx = 4096;  // minimum context size to set when trying to reduce memory use
 
@@ -627,8 +634,11 @@ struct common_params {
     int32_t n_cache_reuse       = 0;     // min chunk size to reuse from the cache via KV shifting
     bool    cache_prompt        = true;  // whether to enable prompt caching
     bool    cache_idle_slots    = true;  // save idle slots to the prompt cache (unified KV: when evicted for memory, else upon starting a new task)
+    bool    prefix_share        = true;  // a new request may start from the memory of another slot with the same prefix
+    int32_t prefix_share_min    = 256;   // the least gain in tokens worth sharing a prefix
+    int32_t prompt_cap          = -1;    // prompt tokens per iteration while slots generate (-1 = one ubatch, 0 = no cap)
+    int32_t slow_loop_ms        = 1000;  // log a breakdown of main-loop iterations slower than this (0 = off)
     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
-    int32_t kv_unified_per_slot = 0;     // max context per parallel slot; 0 = unset
     int32_t checkpoint_min_step = 8192;  // minimum spacing between context checkpoints
     int32_t cache_ram_mib       = 8192;  // -1 = no limit, 0 - disable, 1 = 1 MiB, etc.
 

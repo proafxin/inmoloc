@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Runs the recurrent rollback tests on the tiny generated hybrid models, in the snapshot mode (LLAMA_RS_REPLAY=0) and
-# the replay mode (=1), on the CPU and on the GPU. Takes a few minutes, mostly the build.
+# Runs the recurrent rollback tests on the tiny generated hybrid models, with --rs-rollback snapshot and replay,
+# on the CPU and on the GPU. Takes a few minutes, mostly the build.
 set -u
 
 SRC=${SRC:-/home/masterkenway/Projects/llama.cpp}
@@ -15,6 +15,7 @@ docker run --rm -i --gpus all --ulimit core=0 -v $SRC:/src -v $OUT:/out -w /src 
     cmake --build build --config Release -j --target llama-server test-llama-archs test-recurrent-state-rollback test-gdn-replay 2>&1 | tail -2
 
     export LD_LIBRARY_PATH=/src/build/bin
+    rb() { [ "$1" = 1 ] && echo replay || echo snapshot; }
     M=/src/build/tests/test-models
     mkdir -p $M
     ./build/bin/test-llama-archs -o $M > /out/generate.log 2>&1 || { echo "model generation failed, see generate.log"; exit 1; }
@@ -27,9 +28,9 @@ docker run --rm -i --gpus all --ulimit core=0 -v $SRC:/src -v $OUT:/out -w /src 
             if [ $dev = cpu ]; then args="-dev none -ngl 0"; else args="-ngl 99"; fi
             for model in qwen35-dense nemotron_h-dense; do
                 log=/out/rollback-$model-$dev-$R.log
-                LLAMA_RS_REPLAY=$R ./build/bin/test-recurrent-state-rollback -m $M/$model.gguf $args > $log 2>&1
+                ./build/bin/test-recurrent-state-rollback -m $M/$model.gguf $args --rs-rollback $(rb $R) > $log 2>&1
                 res=$?
-                printf "%-18s %s LLAMA_RS_REPLAY=%s: exit %d | %s\n" $model $dev $R $res \
+                printf "%-18s %s %-8s: exit %d | %s\n" $model $dev $(rb $R) $res \
                     "$(grep -E "test_shared_pending|replay matched|restored successfully|mismatch|failed" $log | sed -E "s/^.*: //" | tr "\n" ";" | cut -c1-200)"
             done
         done

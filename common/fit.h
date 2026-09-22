@@ -37,6 +37,23 @@ common_params_fit_status common_fit_params(
       const common_fit_extra_model * extra,                  // model to fit alongside the main one, nullptr if there is none
                      ggml_log_level   log_level);            // minimum log level to print during fitting, lower levels go to debug log
 
+// sizes the number of concurrent sequences to a device memory budget (summed over the devices the model runs on):
+//   - finds the largest cparams->n_seq_max, at most its value on entry, for which the model weights, the memory for
+//     cparams->n_ctx tokens in a unified cache, the per-sequence memory (e.g. recurrent state, sliding-window cache)
+//     and the worst-case compute buffers of the main and the extra context fit in budget - budget_used
+//   - the memory is measured by creating the contexts without allocating them, so it holds for any architecture
+//   - budget 0 means the free memory of the devices, less a margin on each; a model on the host alone is left as is
+//   - budget_used is memory the caller takes from the same budget, e.g. a vision encoder
+//   - returns false when not even one sequence fits, leaving cparams unchanged
+bool common_budget_params(
+                   const char * path_model,
+     const llama_model_params * mparams,
+         llama_context_params * cparams,
+ const common_fit_extra_model * extra,
+                         size_t   budget,
+                         size_t   budget_used,
+                 ggml_log_level   log_level);
+
 // print estimated memory to stdout
 void common_fit_print(
                          const char * path_model,

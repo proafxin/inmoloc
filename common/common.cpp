@@ -1292,30 +1292,38 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     auto mparams = common_model_params_to_llama(params);
     auto cparams = common_context_params_to_llama(params);
 
+    // the draft context is created from the same base params and follows the main context, so it is measured with it
+    const bool has_draft = params.speculative.has_dft();
+    const bool spec_mtp  = std::find(params.speculative.types.begin(), params.speculative.types.end(),
+        COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
+
+    common_params params_dft = common_base_params_to_speculative(params);
+
+    auto mparams_dft = common_model_params_to_llama(params_dft);
+    auto cparams_dft = common_context_params_to_llama(params_dft);
+    if (spec_mtp) {
+        cparams_dft.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+    }
+    cparams_dft.n_rs_seq = 0;
+
+    const common_fit_extra_model extra = {
+        /*.path_model   =*/ params_dft.model.path.c_str(),
+        /*.mparams      =*/ &mparams_dft,
+        /*.cparams      =*/ &cparams_dft,
+        /*.shares_model =*/ !has_draft, // an MTP context runs on the weights of the main model
+    };
+
+    const ggml_log_level log_level_fit = params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR;
+
+    // the requests processed at once share one cache of n_ctx tokens
+    if (params.n_parallel > 1) {
+        params.kv_unified  = true;
+        cparams.kv_unified = true;
+    }
+
     if (params.fit_params) {
         COM_TRC("%s", "fitting params to device memory ...\n");
         COM_TRC("%s", "(for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)\n");
-
-        // the draft context is created from the same base params and follows the main context, fit both together
-        const bool has_draft = params.speculative.has_dft();
-        const bool spec_mtp  = std::find(params.speculative.types.begin(), params.speculative.types.end(),
-            COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
-
-        common_params params_dft = common_base_params_to_speculative(params);
-
-        auto mparams_dft = common_model_params_to_llama(params_dft);
-        auto cparams_dft = common_context_params_to_llama(params_dft);
-        if (spec_mtp) {
-            cparams_dft.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
-        }
-        cparams_dft.n_rs_seq = 0;
-
-        const common_fit_extra_model extra = {
-            /*.path_model   =*/ params_dft.model.path.c_str(),
-            /*.mparams      =*/ &mparams_dft,
-            /*.cparams      =*/ &cparams_dft,
-            /*.shares_model =*/ !has_draft, // an MTP context runs on the weights of the main model
-        };
 
         common_fit_params(params.model.path.c_str(), &mparams, &cparams,
             params.tensor_split,
@@ -1323,7 +1331,17 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             params.fit_params_target.data(),
             params.fit_params_min_ctx,
             has_draft || spec_mtp ? &extra : nullptr,
-            params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR);
+            log_level_fit);
+    }
+
+    // the number of requests processed at once: the most that fit in the memory budget, at most --parallel
+    if (!model_only) {
+        if (!common_budget_params(params.model.path.c_str(), &mparams, &cparams,
+                has_draft || spec_mtp ? &extra : nullptr, params.vram_budget, params.vram_budget_used, log_level_fit)) {
+            return;
+        }
+
+        params.n_parallel = (int32_t) cparams.n_seq_max;
     }
 
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);
@@ -1721,8 +1739,8 @@ struct llama_context_params common_context_params_to_llama(const common_params &
 
     cparams.n_ctx             = params.n_ctx;
     cparams.n_seq_max         = params.n_parallel;
-    cparams.n_rs_cells        = params.n_rs_cells;
     cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
+    cparams.rs_rollback       = params.rs_rollback;
     cparams.n_outputs_max     = std::max(params.n_outputs_max, 0);
     cparams.n_outputs_max_per_seq = std::max(params.n_outputs_max_per_seq, 0);
     cparams.n_batch           = params.n_batch;

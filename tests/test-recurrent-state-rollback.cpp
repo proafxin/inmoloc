@@ -263,7 +263,7 @@ static bool test_multi_seq_split_replay(const common_params & params, llama_mode
 }
 
 // A seq that takes over the state of another one must also take over what is still pending in it: a rollback of
-// the source, and with LLAMA_RS_REPLAY the tokens the scan state lags behind. Covers both ways a state is shared:
+// the source, and with --rs-rollback replay the tokens the scan state lags behind. Covers both ways a state is shared:
 // seq_cp after a rollback, and a short step decoded for two seqs at once. Each is compared against a seq that got
 // there on its own, with the same ubatch shapes, so the logits must match.
 static bool test_shared_pending(const common_params & params, llama_model * model, const int n_vocab, uint8_t fill) {

@@ -8,6 +8,9 @@ M=${M:-/models/Qwen3.8-27B-UD-IQ3_XXS.gguf}
 MODELS=${MODELS:-/home/masterkenway/Projects/citadel/data/gguf_models}
 IMG=${IMG:-nvidia/cuda:13.3.0-devel-ubuntu24.04}
 
+# 1 = replay rollback, 0 = snapshot rollback, see --rs-rollback
+rb() { [ "$1" = 1 ] && echo replay || echo snapshot; }
+
 mkdir -p $OUT
 
 docker run --rm -i --gpus all -v $SRC:/src -w /src $IMG bash -c \
@@ -16,12 +19,12 @@ docker run --rm -i --gpus all -v $SRC:/src -w /src $IMG bash -c \
     2>&1 | tail -2
 
 docker rm -f lm >/dev/null 2>&1
-docker run -d --name lm --gpus all -p 8100:8100 -e LLAMA_KV_IDX=0 -e LLAMA_RS_REPLAY=1 -e LLAMA_RS_REPLAY_DEBUG=1 \
+docker run -d --name lm --gpus all -p 8100:8100 \
     -v $SRC:/src -v $MODELS:/models:ro -e LD_LIBRARY_PATH=/src/build/bin $IMG /src/build/bin/llama-server \
     --model $M --chat-template-file /models/chat_template.jinja -dev none -ngl 0 \
-    --host 0.0.0.0 --port 8100 --ctx-size 2048 --parallel 1 --kv-unified --rs-cells 1 \
+    --host 0.0.0.0 --port 8100 --ctx-size 2048 --parallel 1 \
     --spec-type draft-mtp --spec-draft-n-max 2 --metrics \
-    --cache-type-k f16 --cache-type-v f16 --flash-attn on --alias lm -lv 4 >/dev/null
+    --cache-type-k f16 --cache-type-v f16 --flash-attn on --alias lm -lv 5 --rs-rollback replay >/dev/null
 
 until curl -sf localhost:8100/health >/dev/null || [ "$(docker inspect -f '{{.State.Running}}' lm)" != "true" ]; do sleep 1; done
 

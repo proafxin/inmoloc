@@ -1331,30 +1331,29 @@ ggml_tensor * llama_kv_cache::get_v(ggml_context * ctx, int32_t il, uint32_t n_k
             ggml_row_size(v->type, kv_size*n_embd_v_gqa)*sinfo.s0);
 }
 
-std::vector<llama_kv_attn_run> llama_kv_cache::get_attn_runs(const llama_ubatch & ubatch, uint32_t n_kv) const {
-    // LLAMA_ATTN_GATHER=0 disables gathering, for comparisons
-    static const auto env_enabled = []() {
-        const char * env = getenv("LLAMA_ATTN_GATHER");
-        return env == nullptr || atoi(env) != 0;
-    }();
+// the copy of a gather run is reserved in the compute buffer, see get_attn_runs_reserve(); this bounds it
+static constexpr uint32_t attn_gather_max_cells = 16384;
 
-    // the copy is reserved in the compute buffer, this bounds it
-    static const uint32_t max_cells = []() {
-        const char * env = getenv("LLAMA_ATTN_GATHER_MAX_CELLS");
-        return env ? (uint32_t) std::max(0, atoi(env)) : 16384u;
-    }();
+// runs shorter than this are decode steps: they need about all of their cells anyway,
+// and copying the cells every step costs more than attending the full view
+static constexpr uint32_t attn_gather_min_tokens = 32;
 
-    // runs shorter than this are decode steps: they need about all of their cells anyway,
-    // and copying the cells every step costs more than attending the full view
-    const uint32_t min_tokens = 32;
+// each gather run adds a copy and an attention op per layer, this bounds the graph size
+static constexpr uint32_t attn_gather_max_runs = 4;
 
-    // each gather run adds a copy and an attention op per layer, this bounds the graph size
-    const uint32_t max_runs = 4;
-
+bool llama_kv_cache::attn_gather_ok() const {
     const bool type_ok = [](ggml_type t) { return t == GGML_TYPE_F16 || t == GGML_TYPE_F32; }(type_k()) &&
                          [](ggml_type t) { return t == GGML_TYPE_F16 || t == GGML_TYPE_F32; }(type_v());
 
-    if (!env_enabled || max_cells == 0 || n_stream != 1 || v_trans || swa_type != LLAMA_SWA_TYPE_NONE || !type_ok) {
+    return n_stream == 1 && !v_trans && swa_type == LLAMA_SWA_TYPE_NONE && type_ok;
+}
+
+std::vector<llama_kv_attn_run> llama_kv_cache::get_attn_runs(const llama_ubatch & ubatch, uint32_t n_kv) const {
+    const uint32_t max_cells  = attn_gather_max_cells;
+    const uint32_t min_tokens = attn_gather_min_tokens;
+    const uint32_t max_runs   = attn_gather_max_runs;
+
+    if (!attn_gather_ok()) {
         return {};
     }
 
@@ -1399,6 +1398,33 @@ std::vector<llama_kv_attn_run> llama_kv_cache::get_attn_runs(const llama_ubatch 
 
     if (n_gather == 0) {
         return {};
+    }
+
+    return res;
+}
+
+// the largest gather runs a ubatch of this size can have, for the compute buffers reserved at startup: the most runs,
+// each copying the most cells, over the fewest tokens each, and one full run over the rest of the tokens, which needs
+// the full mask too; without this the buffers grow when the first prompts that gather arrive
+std::vector<llama_kv_attn_run> llama_kv_cache::get_attn_runs_reserve(const llama_ubatch & ubatch, uint32_t n_kv) const {
+    if (!attn_gather_ok()) {
+        return {};
+    }
+
+    const uint32_t n_idx  = std::min(attn_gather_max_cells, n_kv/2/256*256);
+    const uint32_t n_runs = std::min(attn_gather_max_runs, ubatch.n_tokens/attn_gather_min_tokens);
+
+    if (n_idx == 0 || n_runs == 0) {
+        return {};
+    }
+
+    std::vector<llama_kv_attn_run> res;
+    for (uint32_t r = 0; r < n_runs; ++r) {
+        const uint32_t t0 = r*attn_gather_min_tokens;
+        res.push_back({ t0, t0 + attn_gather_min_tokens, true, 0, n_idx }); // the seq only selects the cells of the inputs
+    }
+    if (n_runs*attn_gather_min_tokens < ubatch.n_tokens) {
+        res.push_back({ n_runs*attn_gather_min_tokens, ubatch.n_tokens, false, -1, 0 });
     }
 
     return res;
@@ -2141,41 +2167,6 @@ void llama_kv_cache::set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng,
         stats_attn.read  += hi - lo;
         stats_attn.range += n;
         stats_attn.owned += n;
-    }
-
-    // LLAMA_KV_IDX_CHECK=1 compares the ranges with the mask, for testing
-    static const bool check = [] {
-        const char * env = getenv("LLAMA_KV_IDX_CHECK");
-        return env != nullptr && atoi(env) != 0;
-    }();
-
-    if (check) {
-        const int64_t n_kv = get_size();
-
-        std::vector<ggml_fp16_t> mask(n_kv*n_tokens);
-        fill_kq_mask(GGML_TYPE_F16, mask.data(), n_kv, 1, ubatch, causal_attn);
-
-        const ggml_fp16_t drop = ggml_fp32_to_fp16(-INFINITY);
-
-        std::vector<uint8_t> in_rng(n_kv);
-
-        for (uint32_t i = 0; i < n_tokens; ++i) {
-            std::fill(in_rng.begin(), in_rng.end(), 0);
-
-            const int32_t * cid = idx + rng[3*i]*n_idx;
-            for (int32_t j = rng[3*i + 1]; j < rng[3*i + 2]; ++j) {
-                in_rng[cid[j]] = 1;
-            }
-
-            for (int64_t j = 0; j < n_kv; ++j) {
-                const bool keep = mask[i*n_kv + j] != drop;
-                if (keep != (in_rng[j] != 0)) {
-                    LLAMA_LOG_ERROR("%s: token %u (seq %d, pos %d), cell %" PRId64 ": mask %s, index range %s\n", __func__,
-                            i, ubatch->seq_id[i][0], ubatch->pos[i], j, keep ? "keeps" : "drops", in_rng[j] ? "keeps" : "drops");
-                    GGML_ABORT("indexed attention does not match the mask");
-                }
-            }
-        }
     }
 }
 
@@ -3062,7 +3053,7 @@ bool llama_kv_cache::state_read_data(llama_io_read_i & io, uint32_t strm, uint32
 llama_kv_cache_context::llama_kv_cache_context(llama_memory_status status) : status(status) {}
 
 llama_kv_cache_context::llama_kv_cache_context(
-        llama_kv_cache * kv) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv) {
+        llama_kv_cache * kv) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv), is_full(true) {
     n_kv = kv->get_size();
 
     const uint32_t n_stream = kv->get_n_stream();
@@ -3153,7 +3144,8 @@ ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il) cons
 }
 
 std::vector<llama_kv_attn_run> llama_kv_cache_context::get_attn_runs(const llama_ubatch & ubatch) const {
-    return kv->get_attn_runs(ubatch, n_kv);
+    // the context of the whole cache only builds the graphs reserved at startup, which must cover the largest runs
+    return is_full ? kv->get_attn_runs_reserve(ubatch, n_kv) : kv->get_attn_runs(ubatch, n_kv);
 }
 
 ggml_tensor * llama_kv_cache_context::get_k_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs) const {

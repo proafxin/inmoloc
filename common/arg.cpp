@@ -1644,14 +1644,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CTX_SIZE"));
     add_opt(common_arg(
-        { "--kv-unified-per-slot" }, "N",
-        "context limit per parallel slot (default: unset, behavior unchanged).\n"
-        "when set without -c/--ctx-size, the shared KV pool is sized to n_parallel*N",
-        [](common_params & params, int value) {
-            params.kv_unified_per_slot = value;
-        }
-    ).set_env("LLAMA_ARG_KV_UNIFIED_PER_SLOT").set_examples({ LLAMA_EXAMPLE_SERVER }));
-    add_opt(common_arg(
         {"-n", "--predict", "--n-predict"}, "N",
         string_format(
             ex == LLAMA_EXAMPLE_COMPLETION
@@ -1724,7 +1716,45 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.kv_unified = value;
         }
-    ).set_env("LLAMA_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_BATCHED, LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_PARALLEL}));
+    ).set_env("LLAMA_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_BATCHED, LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_PARALLEL}));
+    add_opt(common_arg(
+        {"--prefix-share"},
+        {"--no-prefix-share"},
+        string_format("let a new request start from the memory of another slot that holds the same prefix "
+                      "(default: %s)", params.prefix_share ? "enabled" : "disabled"),
+        [](common_params & params, bool value) {
+            params.prefix_share = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--prefix-share-min"}, "N",
+        string_format("the least gain in tokens worth sharing a prefix from another slot (default: %d)", params.prefix_share_min),
+        [](common_params & params, int value) {
+            if (value < 1) {
+                throw std::invalid_argument("error: --prefix-share-min must be >= 1\n");
+            }
+            params.prefix_share_min = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--prompt-cap"}, "N",
+        "prompt tokens processed per iteration while other requests generate, so their next token is not held up by\n"
+        "a whole batch of prompt (default: -1 = what fills one ubatch next to the generated tokens, 0 = no cap)",
+        [](common_params & params, int value) {
+            if (value < -1) {
+                throw std::invalid_argument("error: --prompt-cap must be -1, 0 or positive\n");
+            }
+            params.prompt_cap = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--slow-loop-ms"}, "N",
+        string_format("log a time breakdown of server loop iterations that take longer than N ms (default: %d, 0 = off)",
+                      params.slow_loop_ms),
+        [](common_params & params, int value) {
+            params.slow_loop_ms = std::max(0, value);
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--cache-idle-slots"},
         {"--no-cache-idle-slots"},
@@ -2557,18 +2587,48 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         ).set_env("LLAMA_ARG_N_PARALLEL"));
     }
     add_opt(common_arg(
-        {"--rs-cells"}, "N",
-        string_format("recurrent-state cells shared by all sequences, for recurrent and hybrid models; "
-                      "fewer cells than --parallel lets idle slots cost no recurrent-state memory, and "
-                      "requests wait when all cells are busy; requires --kv-unified when below --parallel "
-                      "(default: %d, 0 = --parallel)", params.n_rs_cells),
-        [](common_params & params, int value) {
-            if (value < 0) {
-                throw std::invalid_argument("error: --rs-cells must be >= 0\n");
+        {"--vram-budget"}, "SIZE",
+        "device memory the server may use, summed over the devices the model runs on, e.g. 10G, 10240M or 10240 (MiB);\n"
+        "the weights, the vision encoder, the draft model, a unified KV cache of --ctx-size tokens and the compute\n"
+        "buffers are measured, and the number of requests processed at once becomes the largest that fits, at most\n"
+        "--parallel; the per-request memory (e.g. recurrent state) depends on --rs-rollback\n"
+        "(default: the free device memory, less 1 GiB per device)",
+        [](common_params & params, const std::string & value) {
+            size_t pos = 0;
+            const double num = std::stod(value, &pos);
+            const std::string unit = value.substr(pos);
+
+            double mul = 1024.0*1024.0; // plain numbers are MiB, like --fit-target
+            if (unit == "G" || unit == "GB" || unit == "GiB") {
+                mul = 1024.0*1024.0*1024.0;
+            } else if (unit == "M" || unit == "MB" || unit == "MiB" || unit.empty()) {
+                mul = 1024.0*1024.0;
+            } else {
+                throw std::invalid_argument("error: --vram-budget takes a size such as 10G, 10240M or 10240 (MiB)\n");
             }
-            params.n_rs_cells = value;
+            if (num <= 0) {
+                throw std::invalid_argument("error: --vram-budget must be positive\n");
+            }
+            params.vram_budget = (size_t) (num*mul);
         }
-    ).set_env("LLAMA_ARG_RS_CELLS").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_BATCHED, LLAMA_EXAMPLE_PARALLEL}));
+    ));
+    add_opt(common_arg(
+        {"--rs-rollback"}, "{snapshot,replay}",
+        "how the recurrent state of a hybrid or recurrent model rolls back rejected speculative tokens:\n"
+        "- snapshot: one state per draft position, the most memory per sequence and no extra compute\n"
+        "- replay: one state and the inputs of the last step, a short extra scan per step for much less memory\n"
+        "  per sequence (gated delta-net models, e.g. Qwen3.5; others use snapshot)\n"
+        "(default: snapshot)",
+        [](common_params & params, const std::string & value) {
+            if (value == "snapshot") {
+                params.rs_rollback = LLAMA_RS_ROLLBACK_SNAPSHOT;
+            } else if (value == "replay") {
+                params.rs_rollback = LLAMA_RS_ROLLBACK_REPLAY;
+            } else {
+                throw std::invalid_argument("error: --rs-rollback must be snapshot or replay\n");
+            }
+        }
+    ));
     add_opt(common_arg(
         {"-ns", "--sequences"}, "N",
         string_format("number of sequences to decode (default: %d)", params.n_sequences),

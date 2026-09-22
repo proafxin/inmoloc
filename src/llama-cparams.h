@@ -15,6 +15,7 @@ struct llama_cparams {
     uint32_t n_seq_max;
     uint32_t n_rs_seq;        // number of recurrent-state snapshots per seq for rollback
     uint32_t n_rs_cells;      // recurrent-state cells shared by all sequences, in [1, n_seq_max]
+    bool     rs_replay;       // roll back by replaying cached inputs instead of state snapshots, see llama_rs_rollback_type
     uint32_t n_outputs_max;   // max outputs supported by the context
     uint32_t n_outputs_max_per_seq;
     int32_t  n_threads;       // number of threads to use for generation

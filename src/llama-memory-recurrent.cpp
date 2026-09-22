@@ -25,6 +25,7 @@ llama_memory_recurrent::llama_memory_recurrent(
                  uint32_t   mem_size,
                  uint32_t   n_seq_max,
                  uint32_t   n_rs_seq,
+                     bool   rs_replay_req,
     const layer_filter_cb & filter) : hparams(model.hparams), n_seq_max(n_seq_max) {
     const int32_t n_layer = hparams.n_layer();
 
@@ -73,15 +74,12 @@ llama_memory_recurrent::llama_memory_recurrent(
         return it->second.get();
     };
 
-    // LLAMA_RS_REPLAY=1 replays the cached inputs of the last tokens instead of keeping a state snapshot
-    // per draft position; it needs a model whose recurrent layers are gated delta-net layers
-    if (n_rs_seq > 0 && llm_arch_supports_rs_replay(model.arch) && hparams.n_embd_gdn_inp() > 0) {
-        const char * env = getenv("LLAMA_RS_REPLAY");
-        rs_replay = env != nullptr && atoi(env) != 0;
+    // replaying the cached inputs of the last tokens instead of keeping a state snapshot per draft position needs
+    // a model whose recurrent layers are gated delta-net layers, see llama_context_params::rs_rollback
+    rs_replay = rs_replay_req && n_rs_seq > 0 && llm_arch_supports_rs_replay(model.arch) && hparams.n_embd_gdn_inp() > 0;
 
-        if (rs_replay) {
-            LLAMA_LOG_INFO("%s: the scan state rolls back by replaying cached inputs (LLAMA_RS_REPLAY)\n", __func__);
-        }
+    if (rs_replay) {
+        LLAMA_LOG_INFO("%s: the scan state rolls back by replaying cached inputs\n", __func__);
     }
 
     if (rs_replay) {
@@ -252,9 +250,7 @@ void llama_memory_recurrent::x_copy_apply(llama_context * lctx) {
         }
     }
 
-    if (rs_debug()) {
-        LLAMA_LOG_INFO("%s: RS copied the pending inputs of %zu seqs\n", __func__, x_copies.size());
-    }
+    LLAMA_LOG_DEBUG("%s: RS copied the pending inputs of %zu seqs\n", __func__, x_copies.size());
 
     x_copies.clear();
 }
@@ -317,10 +313,8 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
 
                         set_rs_idx(seq_id, (uint32_t) rollback);
 
-                        if (rs_debug()) {
-                            LLAMA_LOG_INFO("%s: RS rollback seq %d cell %d: pos %d -> %d, pending %u, x_cur %d\n",
-                                    __func__, seq_id, tail_id, cell.pos, p0 - 1, n_pend[seq_id], (int) x_cur[seq_id]);
-                        }
+                        LLAMA_LOG_DEBUG("%s: RS rollback seq %d cell %d: pos %d -> %d, pending %u, x_cur %d\n",
+                                __func__, seq_id, tail_id, cell.pos, p0 - 1, n_pend[seq_id], (int) x_cur[seq_id]);
 
                         cell.pos = p0 - 1;
                         return true;
@@ -914,10 +908,8 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
                 }
             }
 
-            if (rs_debug()) {
-                LLAMA_LOG_INFO("%s: RS step  seq %d cell %d: n_tokens %u, pos -> %d, replay %u, pending %u, x_cur %d\n",
-                        __func__, lead, cell_id, n_seq_tokens, last_pos, n_rep[lead], n_pend[lead], (int) x_cur[lead]);
-            }
+            LLAMA_LOG_DEBUG("%s: RS step  seq %d cell %d: n_tokens %u, pos -> %d, replay %u, pending %u, x_cur %d\n",
+                    __func__, lead, cell_id, n_seq_tokens, last_pos, n_rep[lead], n_pend[lead], (int) x_cur[lead]);
         }
     }
 
@@ -957,8 +949,8 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
     head = min;
     n    = max - min + 1;
 
-    if (rs_replay && rs_debug() && n > n_seqs) {
-        LLAMA_LOG_INFO("%s: RS range head %d, n %u, seqs %u: %u cells in the range are not computed\n",
+    if (rs_replay && n > n_seqs) {
+        LLAMA_LOG_DEBUG("%s: RS range head %d, n %u, seqs %u: %u cells in the range are not computed\n",
                 __func__, min, n, n_seqs, n - n_seqs);
     }
     used = std::count_if(cells.begin(), cells.end(),

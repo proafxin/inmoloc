@@ -195,6 +195,15 @@ extern "C" {
 
     LLAMA_API const char * llama_flash_attn_type_name(enum llama_flash_attn_type flash_attn_type);
 
+    // how the recurrent state is rolled back when speculative tokens are rejected (n_rs_seq > 0)
+    enum llama_rs_rollback_type {
+        LLAMA_RS_ROLLBACK_SNAPSHOT = 0,  // one state per draft position: the most memory, no extra compute
+        LLAMA_RS_ROLLBACK_REPLAY   = 1,  // one state and the inputs of the last step, replayed: less memory, a
+                                         // short extra scan per step; gated delta-net models only, else snapshot
+    };
+
+    LLAMA_API const char * llama_rs_rollback_type_name(enum llama_rs_rollback_type rs_rollback_type);
+
     enum llama_split_mode {
         LLAMA_SPLIT_MODE_NONE   = 0, // single GPU
         LLAMA_SPLIT_MODE_LAYER  = 1, // split layers and KV across GPUs
@@ -363,6 +372,7 @@ extern "C" {
         uint32_t n_seq_max;             // max number of sequences (i.e. distinct states for recurrent models)
         uint32_t n_rs_seq;              // number of recurrent-state snapshots per seq for rollback (0 = no rollback) [EXPERIMENTAL]
         uint32_t n_rs_cells;            // recurrent-state cells shared by all sequences (0 = n_seq_max) [EXPERIMENTAL]
+        enum llama_rs_rollback_type rs_rollback; // how the recurrent state rolls back, see llama_rs_rollback_type [EXPERIMENTAL]
         uint32_t n_outputs_max;         // max outputs in a ubatch (0 = n_batch)
         uint32_t n_outputs_max_per_seq; // max outputs per sequence (0 = n_outputs_max)
         int32_t  n_threads;             // number of threads to use for generation

@@ -24,6 +24,7 @@ public:
                      uint32_t   mem_size,
                      uint32_t   n_seq_max,
                      uint32_t   n_rs_seq,
+                         bool   rs_replay_req, // replay if the model supports it, see rs_replay
         const layer_filter_cb & filter);
 
     ~llama_memory_recurrent() = default;
@@ -77,7 +78,7 @@ public:
     // the scan state kept in memory lags behind the tokens of the last speculative step, whose inputs are cached,
     // and every step first replays the ones of them that were accepted. a rollback only lowers how many are
     // replayed, so a cell needs a single scan-state row whatever the speculation depth
-    // enabled with LLAMA_RS_REPLAY=1, see also llm_build_delta_net_base::build_recurrent_attn_replay()
+    // chosen with llama_context_params::rs_rollback, see also llm_build_delta_net_base::build_recurrent_attn_replay()
     bool rs_replay = false;
 
     // per-seq rollback index
@@ -111,15 +112,6 @@ public:
     };
 
     std::vector<x_copy> x_copies;
-
-    // LLAMA_RS_REPLAY_DEBUG=1 traces the rollback bookkeeping
-    static bool rs_debug() {
-        static const bool res = [] {
-            const char * env = getenv("LLAMA_RS_REPLAY_DEBUG");
-            return env != nullptr && atoi(env) != 0;
-        }();
-        return res;
-    }
 
     // number of token slots in the input cache of a seq: a speculative step is at most this long
     uint32_t n_x() const {
