@@ -788,3 +788,6 @@ bool llm_arch_is_hybrid         (const llm_arch & arch);
 bool llm_arch_is_diffusion      (const llm_arch & arch);
 bool llm_arch_supports_sm_tensor(const llm_arch & arch);
 bool llm_arch_supports_rs_rollback(const llm_arch & arch);
+// the recurrent layers are gated delta-net layers built by llm_build_delta_net_base, which can roll back by replaying
+// their cached inputs instead of keeping state snapshots, see llama_memory_recurrent::rs_replay
+bool llm_arch_supports_rs_replay(const llm_arch & arch);

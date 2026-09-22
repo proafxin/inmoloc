@@ -425,15 +425,6 @@ void llm_graph_input_rs::set_input(const llama_ubatch * ubatch) {
 
         fill(rs_x_read,  &llama_memory_recurrent_context::x_read);
         fill(rs_x_write, &llama_memory_recurrent_context::x_write);
-        fill(rs_s_prev,  &llama_memory_recurrent_context::s_prev);
-
-        if (rs_s_write_all->buffer) {
-            GGML_ASSERT(ggml_backend_buffer_is_host(rs_s_write_all->buffer));
-            int32_t * data = (int32_t *) rs_s_write_all->data;
-            for (int64_t i = 0; i < rs_s_write_all->ne[0]; ++i) {
-                data[i] = mctx->s_write((int) i);
-            }
-        }
 
         if (rs_s_copy->buffer) {
             GGML_ASSERT(ggml_backend_buffer_is_host(rs_s_copy->buffer));
@@ -443,7 +434,7 @@ void llm_graph_input_rs::set_input(const llama_ubatch * ubatch) {
             }
         }
 
-        // the replayed tokens of a seq are the first ones of the cached step, the rest is padding
+        // the pending tokens of a seq are the first ones of the cached step, the rest is padding
         if (rs_x_mask && rs_x_mask->buffer) {
             GGML_ASSERT(ggml_backend_buffer_is_host(rs_x_mask->buffer));
             float * data = (float *) rs_x_mask->data;
@@ -479,7 +470,7 @@ bool llm_graph_input_rs::can_reuse_impl(const llm_graph_params & params, const l
     res &= rs_z == mctx->get_rs_z();
 
     // a replay adds tokens to the scan, so it shapes the graph
-    res &= n_replay == (mctx->get_n_x() > 0 ? mctx->get_n_x() - 1 : 0);
+    res &= n_replay == mctx->get_n_x();
 
     return res;
 }
@@ -3701,24 +3692,15 @@ ggml_tensor * llm_graph_context::build_rs(
            uint32_t   rs_head,
            uint32_t   rs_size,
             int32_t   rs_zero,
-        const llm_graph_get_rows_fn & get_state_rows,
-               bool   zero_both,
-        ggml_tensor * state_copy_extra_dst) const {
+        const llm_graph_get_rows_fn & get_state_rows) const {
 
+    GGML_UNUSED(rs_size);
     ggml_tensor * states = ggml_reshape_2d(ctx0, s, state_size, s->ne[1]);
 
     // Clear a single state which will then be copied to the other cleared states.
     // Note that this is a no-op when the view is zero-sized.
     ggml_tensor * state_zero = ggml_view_1d(ctx0, states, state_size*(rs_zero >= 0), rs_zero*states->nb[1]*(rs_zero >= 0));
     ggml_build_forward_expand(gf, ggml_scale_inplace(ctx0, state_zero, 0));
-
-    // a scan state that alternates between two rows per cell has to start from zero in both of them, since
-    // which one a step reads depends on the parity of the cell, see llama_memory_recurrent::rs_replay
-    if (zero_both) {
-        ggml_tensor * state_zero2 = ggml_view_1d(ctx0, states, state_size*(rs_zero >= 0),
-                (rs_zero + (int64_t) rs_size)*states->nb[1]*(rs_zero >= 0));
-        ggml_build_forward_expand(gf, ggml_scale_inplace(ctx0, state_zero2, 0));
-    }
 
     // copy states
     // NOTE: assuming the copy destinations are ALL contained between rs_head and rs_head + n_rs
@@ -3728,17 +3710,10 @@ ggml_tensor * llm_graph_context::build_rs(
 
     // copy extra states which won't be changed further (between n_seqs and n_rs)
     ggml_tensor * states_extra = ggml_get_rows(ctx0, states, state_copy_extra);
-    if (state_copy_extra_dst) {
-        // the rows alternate, so each state goes to the current row of its cell, see llama_memory_recurrent::rs_replay
-        if (n_rs > (uint32_t) n_seqs) {
-            ggml_build_forward_expand(gf, ggml_set_rows(ctx0, states, states_extra, state_copy_extra_dst));
-        }
-    } else {
-        ggml_build_forward_expand(gf,
-            ggml_cpy(ctx0,
-                states_extra,
-                ggml_view_2d(ctx0, s, state_size, (n_rs - n_seqs), s->nb[1], (rs_head + n_seqs)*s->nb[1])));
-    }
+    ggml_build_forward_expand(gf,
+        ggml_cpy(ctx0,
+            states_extra,
+            ggml_view_2d(ctx0, s, state_size, (n_rs - n_seqs), s->nb[1], (rs_head + n_seqs)*s->nb[1])));
 
     return output_states;
 }
@@ -3760,9 +3735,8 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
     inp->s_copy_extra = ggml_view_1d(ctx0, inp->s_copy, n_rs - n_seqs, n_seqs * inp->s_copy->nb[0]);
 
     if (mctx_cur->get_n_x() > 0) {
-        // the scan always replays this many slots, the mask says how many of them are real tokens
-        // a rollback removes at least one of the n_x cached tokens, so at most n_x - 1 of them are replayed
-        inp->n_replay = mctx_cur->get_n_x() - 1;
+        // the scan always replays this many slots, the mask says how many of them are pending tokens
+        inp->n_replay = mctx_cur->get_n_x();
 
         auto idxs = [&]() {
             ggml_tensor * res = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_seqs);
@@ -3772,13 +3746,6 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
 
         inp->rs_x_read  = idxs();
         inp->rs_x_write = idxs();
-        inp->rs_s_prev  = idxs();
-
-        inp->rs_s_write_all = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_rs);
-        ggml_set_input(inp->rs_s_write_all);
-
-        inp->rs_s_write       = ggml_view_1d(ctx0, inp->rs_s_write_all, n_seqs, 0);
-        inp->rs_s_write_extra = ggml_view_1d(ctx0, inp->rs_s_write_all, n_rs - n_seqs, n_seqs * inp->rs_s_write_all->nb[0]);
 
         inp->rs_s_copy = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_rs);
         ggml_set_input(inp->rs_s_copy);
@@ -3812,11 +3779,11 @@ ggml_tensor * llm_graph_context::build_rs(
         const llm_graph_get_rows_fn & get_state_rows) const {
     const auto * kv_state = inp->mctx;
 
-    // the scan state alternates between two rows per cell when a rollback replays the cached inputs
+    // the scan state has no snapshots to roll back to when a rollback replays the cached inputs instead
     if (inp->rs_s_copy && kv_state->is_s_l(s)) {
         return build_rs(s, inp->rs_s_copy_main, inp->rs_s_copy_extra, state_size, n_seqs,
                         kv_state->get_n_rs(), kv_state->get_head(), kv_state->get_size(), kv_state->get_rs_z(),
-                        get_state_rows, /* zero_both */ true, inp->rs_s_write_extra);
+                        get_state_rows);
     }
 
     return build_rs(s, inp->s_copy_main, inp->s_copy_extra, state_size, n_seqs,

@@ -73,10 +73,11 @@ public:
     // number of recurrent-state snapshots per seq for rollback; tensors are widened to (1 + n_rs_seq) groups
     uint32_t n_rs_seq = 0;
 
-    // rollback by replaying the cached delta-net inputs of the last tokens, instead of keeping one state
-    // snapshot per draft position: the state of a rejected draft is recomputed by running the scan again
-    // over the accepted tokens, so the memory no longer grows with the speculation depth
-    // enabled with LLAMA_RS_REPLAY=1, see also llm_build_delta_net_base::build_recurrent_attn()
+    // rollback by replaying cached delta-net inputs, instead of keeping one state snapshot per draft position:
+    // the scan state kept in memory lags behind the tokens of the last speculative step, whose inputs are cached,
+    // and every step first replays the ones of them that were accepted. a rollback only lowers how many are
+    // replayed, so a cell needs a single scan-state row whatever the speculation depth
+    // enabled with LLAMA_RS_REPLAY=1, see also llm_build_delta_net_base::build_recurrent_attn_replay()
     bool rs_replay = false;
 
     // per-seq rollback index
@@ -88,22 +89,28 @@ public:
     // rs_replay bookkeeping
     //
 
-    // per cell: which scan-state row holds the current state; a rollback flips it back to the previous one
-    std::vector<uint8_t> s_cur;
+    // the input cache is indexed by seq, since cells move and sequences do not; each seq has two halves, so that a
+    // step can cache its own inputs while its replay reads the ones of the step before
 
-    // per seq: which half of the input cache the last step wrote; a rollback does not change it, the inputs it
-    // replays are the ones of that step. the cache is indexed by seq, since cells move and sequences do not
+    // per seq: the half holding the inputs of the last cached step
     std::vector<uint8_t> x_cur;
 
-    // per cell: whether the current step flipped s_cur, i.e. whether the state from before the step is now in the
-    // other row; cells in the range of the step that it does not compute keep their row
-    std::vector<uint8_t> s_flip;
+    // per seq: the tokens of the last cached step that are in the sequence but not yet in the scan state
+    std::vector<uint32_t> n_pend;
 
-    // per seq: how many tokens of the last step are in the input cache, i.e. how far a replay can go back
-    std::vector<uint32_t> n_x_cached;
+    // per seq, set by find_slot() for the step being computed: the row its replay reads and how many tokens
+    std::vector<uint32_t> x_rd;
+    std::vector<uint32_t> n_rep;
 
-    // per seq: tokens to replay from the previous state before the next step, see rs_replay
-    std::vector<uint32_t> rs_replay_n;
+    // input-cache rows to copy before the next step, when a seq takes over the pending tokens of another one
+    // (seq_cp, or a step decoding several seqs at once); applied by the next memory update, see init_update()
+    struct x_copy {
+        llama_seq_id dst;
+        uint32_t     row_src;
+        uint32_t     row_dst;
+    };
+
+    std::vector<x_copy> x_copies;
 
     // LLAMA_RS_REPLAY_DEBUG=1 traces the rollback bookkeeping
     static bool rs_debug() {
@@ -114,26 +121,31 @@ public:
         return res;
     }
 
-    // the scan-state row of cell i: the current state, or the one from before the last step
-    uint32_t s_row(uint32_t i, bool prev) const {
-        return ((uint32_t) (s_cur[i] ^ (prev ? 1 : 0)))*size + i;
+    // number of token slots in the input cache of a seq: a speculative step is at most this long
+    uint32_t n_x() const {
+        return rs_replay ? n_rs_seq + 1 : 0;
     }
 
-    // the input-cache row of cell i: the half the last step wrote, or the one this step writes
-    uint32_t x_row(llama_seq_id seq_id, bool prev) const {
-        return ((uint32_t) (x_cur[seq_id] ^ (prev ? 1 : 0)))*n_seq_max + (uint32_t) seq_id;
+    uint32_t x_row(llama_seq_id seq_id, uint32_t half) const {
+        return half*n_seq_max + (uint32_t) seq_id;
     }
 
-    // tokens the seq of cell i replays before this step, see rs_replay
-    uint32_t replay_n(uint32_t i) const {
-        if (!rs_replay || cells[i].seq_id.empty()) {
-            return 0;
-        }
+    // the row that holds the pending inputs of a seq, which is another seq's while a copy into it is queued
+    uint32_t x_row_pend(llama_seq_id seq_id) const;
 
-        const llama_seq_id seq_id = *cells[i].seq_id.begin();
-
-        return seq_id >= 0 && (size_t) seq_id < rs_replay_n.size() ? rs_replay_n[seq_id] : 0;
+    // the seq whose rows a cell's replay reads and writes
+    llama_seq_id x_seq(uint32_t i) const {
+        return cells[i].seq_id.empty() ? -1 : *cells[i].seq_id.begin();
     }
+
+    // copies the input-cache row of seq src into the half of seq dst that holds its pending inputs
+    void x_copy_queue(llama_seq_id src, llama_seq_id dst);
+
+    // applies the queued copies, after the computation that writes their source rows
+    void x_copy_apply(llama_context * lctx);
+
+    // drops the queued copies into seq_id (all when negative)
+    void x_copy_drop(llama_seq_id seq_id);
 
     // computed before each graph build
     uint32_t n = 0;
@@ -174,8 +186,8 @@ public:
     // per layer
     std::vector<ggml_tensor *> r_l;
     std::vector<ggml_tensor *> s_l;
-    // cached delta-net inputs of the last (1 + n_rs_seq) tokens of each cell, see rs_replay
-    // [n_embd_gdn_inp*(1 + n_rs_seq), size], empty when rs_replay is off
+    // cached delta-net inputs of the last (1 + n_rs_seq) tokens of each seq, two halves, see rs_replay
+    // [n_embd_gdn_inp*(1 + n_rs_seq), 2*n_seq_max], empty when rs_replay is off
     std::vector<ggml_tensor *> x_l;
     // a second conv history that must stay replicated across devices, so it cannot share the r row
     std::vector<ggml_tensor *> p_l;
@@ -200,6 +212,10 @@ private:
 
     bool state_read_meta(llama_io_read_i & io, uint32_t cell_count, llama_seq_id dest_seq_id = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t cell_count);
+
+    // the pending tokens of each seq and their cached inputs, see rs_replay
+    void state_write_pend(llama_io_write_i & io, llama_seq_id seq_id) const;
+    bool state_read_pend (llama_io_read_i  & io, llama_seq_id dest_seq_id);
 };
 
 class llama_memory_recurrent_context : public llama_memory_context_i {
@@ -207,9 +223,14 @@ public:
     // used for errors
     llama_memory_recurrent_context(llama_memory_status status);
 
-    // used to create a full-cache or update context
+    // used to create a full-cache context
     llama_memory_recurrent_context(
             llama_memory_recurrent * mem);
+
+    // used to create an update context, which applies the queued input-cache copies
+    llama_memory_recurrent_context(
+            llama_memory_recurrent * mem,
+                     llama_context * lctx);
 
     // used to create a batch processing context from a batch
     llama_memory_recurrent_context(
@@ -253,22 +274,12 @@ public:
     // whether t is one of the scan-state tensors, which are read with s_copy_plain()
     bool is_s_l(const ggml_tensor * t) const;
 
-    // the row of the scan state this step writes
-    int32_t s_write(int i) const;
-
-    // the other row of the cell, which this step fills with the state after the replayed tokens and before
-    // its own ones, so that a rollback into this step replays from there
-    int32_t s_prev(int i) const;
-
-    // rows of the input cache read by a replay, and written by this step
+    // rows of the input cache read by the replay of this step, and written by it
     int32_t x_read (int i) const;
     int32_t x_write(int i) const;
 
-    // tokens replayed by the seq of the i-th cell of the ubatch before this step
+    // tokens replayed by the i-th cell of the ubatch before the tokens of this step
     uint32_t replay_n(int i) const;
-
-    // the largest number of tokens any seq of this ubatch replays, 0 when no rollback is pending
-    uint32_t get_n_replay() const;
 
     int32_t s_copy(int i) const;
 
@@ -276,6 +287,9 @@ private:
     const llama_memory_status status;
 
     llama_memory_recurrent * mem;
+
+    // set for an update context
+    llama_context * lctx = nullptr;
 
     size_t i_next = 0;
 

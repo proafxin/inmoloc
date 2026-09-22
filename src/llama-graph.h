@@ -296,12 +296,8 @@ public:
     ggml_tensor * s_copy_main;   // I32 [n_seqs]
     ggml_tensor * s_copy_extra;  // I32 [n_rs - n_seqs]
 
-    // rows of the scan state, which alternates between two rows when a rollback replays the cached inputs
-    // rs_s_write_all holds the row every cell of the range ends up in: the computed cells first, then the others
-    ggml_tensor * rs_s_write_all   = nullptr; // I32 [n_rs]
-    ggml_tensor * rs_s_write       = nullptr; // I32 [n_seqs]         view of rs_s_write_all
-    ggml_tensor * rs_s_write_extra = nullptr; // I32 [n_rs - n_seqs]  view of rs_s_write_all
-    ggml_tensor * rs_s_prev        = nullptr; // I32 [n_seqs]         rows for the state before the step's own tokens
+    // rows of the scan state, which has no snapshots when a rollback replays the cached inputs, so they are the
+    // source cells themselves, without the rollback index of s_copy
     ggml_tensor * rs_s_copy       = nullptr; // I32 [n_rs]
     ggml_tensor * rs_s_copy_main  = nullptr; // I32 [n_seqs]
     ggml_tensor * rs_s_copy_extra = nullptr; // I32 [n_rs - n_seqs]
@@ -312,7 +308,7 @@ public:
     ggml_tensor * rs_x_write = nullptr; // I32 [n_seqs]        rows this step writes
     ggml_tensor * rs_x_mask  = nullptr; // F32 [1, 1, n_replay, n_seqs] 1 for replayed tokens, 0 for padding
 
-    // tokens replayed before this step, 0 when no rollback is pending; shapes the graph
+    // token slots the replay scans, the mask says how many of them are pending tokens; shapes the graph
     uint32_t n_replay = 0;
 
     const llama_memory_recurrent_context * mctx;
@@ -1383,9 +1379,7 @@ struct llm_graph_context {
                uint32_t   rs_head,
                uint32_t   rs_size,
                 int32_t   rs_zero,
-            const llm_graph_get_rows_fn & get_state_rows = ggml_get_rows,
-                   bool   zero_both = false,
-            ggml_tensor * state_copy_extra_dst = nullptr) const;
+            const llm_graph_get_rows_fn & get_state_rows = ggml_get_rows) const;
 
     llm_graph_input_rs * build_rs_inp() const;
 

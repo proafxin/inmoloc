@@ -2800,6 +2800,21 @@ static int ggml_cuda_try_gdn_cache_fusion(
         return 0;
     }
 
+    // the kernel does not write the snapshot tail, so nothing but the cpy may read it (e.g. a second scan that
+    // continues from the state)
+    for (int j = node_idx + 1; j < cgraph->n_nodes; ++j) {
+        const ggml_tensor * n = cgraph->nodes[j];
+        if (n == cpy || ggml_cuda_is_view_or_noop(n)) {
+            continue;
+        }
+        for (int k = 0; k < GGML_MAX_SRC; ++k) {
+            const ggml_tensor * s = n->src[k];
+            if (s != nullptr && s != src && (s == gdn || (s->view_src == gdn && s->view_offs + ggml_nbytes(s) > tail_off))) {
+                return 0;
+            }
+        }
+    }
+
     fused_state_cpy.data        = (float *) dst->data; // rollback group 0 (newest)
     fused_state_cpy.slot_stride = K > 1 ? (int64_t) (dst->nb[2] / sizeof(float)) : 0;
     return skip;

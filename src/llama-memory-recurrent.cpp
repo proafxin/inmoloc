@@ -75,7 +75,7 @@ llama_memory_recurrent::llama_memory_recurrent(
 
     // LLAMA_RS_REPLAY=1 replays the cached inputs of the last tokens instead of keeping a state snapshot
     // per draft position; it needs a model whose recurrent layers are gated delta-net layers
-    if (n_rs_seq > 0 && hparams.n_embd_gdn_inp() > 0) {
+    if (n_rs_seq > 0 && llm_arch_supports_rs_replay(model.arch) && hparams.n_embd_gdn_inp() > 0) {
         const char * env = getenv("LLAMA_RS_REPLAY");
         rs_replay = env != nullptr && atoi(env) != 0;
 
@@ -85,11 +85,10 @@ llama_memory_recurrent::llama_memory_recurrent(
     }
 
     if (rs_replay) {
-        s_cur.assign(mem_size, 0);
-        x_cur.assign(n_seq_max, 0);
-        s_flip.assign(mem_size, 0);
-        n_x_cached.assign(n_seq_max, 0);
-        rs_replay_n.assign(n_seq_max, 0);
+        x_cur .assign(n_seq_max, 0);
+        n_pend.assign(n_seq_max, 0);
+        x_rd  .assign(n_seq_max, 0);
+        n_rep .assign(n_seq_max, 0);
     }
 
     r_l.resize(n_layer);
@@ -121,11 +120,10 @@ llama_memory_recurrent::llama_memory_recurrent(
             throw std::runtime_error("failed to create ggml context for rs cache");
         }
 
-        // the conv state is small, so it keeps one row per draft position; the scan state is large and
-        // instead alternates between two rows: the step writes one while the other keeps the state from
-        // before it, which a rollback replays the accepted tokens from
+        // the conv state is small, so it keeps one row per draft position; the scan state is large and keeps a
+        // single row, which lags behind the cached tokens of the last speculative step
         const uint32_t n_rows   = mem_size * (1 + n_rs_seq);
-        const uint32_t n_rows_s = rs_replay ? mem_size * 2 : n_rows;
+        const uint32_t n_rows_s = rs_replay ? mem_size : n_rows;
 
         ggml_tensor * r = ggml_new_tensor_2d(ctx, type_r, hparams.n_embd_r(), n_rows);
         ggml_tensor * s = ggml_new_tensor_2d(ctx, type_s, hparams.n_embd_s(), n_rows_s);
@@ -195,12 +193,70 @@ void llama_memory_recurrent::clear(bool data) {
     std::fill(rs_idx.begin(), rs_idx.end(), 0);
 
     if (rs_replay) {
-        std::fill(s_cur.begin(),       s_cur.end(),       0);
-        std::fill(x_cur.begin(),       x_cur.end(),       0);
-        std::fill(s_flip.begin(),      s_flip.end(),      0);
-        std::fill(n_x_cached.begin(),  n_x_cached.end(),  0);
-        std::fill(rs_replay_n.begin(), rs_replay_n.end(), 0);
+        std::fill(x_cur .begin(), x_cur .end(), 0);
+        std::fill(n_pend.begin(), n_pend.end(), 0);
+        std::fill(x_rd  .begin(), x_rd  .end(), 0);
+        std::fill(n_rep .begin(), n_rep .end(), 0);
+        x_copies.clear();
     }
+}
+
+uint32_t llama_memory_recurrent::x_row_pend(llama_seq_id seq_id) const {
+    // the last queued copy into the seq wins
+    for (auto it = x_copies.rbegin(); it != x_copies.rend(); ++it) {
+        if (it->dst == seq_id) {
+            return it->row_src;
+        }
+    }
+
+    return x_row(seq_id, x_cur[seq_id]);
+}
+
+void llama_memory_recurrent::x_copy_queue(llama_seq_id src, llama_seq_id dst) {
+    if (src == dst) {
+        return;
+    }
+
+    // the source is resolved now: a copy into src queued earlier is applied first, but reading its source directly
+    // does not depend on that order
+    x_copies.push_back({ dst, x_row_pend(src), x_row(dst, x_cur[dst]) });
+}
+
+void llama_memory_recurrent::x_copy_drop(llama_seq_id seq_id) {
+    x_copies.erase(std::remove_if(x_copies.begin(), x_copies.end(), [&](const x_copy & c) {
+        return seq_id < 0 || c.dst == seq_id;
+    }), x_copies.end());
+}
+
+void llama_memory_recurrent::x_copy_apply(llama_context * lctx) {
+    if (x_copies.empty()) {
+        return;
+    }
+
+    // the source rows are written by computations that may still be running
+    llama_synchronize(lctx);
+
+    std::vector<uint8_t> buf;
+
+    for (auto * x : x_l) {
+        if (x == nullptr) {
+            continue;
+        }
+
+        const size_t row_size = ggml_row_size(x->type, x->ne[0]);
+        buf.resize(row_size);
+
+        for (const auto & c : x_copies) {
+            ggml_backend_tensor_get(x, buf.data(), c.row_src*row_size, row_size);
+            ggml_backend_tensor_set(x, buf.data(), c.row_dst*row_size, row_size);
+        }
+    }
+
+    if (rs_debug()) {
+        LLAMA_LOG_INFO("%s: RS copied the pending inputs of %zu seqs\n", __func__, x_copies.size());
+    }
+
+    x_copies.clear();
 }
 
 bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
@@ -214,7 +270,8 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
         p1 = std::numeric_limits<llama_pos>::max();
     }
 
-    if ((uint32_t) seq_id >= this->n_seq_max) {
+    // a negative seq_id means any seq, see the handling below
+    if (seq_id >= 0 && (uint32_t) seq_id >= this->n_seq_max) {
         LLAMA_LOG_ERROR("%s: invalid seq_id (%d) - larger than n_seq_max (%d)\n", __func__, seq_id, this->n_seq_max);
         return false;
     }
@@ -223,13 +280,14 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
     if (rm_all) {
         set_rs_idx(seq_id, 0);
 
-        // a replay still pending from the previous use of this seq would be applied to the next one
+        // pending tokens of the previous use of this seq would be replayed into the next one
         if (rs_replay) {
             if (seq_id < 0) {
-                std::fill(rs_replay_n.begin(), rs_replay_n.end(), 0);
-            } else if ((size_t) seq_id < rs_replay_n.size()) {
-                rs_replay_n[seq_id] = 0;
+                std::fill(n_pend.begin(), n_pend.end(), 0);
+            } else if ((size_t) seq_id < n_pend.size()) {
+                n_pend[seq_id] = 0;
             }
+            x_copy_drop(seq_id);
         }
     }
 
@@ -248,27 +306,20 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
             if (0 < p0 && p0 <= cell.pos && p1 > cell.pos) {
                 const llama_pos rollback = cell.pos - (p0 - 1);
 
-                // with rs_replay the state of the removed tokens is recomputed from the state before the last
-                // step, so the rollback has to stay inside the tokens whose inputs are cached
+                // with rs_replay the scan state does not contain the pending tokens yet, so removing some of them
+                // only means replaying fewer; the conv state still rolls back to one of its snapshots, which is
+                // single-use like in the snapshot mode
                 if (rs_replay) {
-                    const uint32_t n_cached = n_x_cached[seq_id];
-                    const bool pending = rs_replay_n[seq_id] != 0;
+                    const bool pending = rs_idx[seq_id] != 0;
 
-                    if (!pending && rollback >= 1 && rollback <= (llama_pos) std::min(n_cached, n_rs_seq)) {
-                        // the scan state goes back to the one from before the last step, and the tokens of
-                        // that step which survive the removal are replayed from it; the conv state still
-                        // rolls back to one of its snapshots
-                        rs_replay_n[seq_id] = n_cached - (uint32_t) rollback;
-
-                        s_cur[tail_id]     ^= 1;
-                        n_x_cached[seq_id]  = 0;
+                    if (!pending && rollback >= 1 && rollback <= (llama_pos) std::min(n_pend[seq_id], n_rs_seq)) {
+                        n_pend[seq_id] -= (uint32_t) rollback;
 
                         set_rs_idx(seq_id, (uint32_t) rollback);
 
                         if (rs_debug()) {
-                            LLAMA_LOG_INFO("%s: RS rollback seq %d cell %d: p0 %d, pos %d -> %d, back %d of %u cached, "
-                                    "replay %u, s_cur %d, x_cur %d\n", __func__, seq_id, tail_id, p0, cell.pos, p0 - 1,
-                                    (int) rollback, n_cached, rs_replay_n[seq_id], (int) s_cur[tail_id], (int) x_cur[seq_id]);
+                            LLAMA_LOG_INFO("%s: RS rollback seq %d cell %d: pos %d -> %d, pending %u, x_cur %d\n",
+                                    __func__, seq_id, tail_id, cell.pos, p0 - 1, n_pend[seq_id], (int) x_cur[seq_id]);
                         }
 
                         cell.pos = p0 - 1;
@@ -296,6 +347,11 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
         if (p0 != p1 && (p0 != 0 || p1 != std::numeric_limits<llama_pos>::max())) {
             //printf("[DEBUG] inside `llama_memory_recurrent::seq_rm`: `seq_id` is negative, so returning false\n");
             return false;
+        }
+
+        // every cell is cleared below, so no seq keeps a tail
+        if (p0 != p1) {
+            std::fill(seq_tails.begin(), seq_tails.end(), -1);
         }
     }
 
@@ -364,6 +420,21 @@ void llama_memory_recurrent::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id
             cell_src.seq_id.insert(seq_id_dst);
             tail_dst = tail_src;
         }
+
+        // a rollback of src that is still pending applies to the shared cell, which is read with the bookkeeping of
+        // either seq, so dst takes it over; with rs_replay, so do the pending tokens the state lags behind
+        if (n_rs_seq > 0) {
+            set_rs_idx(seq_id_dst, tail_src >= 0 ? rs_idx[seq_id_src] : 0);
+        }
+
+        if (rs_replay) {
+            x_copy_drop(seq_id_dst);
+
+            n_pend[seq_id_dst] = tail_src >= 0 ? n_pend[seq_id_src] : 0;
+            if (n_pend[seq_id_dst] > 0) {
+                x_copy_queue(seq_id_src, seq_id_dst);
+            }
+        }
     }
 }
 
@@ -373,6 +444,11 @@ void llama_memory_recurrent::seq_keep(llama_seq_id seq_id) {
     for (uint32_t i = 0; i < n_seq_max; ++i) {
         if ((llama_seq_id) i != seq_id) {
             seq_tails[i] = -1;
+
+            if (rs_replay) {
+                n_pend[i] = 0;
+                x_copy_drop((llama_seq_id) i);
+            }
         }
     }
 
@@ -562,8 +638,12 @@ llama_memory_context_ptr llama_memory_recurrent::init_full() {
 }
 
 llama_memory_context_ptr llama_memory_recurrent::init_update(llama_context * lctx, bool optimize) {
-    GGML_UNUSED(lctx);
     GGML_UNUSED(optimize);
+
+    // the only update: pending inputs that a seq took over from another one, see x_copies
+    if (!x_copies.empty()) {
+        return std::make_unique<llama_memory_recurrent_context>(this, lctx);
+    }
 
     return std::make_unique<llama_memory_recurrent_context>(LLAMA_MEMORY_STATUS_NO_UPDATE);
 }
@@ -578,10 +658,11 @@ bool llama_memory_recurrent::prepare(const std::vector<llama_ubatch> & ubatches)
     auto org_head = head;
 
     // the replay bookkeeping advances in find_slot() too, so this dry run must not leave it advanced
-    auto org_s_cur = s_cur;
-    auto org_x_cur = x_cur;
-    auto org_s_flip = s_flip;
-    auto org_n_x_cached = n_x_cached;
+    auto org_x_cur    = x_cur;
+    auto org_n_pend   = n_pend;
+    auto org_x_rd     = x_rd;
+    auto org_n_rep    = n_rep;
+    auto org_x_copies = x_copies;
 
     bool success = true;
 
@@ -598,10 +679,11 @@ bool llama_memory_recurrent::prepare(const std::vector<llama_ubatch> & ubatches)
     used = org_used;
     head = org_head;
 
-    s_cur = std::move(org_s_cur);
-    x_cur = std::move(org_x_cur);
-    s_flip = std::move(org_s_flip);
-    n_x_cached = std::move(org_n_x_cached);
+    x_cur    = std::move(org_x_cur);
+    n_pend   = std::move(org_n_pend);
+    x_rd     = std::move(org_x_rd);
+    n_rep    = std::move(org_n_rep);
+    x_copies = std::move(org_x_copies);
 
     return success;
 }
@@ -609,10 +691,6 @@ bool llama_memory_recurrent::prepare(const std::vector<llama_ubatch> & ubatches)
 bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
     const uint32_t n_seq_tokens = ubatch.n_seq_tokens;
     const uint32_t n_seqs       = ubatch.n_seqs;
-
-    if (rs_replay) {
-        std::fill(s_flip.begin(), s_flip.end(), 0);
-    }
 
     // if we have enough unused cells before the current head ->
     //   better to start searching from the beginning of the cache, hoping to fill it
@@ -739,10 +817,6 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
                 auto & orig_cell = cells[seq_tail];
                 empty_cell.pos = orig_cell.pos;
                 empty_cell.src = orig_cell.src;
-                if (rs_replay) {
-                    // the parity describes the rows of the state this cell copies
-                    s_cur[next_empty_cell] = s_cur[seq_tail];
-                }
                 orig_cell.seq_id.erase(seq_id);
                 empty_cell.seq_id.insert(seq_id); // will be overwritten
                 GGML_ASSERT(!orig_cell.is_empty()); // has at least one remaining seq_id
@@ -775,12 +849,6 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
             std::swap(dst_cell.src, src_cell.src);
             std::swap(dst_cell.seq_id, src_cell.seq_id);
 
-            // the bookkeeping follows the cell contents
-            if (rs_replay) {
-                std::swap(s_cur[dst_id],      s_cur[src_id]);
-                std::swap(s_flip[dst_id],     s_flip[src_id]);
-            }
-
             // swap tails
             for (uint32_t j = 0; j < n_seq_max; ++j) {
                 int32_t & tail = seq_tails[j];
@@ -806,31 +874,50 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
             LLAMA_LOG_WARN("%s: non-consecutive token position %d after %d for sequence %d with %u new tokens\n",
                 __func__, last_pos, cell.pos, ubatch.seq_id[i][0], n_seq_tokens);
         }
-        // this step caches its inputs in the other half, so the replay can still read the last step's ones
-        // this step writes the other scan-state row and caches its inputs in the other half, so the state
-        // and the inputs from before it stay available for a replay
-        // only a step short enough to be a speculative one can be rolled back into
-        if (rs_replay) {
-            const llama_seq_id seq_id = ubatch.seq_id[i][0];
-
-            s_cur[cell_id]     ^= 1;
-            s_flip[cell_id]     = 1;
-            x_cur[seq_id]      ^= 1;
-            n_x_cached[seq_id]  = n_seq_tokens <= n_rs_seq + 1 ? n_seq_tokens : 0;
-
-            if (rs_debug()) {
-                LLAMA_LOG_INFO("%s: RS step  seq %d cell %d: n_tokens %u, pos %d -> %d, s_cur %d, x_cur %d, replay %u\n",
-                        __func__, ubatch.seq_id[i][0], cell_id, n_seq_tokens, cell.pos, last_pos,
-                        (int) s_cur[cell_id], (int) x_cur[seq_id], replay_n(cell_id));
-            }
-        }
-
         cell.pos = last_pos;
         cell.seq_id.clear();
         for (int32_t j = 0; j < ubatch.n_seq_id[i]; ++j) {
             const llama_seq_id seq_id = ubatch.seq_id[i][j];
             cell.seq_id.insert(seq_id);
             seq_tails[seq_id] = cell_id;
+        }
+
+        // the step first replays the pending tokens of the seq; a step short enough to be a speculative one then
+        // caches its own inputs in the other half and they become the pending tokens, while a longer one cannot be
+        // rolled back into and leaves the scan state after all its tokens
+        if (rs_replay) {
+            const llama_seq_id lead = x_seq(cell_id);
+            const bool         keep = n_seq_tokens <= n_x();
+
+            x_rd [lead] = x_row_pend(lead);
+            n_rep[lead] = n_pend[lead];
+
+            // the replay reads the source of a queued copy directly, so the copy is not needed anymore
+            x_copy_drop(lead);
+
+            if (keep) {
+                x_cur[lead] ^= 1;
+            }
+            n_pend[lead] = keep ? n_seq_tokens : 0;
+
+            // the other seqs of the cell have the same state, so they take over the pending inputs of the lead
+            for (int32_t j = 0; j < ubatch.n_seq_id[i]; ++j) {
+                const llama_seq_id seq_id = ubatch.seq_id[i][j];
+                if (seq_id == lead) {
+                    continue;
+                }
+
+                x_copy_drop(seq_id);
+                n_pend[seq_id] = n_pend[lead];
+                if (keep) {
+                    x_copy_queue(lead, seq_id);
+                }
+            }
+
+            if (rs_debug()) {
+                LLAMA_LOG_INFO("%s: RS step  seq %d cell %d: n_tokens %u, pos -> %d, replay %u, pending %u, x_cur %d\n",
+                        __func__, lead, cell_id, n_seq_tokens, last_pos, n_rep[lead], n_pend[lead], (int) x_cur[lead]);
+            }
         }
     }
 
@@ -977,8 +1064,8 @@ void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq
                 cell_ranges_data.back().second++;
             }
 
-            // the scan state alternates between two rows instead of keeping snapshots
-            const uint32_t cell_id_s = rs_replay ? (uint32_t) s_cur[i]*size + src_id : cell_id;
+            // the scan state has a single row instead of snapshots
+            const uint32_t cell_id_s = rs_replay ? src_id : cell_id;
             if (cell_ranges_s.empty() || cell_ranges_s.back().second != cell_id_s) {
                 cell_ranges_s.emplace_back(cell_id_s, cell_id_s + 1);
             } else {
@@ -1020,6 +1107,96 @@ void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq
 
     state_write_meta(io, cell_ranges, seq_id);
     state_write_data(io, cell_ranges_data, cell_ranges_s);
+
+    if (rs_replay) {
+        state_write_pend(io, seq_id);
+    }
+}
+
+// the scan state lags behind the pending tokens of each seq, so their cached inputs are part of the state
+void llama_memory_recurrent::state_write_pend(llama_io_write_i & io, llama_seq_id seq_id) const {
+    std::vector<llama_seq_id> seqs;
+    for (uint32_t s = 0; s < n_seq_max; ++s) {
+        if ((seq_id == -1 && seq_tails[s] >= 0) || (llama_seq_id) s == seq_id) {
+            seqs.push_back((llama_seq_id) s);
+        }
+    }
+
+    const uint32_t n_seqs = seqs.size();
+    io.write(&n_seqs, sizeof(n_seqs));
+
+    for (const llama_seq_id s : seqs) {
+        const uint32_t n = seq_tails[s] >= 0 ? n_pend[s] : 0;
+
+        io.write(&s, sizeof(s));
+        io.write(&n, sizeof(n));
+
+        if (n == 0) {
+            continue;
+        }
+
+        const uint32_t row = x_row_pend(s);
+
+        for (auto * x : x_l) {
+            if (x == nullptr) {
+                continue;
+            }
+
+            const size_t row_size = ggml_row_size(x->type, x->ne[0]);
+            const size_t n_bytes  = ggml_row_size(x->type, (int64_t) hparams.n_embd_gdn_inp()*n);
+
+            io.write_tensor(x, row*row_size, n_bytes);
+        }
+    }
+}
+
+bool llama_memory_recurrent::state_read_pend(llama_io_read_i & io, llama_seq_id dest_seq_id) {
+    uint32_t n_seqs;
+    io.read(&n_seqs, sizeof(n_seqs));
+
+    if (dest_seq_id != -1 && n_seqs > 1) {
+        LLAMA_LOG_ERROR("%s: pending inputs of %u seqs for a single seq\n", __func__, n_seqs);
+        return false;
+    }
+
+    for (uint32_t k = 0; k < n_seqs; ++k) {
+        llama_seq_id s;
+        uint32_t     n;
+
+        io.read(&s, sizeof(s));
+        io.read(&n, sizeof(n));
+
+        if (dest_seq_id != -1) {
+            s = dest_seq_id;
+        }
+
+        if (s < 0 || (uint32_t) s >= n_seq_max || n > n_x()) {
+            LLAMA_LOG_ERROR("%s: invalid pending inputs: seq %d, %u tokens\n", __func__, s, n);
+            return false;
+        }
+
+        x_copy_drop(s);
+        n_pend[s] = n;
+
+        if (n == 0) {
+            continue;
+        }
+
+        const uint32_t row = x_row(s, x_cur[s]);
+
+        for (auto * x : x_l) {
+            if (x == nullptr) {
+                continue;
+            }
+
+            const size_t row_size = ggml_row_size(x->type, x->ne[0]);
+            const size_t n_bytes  = ggml_row_size(x->type, (int64_t) hparams.n_embd_gdn_inp()*n);
+
+            io.read_tensor(x, row*row_size, n_bytes);
+        }
+    }
+
+    return true;
 }
 
 void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
@@ -1034,6 +1211,10 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
 
     try {
         res = res && state_read_data(io, cell_count);
+
+        if (rs_replay) {
+            res = res && state_read_pend(io, seq_id);
+        }
     } catch (...) {
         res = false;
     }
@@ -1050,25 +1231,6 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
 
     if (n_rs_seq != 0) {
         set_rs_idx(seq_id, 0);
-    }
-
-    // the restored state goes into the first row and nothing can be replayed from before it
-    if (rs_replay) {
-        for (uint32_t i = 0; i < size; ++i) {
-            if (seq_id == -1 || cells[i].has_seq_id(seq_id)) {
-                s_cur[i] = 0;
-            }
-        }
-
-        if (seq_id == -1) {
-            std::fill(n_x_cached.begin(), n_x_cached.end(), 0);
-        } else if ((size_t) seq_id < n_x_cached.size()) {
-            n_x_cached[seq_id] = 0;
-        }
-
-        if (seq_id >= 0 && (size_t) seq_id < rs_replay_n.size()) {
-            rs_replay_n[seq_id] = 0;
-        }
     }
 }
 
@@ -1432,6 +1594,11 @@ llama_memory_recurrent_context::llama_memory_recurrent_context(
 
 llama_memory_recurrent_context::llama_memory_recurrent_context(
         llama_memory_recurrent * mem,
+                 llama_context * lctx) : status(LLAMA_MEMORY_STATUS_SUCCESS), mem(mem), lctx(lctx) {
+}
+
+llama_memory_recurrent_context::llama_memory_recurrent_context(
+        llama_memory_recurrent * mem,
         std::vector<llama_ubatch> ubatches) : status(LLAMA_MEMORY_STATUS_SUCCESS), mem(mem), ubatches(std::move(ubatches)) {}
 
 llama_memory_recurrent_context::~llama_memory_recurrent_context() = default;
@@ -1451,8 +1618,12 @@ bool llama_memory_recurrent_context::apply() {
 
     // no ubatches -> this is an update
     if (ubatches.empty()) {
-        // recurrent cache never performs updates
-        assert(status == LLAMA_MEMORY_STATUS_NO_UPDATE);
+        // the only update copies pending inputs between seqs, see llama_memory_recurrent::x_copies
+        if (lctx != nullptr) {
+            mem->x_copy_apply(lctx);
+        } else {
+            assert(status == LLAMA_MEMORY_STATUS_NO_UPDATE);
+        }
 
         return true;
     }
@@ -1505,32 +1676,11 @@ ggml_tensor * llama_memory_recurrent_context::get_x_l(int32_t il) const {
 }
 
 uint32_t llama_memory_recurrent_context::get_n_x() const {
-    return mem->rs_replay ? mem->n_rs_seq + 1 : 0;
+    return mem->n_x();
 }
 
 int32_t llama_memory_recurrent_context::s_copy_plain(int i) const {
-    const uint32_t cell_idx = i + mem->head;
-    const int32_t  src0     = mem->cells[cell_idx].src0;
-
-    if (!mem->rs_replay || src0 < 0 || (uint32_t) src0 >= mem->size) {
-        return src0;
-    }
-
-    // the parity follows the state, which moves with the cell's metadata when cells are swapped, while the data
-    // stays in the physical cell src0 until this step copies it; if this step flipped the parity, the state from
-    // before the step is in the other row
-    const uint32_t parity = mem->s_cur[cell_idx] ^ mem->s_flip[cell_idx];
-
-    return (int32_t) (parity*mem->size + (uint32_t) src0);
-}
-
-int32_t llama_memory_recurrent_context::s_write(int i) const {
-    const uint32_t cell_idx = i + mem->head;
-
-    GGML_ASSERT(mem->rs_replay);
-
-    // the current row: the one this step writes for a computed cell, the unchanged one for any other
-    return (int32_t) mem->s_row(cell_idx, false);
+    return mem->cells[i + mem->head].src0;
 }
 
 bool llama_memory_recurrent_context::is_s_l(const ggml_tensor * t) const {
@@ -1543,58 +1693,27 @@ bool llama_memory_recurrent_context::is_s_l(const ggml_tensor * t) const {
     return false;
 }
 
-int32_t llama_memory_recurrent_context::s_prev(int i) const {
-    const uint32_t cell_idx = i + mem->head;
-
-    GGML_ASSERT(mem->rs_replay);
-
-    return (int32_t) mem->s_row(cell_idx, true);
-}
-
+// the computed cells of a ubatch are the first n_seqs of its range, each holding the seq that find_slot() set up
 int32_t llama_memory_recurrent_context::x_read(int i) const {
-    const uint32_t cell_idx = i + mem->head;
-
     GGML_ASSERT(mem->rs_replay);
 
-    // the inputs of the last step are in the half that was written before this step
-    return (int32_t) mem->x_row(*mem->cells[cell_idx].seq_id.begin(), true);
+    const llama_seq_id seq_id = mem->x_seq(i + mem->head);
+
+    return seq_id < 0 ? 0 : (int32_t) mem->x_rd[seq_id];
 }
 
 int32_t llama_memory_recurrent_context::x_write(int i) const {
-    const uint32_t cell_idx = i + mem->head;
-
     GGML_ASSERT(mem->rs_replay);
 
-    return (int32_t) mem->x_row(*mem->cells[cell_idx].seq_id.begin(), false);
+    const llama_seq_id seq_id = mem->x_seq(i + mem->head);
+
+    return seq_id < 0 ? 0 : (int32_t) mem->x_row(seq_id, mem->x_cur[seq_id]);
 }
 
 uint32_t llama_memory_recurrent_context::replay_n(int i) const {
-    const uint32_t cell_idx = i + mem->head;
-    const uint32_t res      = mem->replay_n(cell_idx);
+    const llama_seq_id seq_id = mem->x_seq(i + mem->head);
 
-    // the pending rollback is consumed by the graph that reads it, like the snapshot index in s_copy()
-    if (res > 0 && !mem->cells[cell_idx].seq_id.empty()) {
-        const llama_seq_id seq_id = *mem->cells[cell_idx].seq_id.begin();
-
-        if (seq_id >= 0 && (size_t) seq_id < mem->rs_replay_n.size()) {
-            mem->rs_replay_n[seq_id] = 0;
-        }
-    }
-
-    return res;
-}
-
-uint32_t llama_memory_recurrent_context::get_n_replay() const {
-    if (!mem->rs_replay || is_full) {
-        return 0;
-    }
-
-    uint32_t res = 0;
-    for (uint32_t i = 0; i < mem->n; ++i) {
-        res = std::max(res, mem->replay_n(i + mem->head));
-    }
-
-    return res;
+    return !mem->rs_replay || seq_id < 0 ? 0 : mem->n_rep[seq_id];
 }
 
 int32_t llama_memory_recurrent_context::s_copy(int i) const {

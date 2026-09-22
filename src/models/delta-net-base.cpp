@@ -557,9 +557,10 @@ ggml_tensor * llm_build_delta_net_base::build_gdn_inp_pack(
     return x;
 }
 
-// the same scan, but the tokens of the previous step are replayed first and the state written back is the one
-// after them: the state in memory is always at the last committed position, so a rollback only has to replay
-// fewer tokens. see llama_memory_recurrent::rs_replay
+// the same scan, but the state in memory lags behind the pending tokens of the seq, whose inputs are cached: they
+// are replayed first, and the state after them is written back. a speculative step then only caches its own inputs,
+// so a rollback into it just replays fewer of them, while a longer step writes the state after all its tokens.
+// see llama_memory_recurrent::rs_replay
 ggml_tensor * llm_build_delta_net_base::build_recurrent_attn_replay(
         llm_graph_input_rs * inp,
         ggml_tensor *        ssm_states_all,
@@ -585,10 +586,17 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn_replay(
     const int64_t n_inp    = hparams.n_embd_gdn_inp();
 
     const int64_t g0 = g->ne[0];
+    const int64_t D  = S_v * S_v * H_v;
 
-    // cache the inputs of this step, so that the next one can replay them; a longer step (a prompt) cannot be
-    // rolled back into, see llama_memory_recurrent::find_slot()
-    if (n_seq_tokens <= n_x) {
+    // a step short enough to be a speculative one keeps its tokens pending, see llama_memory_recurrent::find_slot()
+    const bool keep = n_seq_tokens <= n_x;
+
+    // the scan-state rows of the computed cells
+    ggml_tensor * s_dst = ggml_view_2d(ctx0, ssm_states_all, D, n_seqs, ssm_states_all->nb[1],
+            mctx_cur->get_head()*ssm_states_all->nb[1]);
+
+    // cache the inputs of this step, so that the next one can replay them
+    if (keep) {
         ggml_tensor * x   = build_gdn_inp_pack(q, k, v, g, b, il);
         ggml_tensor * x_l = mctx_cur->get_x_l(il);
 
@@ -599,7 +607,7 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn_replay(
         ggml_build_forward_expand(gf, ggml_set_rows(ctx0, dst, src, inp->rs_x_write));
     }
 
-    // prepend the replayed slots, masking the ones that are not replayed tokens
+    // replay the pending tokens, masking the slots that are not pending tokens
     {
         ggml_tensor * rows = ggml_get_rows(ctx0, mctx_cur->get_x_l(il), inp->rs_x_read);
         rows = ggml_reshape_3d(ctx0, rows, n_inp, n_x, n_seqs);
@@ -621,30 +629,29 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn_replay(
         ggml_tensor * b_r = part(1,   H_v, off); off += H_v;
 
         GGML_ASSERT(off == n_inp);
-        GGML_ASSERT(n_replay >= 1 && n_replay < n_x);
+        GGML_ASSERT(n_replay == n_x);
 
-        // a dropped or padded token keeps the state: exp(0) = 1 and no update
+        // a padding slot keeps the state: exp(0) = 1 and no update
         g_r = ggml_mul(ctx0, ggml_cont(ctx0, g_r), inp->rs_x_mask);
         b_r = ggml_mul(ctx0, ggml_cont(ctx0, b_r), inp->rs_x_mask);
 
-        // the replayed tokens first: the state after them is the one from before this step's own tokens, so it
-        // becomes the other row of the cell, which a rollback into this step replays from
         ggml_tensor * rep_out = ggml_gated_delta_net(ctx0,
                 ggml_cont(ctx0, q_r), ggml_cont(ctx0, k_r), ggml_cont(ctx0, v_r), g_r, b_r, s, 1);
         res->add_fused_node({n_replay > 1 ? LLM_FUSED_OP_GDN_CH : LLM_FUSED_OP_GDN_AR, rep_out, il});
-
-        const int64_t D = S_v * S_v * H_v;
 
         ggml_tensor * s_mid = ggml_view_2d(ctx0, rep_out, D, n_seqs,
             ggml_row_size(rep_out->type, D),
             ggml_row_size(rep_out->type, S_v * H_v * n_replay * n_seqs));
 
-        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, ssm_states_all, s_mid, inp->rs_s_prev));
+        // the state after the pending tokens is the one kept while this step's tokens become the pending ones
+        if (keep) {
+            ggml_build_forward_expand(gf, ggml_cpy(ctx0, s_mid, s_dst));
+        }
 
         s = ggml_reshape_4d(ctx0, s_mid, S_v, S_v, H_v, n_seqs);
     }
 
-    // then the tokens of this step, from the state after the replayed ones
+    // then the tokens of this step, from the state after the pending ones
     ggml_tensor * gdn_out = ggml_gated_delta_net(ctx0, q, k, v, g, b, s, 1);
     if (n_seq_tokens > 1) {
         res->add_fused_node({LLM_FUSED_OP_GDN_CH, gdn_out, il});
@@ -652,7 +659,6 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn_replay(
         res->add_fused_node({LLM_FUSED_OP_GDN_AR, gdn_out, il});
     }
 
-    const int64_t D                = S_v * S_v * H_v;
     const int64_t attn_score_elems = S_v * H_v * n_seq_tokens * n_seqs;
 
     ggml_tensor * output = ggml_view_4d(ctx0, gdn_out,
@@ -663,11 +669,14 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn_replay(
         0);
     cb(output, "attn_output", il);
 
-    ggml_tensor * src = ggml_view_2d(ctx0, gdn_out, D, n_seqs,
-        ggml_row_size(gdn_out->type, D),
-        ggml_row_size(gdn_out->type, attn_score_elems));
+    // a step that cannot be rolled back into leaves the state after all its tokens
+    if (!keep) {
+        ggml_tensor * s_new = ggml_view_2d(ctx0, gdn_out, D, n_seqs,
+            ggml_row_size(gdn_out->type, D),
+            ggml_row_size(gdn_out->type, attn_score_elems));
 
-    ggml_build_forward_expand(gf, ggml_set_rows(ctx0, ssm_states_all, src, inp->rs_s_write));
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, s_new, s_dst));
+    }
 
     return output;
 }
@@ -708,17 +717,14 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
         return output;
     }
 
-    // the state kept in memory lags one speculative step behind and the inputs of that step are cached, so a
-    // rollback replays the accepted tokens instead of restoring a state snapshot, see llama_memory_recurrent
+    // the state kept in memory lags behind the tokens of the last speculative step, whose inputs are cached, so a
+    // rollback replays fewer of them instead of restoring a state snapshot, see llama_memory_recurrent::rs_replay
     if (mctx_cur->get_x_l(il) != nullptr) {
         return build_recurrent_attn_replay(inp, ssm_states_all, q, k, v, g, b, s, il);
     }
 
     const int64_t D = S_v * S_v * H_v;
-
-    // with the replay rollback the scan state has a single row per cell, so only the final state is kept:
-    // a step this long is not speculative and cannot be rolled back into
-    const int64_t K = mctx_cur->get_x_l(il) != nullptr ? 1 : cparams.n_rs_seq + 1;
+    const int64_t K = cparams.n_rs_seq + 1;
 
     // state s is 4D [S_v, S_v, H_v, n_seqs]; K snapshot slots are written into the output.
     ggml_tensor * gdn_out = ggml_gated_delta_net(ctx0, q, k, v, g, b, s, K);
@@ -751,19 +757,13 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
         ggml_row_size(gdn_out->type, state_size_per_snap),
         ggml_row_size(gdn_out->type, attn_score_elems));
 
-    if (mctx_cur->get_x_l(il) != nullptr) {
-        // the scan state alternates between two rows, so the destination is not the cell's own row
-        ggml_build_forward_expand(gf,
-                ggml_set_rows(ctx0, ssm_states_all, ggml_reshape_2d(ctx0, src, D, n_seqs), inp->rs_s_write));
-    } else {
-        ggml_tensor * dst = ggml_view_3d(ctx0, ssm_states_all,
-            D, n_seqs, n_written,
-            ssm_states_all->nb[1],
-            (size_t) mem_size * row_size,
-            (size_t) kv_head * row_size);
+    ggml_tensor * dst = ggml_view_3d(ctx0, ssm_states_all,
+        D, n_seqs, n_written,
+        ssm_states_all->nb[1],
+        (size_t) mem_size * row_size,
+        (size_t) kv_head * row_size);
 
-        ggml_build_forward_expand(gf, ggml_cpy(ctx0, src, dst));
-    }
+    ggml_build_forward_expand(gf, ggml_cpy(ctx0, src, dst));
 
     return output;
 }
