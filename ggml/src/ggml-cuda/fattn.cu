@@ -549,6 +549,27 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     const int cc = ggml_cuda_info().devices[device].cc;
 
+    // index lists: per query ranges (ggml_flash_attn_ext_set_kv_idx) are not implemented, a list of K/V rows shared by
+    // all queries (ggml_flash_attn_ext_set_kv_rows) is read by the sparse gather of the tensor core kernel
+    if (dst->src[5] != nullptr) {
+#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+        return BEST_FATTN_KERNEL_NONE;
+#else
+        float logit_softcap = 0.0f;
+        memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
+
+        const bool head_ok = K->ne[0] == V->ne[0] &&
+            (K->ne[0] == 64 || K->ne[0] == 80 || K->ne[0] == 96 || K->ne[0] == 112 || K->ne[0] == 128 || K->ne[0] == 256);
+
+        if (dst->src[6] != nullptr || !GGML_CUDA_CC_IS_NVIDIA(cc) || !turing_mma_available(cc) || !head_ok ||
+                K->type != GGML_TYPE_F16 || V->type != GGML_TYPE_F16 || !mask || mask->ne[2] != 1 ||
+                max_bias != 0.0f || logit_softcap != 0.0f || Q->ne[3] != 1) {
+            return BEST_FATTN_KERNEL_NONE;
+        }
+        return BEST_FATTN_KERNEL_MMA_F16;
+#endif // defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+    }
+
     switch (K->ne[0]) {
         case  40:
         case  64:

@@ -1092,8 +1092,13 @@ void launch_fattn(
     const int ntiles_z_gqa = ((gqa_ratio + ncols2 - 1) / ncols2);
     const int ntiles_dst   = ntiles_x * ntiles_z_gqa * K->ne[2] * Q->ne[3];
 
-    const int32_t n_kv_max = use_sparse ? ggml_get_op_params_i32(KQV, 4) : 0;
-    if (use_sparse) {
+    // a list of the K/V rows shared by all queries is used as is, see ggml_flash_attn_ext_set_kv_rows(); otherwise the
+    // sparse kernel reads per-row lists compacted from the mask
+    const ggml_tensor * kv_rows = KQV->src[5] != nullptr && KQV->src[6] == nullptr ? KQV->src[5] : nullptr;
+    GGML_ASSERT(!kv_rows || use_sparse);
+
+    const int32_t n_kv_max = kv_rows ? int32_t(kv_rows->ne[0]) : use_sparse ? ggml_get_op_params_i32(KQV, 4) : 0;
+    if (use_sparse && !kv_rows) {
         GGML_ASSERT(mask != nullptr);
         GGML_ASSERT(n_kv_max > 0);
         const size_t mask_rows = size_t(mask->ne[1]) * mask->ne[3];
@@ -1238,7 +1243,7 @@ void launch_fattn(
         V_data,
         mask ? ((const char *) mask->data) : nullptr,
         sinks ? ((const char *) sinks->data) : nullptr,
-        KV_max.ptr,
+        kv_rows ? (const int *) kv_rows->data : KV_max.ptr,
         !stream_k && parallel_blocks > 1 ? dst_tmp.ptr : (float *) KQV->data, dst_tmp_meta.ptr,
         scale, max_bias, m0, m1, n_head_log2, logit_softcap,
         Q->ne[0], ne01,     Q->ne[2], Q->ne[3], Q->nb[1], Q->nb[2], Q->nb[3],

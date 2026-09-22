@@ -2512,6 +2512,19 @@ extern "C" {
             struct ggml_tensor * a,
             struct ggml_tensor * sinks);
 
+    // Attend every query to the K/V rows listed in rows, in that order, instead of all of them: the rows of one
+    // sequence in a cache shared by several, read in place. The mask keeps the layout of the K/V rows (ne[0] == k->ne[1])
+    // and is read at the listed rows; a row of -1 is padding and is left out.
+    //
+    // rows: I32 [n_rows, 1, 1, 1]
+    // q, k and v must have ne[3] == 1
+    //
+    // backends declare support with the proc address "ggml_backend_flash_attn_ext_kv_rows" of their registry,
+    // ggml_backend_dev_supports_op() reports the op as unsupported on the others
+    GGML_API void ggml_flash_attn_ext_set_kv_rows(
+            struct ggml_tensor * a,
+            struct ggml_tensor * rows);
+
     // Attend each query to a range of an index list instead of all K/V rows with a mask.
     // The op must have been created without a mask and without max_bias (ALiBi).
     //

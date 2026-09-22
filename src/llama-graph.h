@@ -1235,7 +1235,8 @@ struct llm_graph_context {
                 int64_t   n_kv_max,
                   float   kq_scale,
                     int   il,
-            ggml_tensor * kv_idx = nullptr,  // I32 [n_idx, n_group], see ggml_flash_attn_ext_set_kv_idx()
+            ggml_tensor * kv_idx = nullptr,  // I32 [n_idx, n_group], see ggml_flash_attn_ext_set_kv_idx(); without q_rng
+                                             // I32 [n_rows], see ggml_flash_attn_ext_set_kv_rows()
             ggml_tensor * q_rng  = nullptr) const; // I32 [3, n_tokens]
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;

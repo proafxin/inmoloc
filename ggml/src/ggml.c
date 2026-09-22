@@ -5610,6 +5610,26 @@ void ggml_flash_attn_ext_set_kv_idx(
     a->src[6] = q_rng;
 }
 
+void ggml_flash_attn_ext_set_kv_rows(
+        struct ggml_tensor * a,
+        struct ggml_tensor * rows) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(a->src[5] == NULL && a->src[6] == NULL);
+
+    const struct ggml_tensor * q    = a->src[0];
+    const struct ggml_tensor * k    = a->src[1];
+    const struct ggml_tensor * v    = a->src[2];
+    const struct ggml_tensor * mask = a->src[3];
+    GGML_ASSERT(q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1);
+    GGML_ASSERT(mask == NULL || mask->ne[0] == k->ne[1]);
+
+    GGML_ASSERT(rows->type == GGML_TYPE_I32 && ggml_is_contiguous(rows));
+    GGML_ASSERT(rows->ne[1] == 1 && rows->ne[2] == 1 && rows->ne[3] == 1);
+
+    // src[6] stays NULL, which tells this mode apart from ggml_flash_attn_ext_set_kv_idx()
+    a->src[5] = rows;
+}
+
 // ggml_flash_attn_back
 
 struct ggml_tensor * ggml_flash_attn_back(

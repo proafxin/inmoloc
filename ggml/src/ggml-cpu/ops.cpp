@@ -8625,9 +8625,11 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
     const ggml_tensor * mask  = dst->src[3];
     const ggml_tensor * sinks = dst->src[4];
 
-    // optional index lists that replace the mask, see ggml_flash_attn_ext_set_kv_idx()
-    const ggml_tensor * kv_idx = dst->src[5];
-    const ggml_tensor * q_rng  = dst->src[6];
+    // optional index lists that replace the mask, see ggml_flash_attn_ext_set_kv_idx(), or a list of the K/V rows
+    // shared by all queries, see ggml_flash_attn_ext_set_kv_rows()
+    const ggml_tensor * q_rng   = dst->src[6];
+    const ggml_tensor * kv_idx  = q_rng ? dst->src[5] : nullptr;
+    const ggml_tensor * kv_rows = q_rng ? nullptr : dst->src[5];
 
     GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)
     GGML_TENSOR_LOCALS(size_t,  nbq, q,   nb)
@@ -8701,7 +8703,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
 
     // an F16 V is accumulated in F16, unless the K/V rows are indexed: F16 keeps too few digits to make the sum
     // independent of the order of the rows, so the indexed path converts V rows and accumulates in F32
-    const bool v_acc_f16 = v->type == GGML_TYPE_F16 && kv_idx == nullptr;
+    const bool v_acc_f16 = v->type == GGML_TYPE_F16 && kv_idx == nullptr && kv_rows == nullptr;
 
     for (int ir = ir0; ir < ir1; ++ir) {
         // q indices
@@ -8753,6 +8755,10 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
             idx      = (const int32_t *) ((const char *) kv_idx->data + rng[0]*kv_idx->nb[1]);
             it_start = rng[1];
             it_end   = rng[2];
+        } else if (kv_rows) {
+            idx      = (const int32_t *) kv_rows->data;
+            it_start = 0;
+            it_end   = kv_rows->ne[0];
         }
 
         // online softmax / attention
@@ -8761,7 +8767,10 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
 
         for (int64_t it = it_start; it < it_end; ++it) {
             const int64_t ic = idx ? idx[it] : it;
-            GGML_ASSERT(ic >= 0 && ic < nek1);
+            if (ic < 0) {
+                continue; // padding of a list of rows
+            }
+            GGML_ASSERT(ic < nek1);
 
             const float mv = mp ? slope*GGML_CPU_FP16_TO_FP32(mp[ic]) : 0.0f;
             if (mv == -INFINITY) {
@@ -9285,7 +9294,7 @@ static void ggml_compute_forward_flash_attn_ext_f16(
     const bool use_ref = params->use_ref;
 
     const bool kv_is_f32_or_f16 = (k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16);
-    // indexed K/V rows (see ggml_flash_attn_ext_set_kv_idx) are only handled by the vec path
+    // indexed K/V rows (see ggml_flash_attn_ext_set_kv_idx/_kv_rows) are only handled by the vec path
     const bool use_kv_idx = dst->src[5] != nullptr;
 
     const bool use_split_kv_path = !use_ref && !use_kv_idx && (neq1 == 1 && neq3 == 1) && kv_is_f32_or_f16 && (k->type == v->type) && q->type == GGML_TYPE_F32 && nek1 >= 512;

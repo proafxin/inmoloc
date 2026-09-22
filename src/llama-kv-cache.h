@@ -206,10 +206,12 @@ public:
 
     // split the ubatch into attention runs, see llama_kv_attn_run
     // returns an empty list when no run is worth gathering, i.e. the whole ubatch attends the full view
-    std::vector<llama_kv_attn_run> get_attn_runs(const llama_ubatch & ubatch, uint32_t n_kv) const;
+    // in_place: the runs read their cells where they are (ggml_flash_attn_ext_set_kv_rows) instead of copying them,
+    // so their size is not bounded by the copy
+    std::vector<llama_kv_attn_run> get_attn_runs(const llama_ubatch & ubatch, uint32_t n_kv, bool in_place) const;
 
     // the largest runs a ubatch of this size can have, for the graphs reserved at startup
-    std::vector<llama_kv_attn_run> get_attn_runs_reserve(const llama_ubatch & ubatch, uint32_t n_kv) const;
+    std::vector<llama_kv_attn_run> get_attn_runs_reserve(const llama_ubatch & ubatch, uint32_t n_kv, bool in_place) const;
 
     // whether this cache can gather the cells of a sequence at all
     bool attn_gather_ok() const;
@@ -460,7 +462,7 @@ public:
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
 
     // see llama_kv_cache::get_attn_runs()
-    std::vector<llama_kv_attn_run> get_attn_runs(const llama_ubatch & ubatch) const;
+    std::vector<llama_kv_attn_run> get_attn_runs(const llama_ubatch & ubatch, bool in_place) const;
 
     ggml_tensor * get_k_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs) const;
     ggml_tensor * get_v_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs) const;

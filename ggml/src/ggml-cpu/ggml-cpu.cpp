@@ -676,6 +676,10 @@ static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const ch
         // feature flag, see ggml_flash_attn_ext_set_kv_idx()
         return (void *)ggml_flash_attn_ext_set_kv_idx;
     }
+    if (strcmp(name, "ggml_backend_flash_attn_ext_kv_rows") == 0) {
+        // feature flag, see ggml_flash_attn_ext_set_kv_rows()
+        return (void *)ggml_flash_attn_ext_set_kv_rows;
+    }
 
     // threadpool - TODO:  move to ggml-base
     if (strcmp(name, "ggml_threadpool_new") == 0) {

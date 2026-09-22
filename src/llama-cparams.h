@@ -43,6 +43,8 @@ struct llama_cparams {
     bool auto_fa;
     bool kv_idx;             // indexed flash attention over the KV cache, see ggml_flash_attn_ext_set_kv_idx()
     bool auto_kv_idx;
+    bool kv_rows;            // gather runs read their cells in place, see ggml_flash_attn_ext_set_kv_rows()
+    bool auto_kv_rows;
     bool fused_gdn_ar;       // use fused gated delta net (autoregressive)
     bool fused_gdn_ch;       // use fused gated delta net (chunked)
     bool auto_fgdn;

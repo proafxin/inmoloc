@@ -5702,6 +5702,12 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_cuda_get_features;
     }
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    if (strcmp(name, "ggml_backend_flash_attn_ext_kv_rows") == 0) {
+        // feature flag, see ggml_flash_attn_ext_set_kv_rows(); supports_op still checks the device and the shapes
+        return (void *)ggml_flash_attn_ext_set_kv_rows;
+    }
+#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     return nullptr;
 }
 

@@ -635,9 +635,12 @@ bool ggml_backend_dev_supports_op(ggml_backend_dev_t device, const struct ggml_t
     GGML_ASSERT(device);
 
     // indexed flash attention is opt-in: a backend that does not know it would ignore the index lists
+    // ggml_flash_attn_ext_set_kv_idx() sets src[5] and src[6], ggml_flash_attn_ext_set_kv_rows() src[5] alone
     if (op->op == GGML_OP_FLASH_ATTN_EXT && op->src[5] != NULL) {
+        const char * proc = op->src[6] != NULL ? "ggml_backend_flash_attn_ext_kv_idx" : "ggml_backend_flash_attn_ext_kv_rows";
+
         ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(device);
-        if (reg == NULL || ggml_backend_reg_get_proc_address(reg, "ggml_backend_flash_attn_ext_kv_idx") == NULL) {
+        if (reg == NULL || ggml_backend_reg_get_proc_address(reg, proc) == NULL) {
             return false;
         }
     }

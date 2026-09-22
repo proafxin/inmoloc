@@ -45,9 +45,9 @@ static ggml_tensor * build_attn_inp_kq_mask(
     return res;
 }
 
-// gathering copies the K/V cells of a sequence to attend only those, see llama_kv_attn_run
-// the gathered mask is F16 and the per-token mask rows come from the full mask, which needs flash attention,
-// a single stream, causal attention and no alibi bias
+// gathering attends only the K/V cells of a sequence, see llama_kv_attn_run: read in place through a list of the
+// cells where the backend supports it (cparams.kv_rows), else copied; the gathered mask is F16 and the per-token mask
+// rows come from the full mask, which needs flash attention, a single stream, causal attention and no alibi bias
 static std::vector<llama_kv_attn_run> build_attn_runs(
         const llama_kv_cache_context * mctx,
         const llama_ubatch & ubatch,
@@ -62,7 +62,7 @@ static std::vector<llama_kv_attn_run> build_attn_runs(
         return {};
     }
 
-    return mctx->get_attn_runs(ubatch);
+    return mctx->get_attn_runs(ubatch, cparams.kv_rows);
 }
 
 // a graph can be reused when the new runs have the same shapes; the reused input then takes the new runs,
@@ -2768,8 +2768,11 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
         ggml_prec_set_acc(cur, GGML_PREC_F32);
 
-        if (kv_idx) {
+        // ranges of per-sequence lists with q_rng, else one list of K/V rows for all queries
+        if (kv_idx && q_rng) {
             ggml_flash_attn_ext_set_kv_idx(cur, kv_idx, q_rng);
+        } else if (kv_idx) {
+            ggml_flash_attn_ext_set_kv_rows(cur, kv_idx);
         }
 
         if (v_mla) {
@@ -2983,9 +2986,12 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
             ggml_set_input(idxs);
             ggml_set_name(idxs, "attn_inp_run_idxs");
 
-            mask = ggml_new_tensor_4d(ctx0, GGML_TYPE_F16, run.n_idx, run.t1 - run.t0, 1, 1);
-            ggml_set_input(mask);
-            ggml_set_name(mask, "attn_inp_run_mask");
+            // a run read in place uses the rows of the full mask for its tokens
+            if (!cparams.kv_rows) {
+                mask = ggml_new_tensor_4d(ctx0, GGML_TYPE_F16, run.n_idx, run.t1 - run.t0, 1, 1);
+                ggml_set_input(mask);
+                ggml_set_name(mask, "attn_inp_run_mask");
+            }
         }
 
         inp->attn_run_idxs.push_back(idxs);
@@ -3082,8 +3088,9 @@ ggml_tensor * llm_graph_context::build_attn(
             ggml_tensor * k    = nullptr;
             ggml_tensor * v    = nullptr;
             ggml_tensor * mask = nullptr;
+            ggml_tensor * rows = nullptr; // the cells of a run read in place
 
-            if (run.gather) {
+            if (run.gather && !cparams.kv_rows) {
                 k    = mctx_cur->get_k_rows(ctx0, il, inp->attn_run_idxs[r]);
                 v    = mctx_cur->get_v_rows(ctx0, il, inp->attn_run_idxs[r]);
                 mask = inp->attn_run_mask[r];
@@ -3096,9 +3103,13 @@ ggml_tensor * llm_graph_context::build_attn(
                 k    = k_full;
                 v    = v_full;
                 mask = ggml_view_2d(ctx0, kq_mask, kq_mask->ne[0], n_run, kq_mask->nb[1], run.t0*kq_mask->nb[1]);
+
+                if (run.gather) {
+                    rows = inp->attn_run_idxs[r];
+                }
             }
 
-            ggml_tensor * out = build_attn_mha(q, k, v, nullptr, mask, sinks, v_mla, 0, kq_scale, il);
+            ggml_tensor * out = build_attn_mha(q, k, v, nullptr, mask, sinks, v_mla, 0, kq_scale, il, rows);
 
             cur = cur ? ggml_concat(ctx0, cur, out, 1) : out;
         }

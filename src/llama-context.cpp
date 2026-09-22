@@ -55,6 +55,13 @@ static const llm_fused_op_probe llm_fused_op_flash_attn_kv_idx_probe = {
     /*.n_tokens_per_seq =*/ 1,
 };
 
+// the gather runs of the graph need at least 32 tokens of one sequence, see llama_kv_cache::get_attn_runs_reserve()
+static const llm_fused_op_probe llm_fused_op_flash_attn_kv_rows_probe = {
+    /*.op               =*/ LLM_FUSED_OP_FLASH_ATTN,
+    /*.name             =*/ "Flash Attention reading the KV cells of a sequence in place",
+    /*.n_tokens_per_seq =*/ 32,
+};
+
 static const llm_fused_op_probe llm_fused_op_gdn_ar_probe = {
     /*.op               =*/ LLM_FUSED_OP_GDN_AR,
     /*.name             =*/ "fused Gated Delta Net (autoregressive)",
@@ -249,6 +256,8 @@ llama_context::llama_context(
     // resolved with the fused ops, once flash attention is resolved
     cparams.kv_idx      = false;
     cparams.auto_kv_idx = true;
+    cparams.kv_rows     = false;
+    cparams.auto_kv_rows = true;
 
     cparams.fused_gdn_ar = true;
     cparams.fused_gdn_ch = true;
@@ -596,6 +605,16 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
             resolve(llm_fused_op_flash_attn_kv_idx_probe, cparams.kv_idx);
         }
         cparams.auto_kv_idx = false;
+    }
+
+    // the gather runs of a unified KV cache read the cells of their sequence in place instead of copying them, when
+    // every device that runs attention supports it, see ggml_flash_attn_ext_set_kv_rows()
+    if (cparams.auto_kv_rows) {
+        cparams.kv_rows = cparams.flash_attn && cparams.kv_unified && !cparams.kv_idx && !model.hparams.use_alibi;
+        if (cparams.kv_rows) {
+            resolve(llm_fused_op_flash_attn_kv_rows_probe, cparams.kv_rows);
+        }
+        cparams.auto_kv_rows = false;
     }
 
     if (cparams.auto_fgdn) {
