@@ -1247,6 +1247,8 @@ private:
             }
 
             load_progress_callback(1.0f, &load_progress_spec);
+
+            common_device_memory_log(model_tgt, params_base.vram_free_at_start, "with the draft context");
         }
 
         if (has_mmproj) {
@@ -1264,6 +1266,8 @@ private:
                 return false;
             }
             SRV_INF("loaded multimodal model, '%s'\n", mmproj_path.c_str());
+
+            common_device_memory_log(model_tgt, params_base.vram_free_at_start, "with the vision encoder");
 
             init_opt.video_params.fps_target = params_base.video_fps;
             init_opt.video_params.timestamp_interval_ms = params_base.video_timestamp_interval_ms;
@@ -2118,9 +2122,15 @@ private:
         if (slot.state == SLOT_STATE_GENERATING) {
             GGML_ASSERT(!slot.resuming);
 
-            const auto & tokens = slot.prompt.tokens.get_tokens();
+            // read through server_tokens itself: get_tokens() refuses a multimodal server even for a text-only prompt
+            const server_tokens & tokens = slot.prompt.tokens;
 
-            if (std::find(tokens.begin(), tokens.end(), LLAMA_TOKEN_NULL) != tokens.end()) {
+            bool has_media = false;
+            for (size_t i = 0; i < tokens.size() && !has_media; ++i) {
+                has_media = tokens[i] == LLAMA_TOKEN_NULL;
+            }
+
+            if (has_media) {
                 // the slot prompt keeps only placeholders for media, take the media from the task prompt
                 // there is no context shift with media, so the task prompt is a prefix of the slot prompt
                 GGML_ASSERT(tokens.size() >= slot.task->tokens.size());
@@ -4000,7 +4010,8 @@ private:
 
                     // TODO: maybe move branch to outside of this loop in the future
                     if (slot.state == SLOT_STATE_STARTED) {
-                        if (!slot.resuming) {
+                        // a recompute after preemption keeps the stats of the original prompt, its start time too
+                        if (!slot.resuming && !slot.preempted) {
                             slot.stats.update_prompt_start();
                         }
 

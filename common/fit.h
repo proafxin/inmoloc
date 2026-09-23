@@ -61,6 +61,9 @@ bool common_budget_params(
 // the free device memory of the devices a model runs on, summed
 size_t common_device_memory_free(const llama_model * model);
 
+// logs the device memory taken since the memory budget measured free_at_start, after a stage of the startup
+void common_device_memory_log(const llama_model * model, size_t free_at_start, const char * stage);
+
 // print estimated memory to stdout
 void common_fit_print(
                          const char * path_model,

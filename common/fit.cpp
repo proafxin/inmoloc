@@ -1285,6 +1285,20 @@ bool common_budget_params(
                 __func__, free_sum/MiB, (m_best.total() + budget_used)/MiB);
     }
 
+    // the dry runs hold no memory once their contexts are freed, but what they loaded stays: kernels loaded on first
+    // use and libraries initialized (e.g. cuBLAS); taken after the free memory was measured, so outside the projection
+    {
+        size_t free_after = 0;
+        for (int i = 0; i < llama_model_n_devices(model); i++) {
+            size_t free  = 0;
+            size_t total = 0;
+            ggml_backend_dev_memory(llama_model_get_device(model, i), &free, &total);
+            free_after += free;
+        }
+        LOG_INF("%s: the dry runs left %.0f MiB of device memory in use\n", __func__,
+                free_sum > free_after ? (free_sum - free_after)/MiB : 0.0);
+    }
+
     cparams->n_seq_max  = lo;
     cparams->n_rs_cells = 0;
 
@@ -1298,6 +1312,16 @@ bool common_budget_params(
     cleanup();
 
     return true;
+}
+
+void common_device_memory_log(const llama_model * model, size_t free_at_start, const char * stage) {
+    if (free_at_start == 0) {
+        return;
+    }
+    constexpr double MiB = 1024.0*1024.0;
+    const size_t free_now = common_device_memory_free(model);
+    LOG_INF("%s: %.0f MiB in use %s, %.0f MiB free\n", __func__,
+            free_at_start > free_now ? (free_at_start - free_now)/MiB : 0.0, stage, free_now/MiB);
 }
 
 size_t common_device_memory_free(const llama_model * model) {

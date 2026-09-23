@@ -1528,6 +1528,8 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
         common_set_adapter_lora(lctx, params.lora_adapters);
     }
 
+    common_device_memory_log(model, params.vram_free_at_start, "with the context, before the warmup");
+
     if (params.warmup) {
         COM_TRC("%s", "warming up the model with an empty run - please wait ... (--no-warmup to disable)\n");
 
