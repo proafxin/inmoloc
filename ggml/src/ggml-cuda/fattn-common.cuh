@@ -1174,8 +1174,11 @@ void launch_fattn(
             blocks_num.x = nblocks_stream_k;
         }
 
-        if (ntiles_dst % blocks_num.x != 0) { // Fixup is only needed if the SMs work on fractional tiles.
-            dst_tmp_meta.alloc((size_t(blocks_num.x) * ncols * (2 + DV/2)));
+        // other numbers of tokens may need a fixup on up to max_blocks blocks: a graph that is sized
+        // (ggml_backend_cuda_graph_scratch) counts it at that size for every number of tokens
+        if (ntiles_dst % blocks_num.x != 0 || ggml_cuda_sizing) { // Fixup is only needed if the SMs work on fractional tiles.
+            const size_t nblocks_fixup = ggml_cuda_sizing ? std::max<size_t>(blocks_num.x, max_blocks) : blocks_num.x;
+            dst_tmp_meta.alloc(nblocks_fixup * ncols * (2 + DV/2));
         }
     } else {
         // parallel_blocks must not be larger than what the tensor size allows:

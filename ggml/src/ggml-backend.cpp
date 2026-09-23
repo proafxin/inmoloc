@@ -2006,6 +2006,24 @@ bool ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph *
     return true;
 }
 
+void ggml_backend_sched_reserve_scratch(ggml_backend_sched_t sched, size_t * sizes, bool alloc) {
+    GGML_ASSERT(sched);
+    GGML_ASSERT(sizes);
+
+    for (int i = 0; i < sched->n_splits; i++) {
+        struct ggml_backend_sched_split * split = &sched->splits[i];
+
+        ggml_backend_t     backend = sched->backends[split->backend_id];
+        ggml_backend_dev_t dev     = ggml_backend_get_device(backend);
+        ggml_backend_reg_t reg     = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+
+        auto graph_scratch = reg ? (ggml_backend_graph_scratch_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_graph_scratch") : nullptr;
+        if (graph_scratch != nullptr) {
+            sizes[split->backend_id] = graph_scratch(backend, &split->graph, alloc);
+        }
+    }
+}
+
 bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
     GGML_ASSERT(sched);
     GGML_ASSERT((int)sched->hash_set.size >= graph->n_nodes + graph->n_leafs);

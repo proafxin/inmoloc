@@ -1449,8 +1449,10 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
 
     ggml_cuda_pool & pool = ctx.pool(id);
     ggml_cuda_pool_alloc<float> tmp_fixup(pool);
-    if (fixup_needed) {
-        tmp_fixup.alloc(block_nums_stream_k.x * config.J*config.I);
+    // a fixup is needed for the numbers of tokens whose tiles do not divide over the SMs, and then always runs on nsm
+    // blocks: a graph that is sized (ggml_backend_cuda_graph_scratch) counts it for every number of tokens
+    if (fixup_needed || ggml_cuda_sizing) {
+        tmp_fixup.alloc((fixup_needed ? block_nums_stream_k.x : nsm) * config.J*config.I);
     }
 
     const dim3 block_nums_fixup(block_nums_stream_k.x, config.I/warp_size, 1);

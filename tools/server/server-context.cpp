@@ -3234,6 +3234,7 @@ private:
                     res->n_preempted_slots    = n_preempted_slots;
                     res->n_tasks_deferred     = queue_tasks.queue_tasks_deferred_size();
                     res->n_idle_cached_tokens = n_idle_cached_tokens;
+                    res->device_memory_free_min = device_memory_free_min;
                     res->mem_usage            = llama_memory_get_usage(llama_get_memory(ctx_tgt));
                     res->n_graph_reused       = perf_tgt.n_reused;
                     res->n_graph_computes     = perf_tgt.n_graph_computes;
@@ -3514,6 +3515,38 @@ private:
         return params_base.slow_loop_ms;
     }
 
+    // the memory budget accounts for the model, the caches and the compute buffers, but not for what the backend
+    // allocates on its own (CUDA context and captured graphs, cuBLAS workspaces, backend pools), which comes out of
+    // the free memory left over; the low point tells how much that is, and a warning tells when it is nearly gone
+    uint64_t device_memory_free_min = 0;
+    int64_t  t_device_memory_us     = 0;
+    bool     device_memory_warned   = false;
+
+    void device_memory_check() {
+        const int64_t t_now = ggml_time_us();
+        if (t_now - t_device_memory_us < 1000*1000) {
+            return;
+        }
+        t_device_memory_us = t_now;
+
+        const uint64_t free = common_device_memory_free(model_tgt);
+        if (free == 0) {
+            return;
+        }
+
+        if (device_memory_free_min == 0 || free < device_memory_free_min) {
+            device_memory_free_min = free;
+        }
+
+        if (!device_memory_warned && free < 256ull*1024*1024) {
+            device_memory_warned = true;
+            SRV_WRN("only %.0f MiB of device memory are free: the budget took what the server needs at startup, but other "
+                    "processes on the device can still take memory, and CUDA graphs and kernels loaded on first use take a "
+                    "few MiB; lower --parallel or --ctx-size, or set a lower --vram-budget, to leave room\n",
+                    free / (1024.0*1024.0));
+        }
+    }
+
     void loop_timing_report(int32_t n_batch_tokens) {
         const int64_t t_now = ggml_time_us();
         const int64_t t_iter_us = loop_t.t_tasks_us + loop_t.t_pre_us + loop_t.t_decode_us + loop_t.t_post_us;
@@ -3559,6 +3592,8 @@ private:
 #endif
 
     void update_slots() {
+        device_memory_check();
+
 #ifdef DEBUG_TIMINGS
         static int64_t t_prev = 0;
         int64_t t_start = ggml_time_us();

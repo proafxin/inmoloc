@@ -482,6 +482,11 @@ struct common_params {
     // see common_budget_params()
     size_t  vram_budget        = 0;
     size_t  vram_budget_used   = 0;     // memory taken from the budget by something else, e.g. the vision encoder
+
+    // filled in at startup: the memory the configuration is projected to use, and the free device memory it was
+    // measured against; compared with the memory actually used once everything is loaded
+    size_t  vram_predicted     = 0;
+    size_t  vram_free_at_start = 0;
     bool    fit_params_print   = false; // print the estimated required memory to run the model
     int32_t fit_params_min_ctx = 4096;  // minimum context size to set when trying to reduce memory use
 

@@ -223,6 +223,9 @@ extern "C" {
         const char * value;
     };
     typedef struct ggml_backend_feature * (*ggml_backend_get_features_t)(ggml_backend_reg_t reg);
+    // The device memory a backend takes outside its buffers to compute a graph (e.g. scratch pools, library handles),
+    // see ggml_backend_sched_reserve_scratch; with alloc the backend takes it now, otherwise it only measures it
+    typedef size_t                       (*ggml_backend_graph_scratch_t)(ggml_backend_t backend, struct ggml_cgraph * graph, bool alloc);
 
     //
     // Backend registry
@@ -322,6 +325,13 @@ extern "C" {
     // Initialize backend buffers from a measure graph
     GGML_API void                 ggml_backend_sched_reserve_size(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph, size_t * sizes);
     GGML_API bool                 ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph); // returns success
+
+    // Size the device memory the backends take outside their buffers to compute the graph last reserved or split, and
+    // with alloc take it now, so that computing graphs of the shapes sized so far takes no more (the backends that do,
+    // e.g. CUDA with its pools and cuBLAS handles, expose ggml_backend_graph_scratch_t as "ggml_backend_graph_scratch")
+    // sizes[i] is set to the memory backend i holds, or without alloc would hold, outside its buffers for all the graphs
+    // sized so far; it is left as is for the backends that take none
+    GGML_API void                 ggml_backend_sched_reserve_scratch(ggml_backend_sched_t sched, size_t * sizes, bool alloc);
 
     GGML_API int                  ggml_backend_sched_get_n_backends(ggml_backend_sched_t sched);
     GGML_API ggml_backend_t       ggml_backend_sched_get_backend(ggml_backend_sched_t sched, int i);

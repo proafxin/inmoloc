@@ -190,10 +190,14 @@ static int ggml_cuda_highest_compiled_arch(const int arch) {
 [[noreturn]]
 void ggml_cuda_error(const char * stmt, const char * func, const char * file, int line, const char * msg);
 
+// set while a graph is sized (ggml_backend_cuda_graph_scratch): its ops are recorded under stream capture and never run,
+// and its tensors may have no memory yet, so a failing call is one refused for a placeholder address, not an error
+extern thread_local bool ggml_cuda_sizing;
+
 #define CUDA_CHECK_GEN(err, success, error_fn)                                      \
      do {                                                                           \
         auto err_ = (err);                                                          \
-        if (err_ != (success)) {                                                    \
+        if (err_ != (success) && !ggml_cuda_sizing) {                               \
             ggml_cuda_error(#err, __func__, __FILE__, __LINE__, error_fn(err_));    \
         }                                                                           \
     } while (0)
@@ -1203,7 +1207,15 @@ struct ggml_cuda_pool {
 
     virtual void * alloc(size_t size, size_t * actual_size) = 0;
     virtual void free(void * ptr, size_t size) = 0;
+
+    // takes device memory now so that allocations of up to size bytes at once need no more
+    virtual void reserve(size_t size) = 0;
+    // the device memory the pool holds
+    virtual size_t held() const = 0;
 };
+
+// the cuBLAS workspace ggml sets on every handle
+size_t ggml_cuda_cublas_workspace_size(int device);
 
 template<typename T>
 struct ggml_cuda_pool_alloc {
@@ -1532,22 +1544,35 @@ struct ggml_backend_cuda_context {
     ggml_cuda_stream_context & stream_context() { return concurrent_stream_context; }
 
     cublasHandle_t cublas_handle() {
+        if (ggml_cuda_sizing) {
+            // a handle cannot be created during a capture: the sized graph only records that it needs one
+            scratch_cublas[device][curr_stream_no] = true;
+            return cublas_handles[device][curr_stream_no];
+        }
         if (cublas_handles[device][curr_stream_no] == nullptr) {
             ggml_cuda_set_device(device);
             CUBLAS_CHECK(cublasCreate(&cublas_handles[device][curr_stream_no]));
             CUBLAS_CHECK(cublasSetMathMode(cublas_handles[device][curr_stream_no], CUBLAS_TF32_TENSOR_OP_MATH));
             CUBLAS_CHECK(cublasSetStream(cublas_handles[device][curr_stream_no], stream()));
-#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && (CUBLAS_VER_MAJOR > 11 || (CUBLAS_VER_MAJOR == 11 && CUBLAS_VER_MINOR >= 2))
-            if (cublas_workspace_sizes[device] == 0) {
-                const int cc = ggml_cuda_info().devices[device].cc;
-                cublas_workspace_sizes[device] = (cc >= GGML_CUDA_CC_HOPPER) ? 32 * 1024 * 1024 : 4 * 1024 * 1024;
+            if (ggml_cuda_cublas_workspace_size(device) > 0) {
+                cublas_workspace_sizes[device] = ggml_cuda_cublas_workspace_size(device);
+                CUDA_CHECK(cudaMalloc(&cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device]));
+                CUBLAS_CHECK(cublasSetWorkspace(cublas_handles[device][curr_stream_no], cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device]));
             }
-            CUDA_CHECK(cudaMalloc(&cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device]));
-            CUBLAS_CHECK(cublasSetWorkspace(cublas_handles[device][curr_stream_no], cublas_workspaces[device][curr_stream_no], cublas_workspace_sizes[device]));
-#endif
         }
         return cublas_handles[device][curr_stream_no];
     }
+
+    // what the graphs sized so far need outside the buffers, per device and stream (see ggml_backend_cuda_graph_scratch):
+    // the most scratch they take from the pool at once, and whether they call cuBLAS
+    size_t scratch_pool  [GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {};
+    bool   scratch_cublas[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS] = {};
+    // the device memory taken by the cuBLAS handles and workspaces this context created
+    size_t cublas_held = 0;
+    // while a graph is sized, the ops take scratch from these instead of the pools
+    std::unique_ptr<ggml_cuda_pool> pools_count[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS];
+
+    static std::unique_ptr<ggml_cuda_pool> new_pool_count();
 
     // pool
     std::unique_ptr<ggml_cuda_pool> pools[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS];
@@ -1555,6 +1580,12 @@ struct ggml_backend_cuda_context {
     static std::unique_ptr<ggml_cuda_pool> new_pool_for_device(int device, int stream_no);
 
     ggml_cuda_pool & pool(int device) {
+        if (ggml_cuda_sizing) {
+            if (pools_count[device][curr_stream_no] == nullptr) {
+                pools_count[device][curr_stream_no] = new_pool_count();
+            }
+            return *pools_count[device][curr_stream_no];
+        }
         if (pools[device][curr_stream_no] == nullptr) {
             pools[device][curr_stream_no] = new_pool_for_device(device, curr_stream_no);
         }

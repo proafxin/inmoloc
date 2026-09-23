@@ -1337,7 +1337,9 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     // the number of requests processed at once: the most that fit in the memory budget, at most --parallel
     if (!model_only) {
         if (!common_budget_params(params.model.path.c_str(), &mparams, &cparams,
-                has_draft || spec_mtp ? &extra : nullptr, params.vram_budget, params.vram_budget_used, log_level_fit)) {
+                has_draft || spec_mtp ? &extra : nullptr, params.vram_budget, params.vram_budget_used,
+                log_level_fit,
+                &params.vram_predicted, &params.vram_free_at_start)) {
             return;
         }
 
@@ -1562,6 +1564,19 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
 
         // reset samplers to reset RNG state after warmup to the seeded state
         res->reset_samplers();
+    }
+
+    // what the memory budget projected against what the devices actually hold now: the difference is the memory the
+    // graphs do not account for, such as the CUDA context, cuBLAS workspaces, captured graphs and backend pools
+    if (params.vram_free_at_start > 0) {
+        constexpr double MiB = 1024.0*1024.0;
+
+        const size_t free_now = common_device_memory_free(model);
+        const size_t used     = params.vram_free_at_start > free_now ? params.vram_free_at_start - free_now : 0;
+
+        COM_INF("device memory: projected %.0f MiB, in use %.0f MiB, %.0f MiB of that outside the projection, %.0f MiB free\n",
+                params.vram_predicted/MiB, used/MiB,
+                used > params.vram_predicted ? (used - params.vram_predicted)/MiB : 0.0, free_now/MiB);
     }
 
     return res;

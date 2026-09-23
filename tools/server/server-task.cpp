@@ -1675,6 +1675,10 @@ std::string server_task_result_metrics::to_metrics() {
             "Tokens of idle slot prompts still held in memory",
             (double) n_idle_cached_tokens
         }, {
+            "device_memory_free_min_bytes",
+            "Least free device memory seen while serving; what the memory budget does not account for comes out of it",
+            (double) device_memory_free_min
+        }, {
             "rs_cells_total",
             "Recurrent-state cells (0 = no recurrent state)",
             (double) mem_usage.rs_size

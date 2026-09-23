@@ -414,6 +414,30 @@ const ggml_cuda_device_info & ggml_cuda_info() {
 
 // #define DEBUG_CUDA_MALLOC
 
+// the graph node being computed on this thread, so that a pool that grows can say which op made it grow
+static thread_local const ggml_tensor * ggml_cuda_pool_node = nullptr;
+
+thread_local bool ggml_cuda_sizing = false;
+
+size_t ggml_cuda_cublas_workspace_size(int device) {
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && (CUBLAS_VER_MAJOR > 11 || (CUBLAS_VER_MAJOR == 11 && CUBLAS_VER_MINOR >= 2))
+    return ggml_cuda_info().devices[device].cc >= GGML_CUDA_CC_HOPPER ? 32 * 1024 * 1024 : 4 * 1024 * 1024;
+#else
+    GGML_UNUSED(device);
+    return 0;
+#endif
+}
+
+// a pool reserved for the graphs it serves (see ggml_backend_cuda_graph_scratch) does not grow unless an op takes more
+// scratch than the sizing counted, or a graph of a shape that was not sized is computed: the log names the op
+static void ggml_cuda_pool_warn_growth(int device, size_t grown, size_t held, size_t requested) {
+    const ggml_tensor * t = ggml_cuda_pool_node;
+    GGML_LOG_WARN("%s: device %d pool grows past its reserve by %.2f MiB to %.2f MiB, %.2f MiB requested by %s (%s) [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
+        __func__, device, grown/1048576.0, held/1048576.0, requested/1048576.0,
+        t ? t->name : "-", t ? ggml_op_desc(t) : "outside a graph",
+        t ? t->ne[0] : 0, t ? t->ne[1] : 0, t ? t->ne[2] : 0, t ? t->ne[3] : 0);
+}
+
 // buffer pool for cuda (legacy)
 struct ggml_cuda_pool_leg : public ggml_cuda_pool {
     static const int MAX_BUFFERS = 256;
@@ -427,13 +451,44 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
     ggml_cuda_buffer buffer_pool[MAX_BUFFERS] = {};
     size_t pool_size = 0;
 
+    // reserved memory the allocations are taken from first, in stack order as in the VMM pool, so that a reserve covers
+    // any sequence of allocations of up to its size at once
+    char * arena      = nullptr;
+    size_t arena_size = 0;
+    size_t arena_used = 0;
+
     explicit ggml_cuda_pool_leg(int device) :
         device(device) {
     }
 
     ~ggml_cuda_pool_leg() {
         clear_pool();
+        if (arena != nullptr) {
+            ggml_cuda_set_device(device);
+            CUDA_CHECK(cudaFree(arena));
+            pool_size -= arena_size;
+        }
         GGML_ASSERT(pool_size == 0);
+    }
+
+    void reserve(size_t size) override {
+        size = 256 * ((size + 255)/256);
+        if (size <= arena_size) {
+            return;
+        }
+        GGML_ASSERT(arena_used == 0);
+        ggml_cuda_set_device(device);
+        if (arena != nullptr) {
+            CUDA_CHECK(cudaFree(arena));
+            pool_size -= arena_size;
+        }
+        CUDA_CHECK(ggml_cuda_device_malloc((void **) &arena, size, device));
+        arena_size = size;
+        pool_size += size;
+    }
+
+    size_t held() const override {
+        return pool_size;
     }
 
     void clear_pool() {
@@ -450,6 +505,16 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
     }
 
     void * alloc(size_t size, size_t * actual_size) override {
+        {
+            // rounded as the VMM pool and the sizing round, so that a reserve covers what was sized
+            const size_t size_arena = 128 * ((size + 127)/128);
+            if (arena_size > 0 && arena_used + size_arena <= arena_size) {
+                void * ptr = arena + arena_used;
+                arena_used += size_arena;
+                *actual_size = size_arena;
+                return ptr;
+            }
+        }
 #ifdef DEBUG_CUDA_MALLOC
         int nnz = 0;
         size_t max_size = 0;
@@ -507,6 +572,9 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
         CUDA_CHECK(err);
         *actual_size = look_ahead_size;
         pool_size += look_ahead_size;
+        if (arena_size > 0) {
+            ggml_cuda_pool_warn_growth(device, look_ahead_size, pool_size, size);
+        }
 #ifdef DEBUG_CUDA_MALLOC
         GGML_LOG_INFO("%s[%d]: %d buffers, max_size = %u MB, pool_size = %u MB, requested %u MB\n", __func__, device, nnz,
                            (uint32_t)(max_size / 1024 / 1024), (uint32_t)(pool_size / 1024 / 1024), (uint32_t)(size / 1024 / 1024));
@@ -515,6 +583,12 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
     }
 
     void free(void * ptr, size_t size) override {
+        if ((char *) ptr >= arena && (char *) ptr < arena + arena_size) {
+            arena_used -= size;
+            // all deallocations must be in reverse order of the allocations
+            GGML_ASSERT((char *) ptr == arena + arena_used);
+            return;
+        }
         for (int i = 0; i < MAX_BUFFERS; ++i) {
             ggml_cuda_buffer& b = buffer_pool[i];
             if (b.ptr == nullptr) {
@@ -540,6 +614,7 @@ struct ggml_cuda_pool_vmm : public ggml_cuda_pool {
     CUdeviceptr pool_addr = 0;
     size_t pool_used = 0;
     size_t pool_size = 0;
+    size_t pool_reserved = 0; // size of the last reserve, past which the pool is not expected to grow
     size_t granularity;
 #if defined(GGML_USE_HIP)
     std::vector<std::pair<CUdeviceptr, size_t>> mappings;
@@ -649,6 +724,9 @@ struct ggml_cuda_pool_vmm : public ggml_cuda_pool {
 
             // add to the pool
             pool_size += reserve_size;
+            if (pool_reserved > 0) {
+                ggml_cuda_pool_warn_growth(device, reserve_size, pool_size, size);
+            }
 
             //printf("cuda pool[%d]: size increased to %llu MB (reserved %llu MB)\n",
             //       device, (unsigned long long) (pool_size/1024/1024),
@@ -678,8 +756,58 @@ struct ggml_cuda_pool_vmm : public ggml_cuda_pool {
         // all deallocations must be in reverse order of the allocations
         GGML_ASSERT(ptr == (void *) ((char *)(pool_addr) + pool_used));
     }
+
+    void reserve(size_t size) override {
+        if (size <= pool_size) {
+            pool_reserved = std::max(pool_reserved, size);
+            return;
+        }
+        GGML_ASSERT(pool_used == 0);
+        pool_reserved = 0; // growing to the reserve is expected
+        size_t actual_size = 0;
+        void * ptr = alloc(size, &actual_size);
+        free(ptr, actual_size);
+        pool_reserved = size;
+    }
+
+    size_t held() const override {
+        return pool_size;
+    }
 };
 #endif // defined(GGML_USE_VMM)
+
+// hands out addresses that are never used, since a sized graph does not run, and keeps the most it handed out at once,
+// rounded like the VMM pool rounds each allocation
+struct ggml_cuda_pool_count : public ggml_cuda_pool {
+    size_t used = 0;
+    size_t high = 0;
+
+    void * alloc(size_t size, size_t * actual_size) override {
+        size = 128 * ((size + 127)/128);
+        void * ptr = (void *) (uintptr_t) (4096 + used);
+        used += size;
+        high  = std::max(high, used);
+        *actual_size = size;
+        return ptr;
+    }
+
+    void free(void * ptr, size_t size) override {
+        GGML_UNUSED(ptr);
+        used -= size;
+    }
+
+    void reserve(size_t size) override {
+        GGML_UNUSED(size);
+    }
+
+    size_t held() const override {
+        return high;
+    }
+};
+
+std::unique_ptr<ggml_cuda_pool> ggml_backend_cuda_context::new_pool_count() {
+    return std::unique_ptr<ggml_cuda_pool>(new ggml_cuda_pool_count());
+}
 
 std::unique_ptr<ggml_cuda_pool> ggml_backend_cuda_context::new_pool_for_device(int                  device,
                                                                                [[maybe_unused]] int stream_no) {
@@ -1788,7 +1916,8 @@ static bool ggml_cuda_should_fuse_mul_mat_vec_q(const ggml_tensor * tensor) {
     ggml_tensor *       src1 = tensor->src[1];
     const ggml_tensor * dst  = tensor;
 
-    const bool bad_padding_clear = ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE &&
+    // a graph that is sized may not have its buffers yet (see ggml_backend_cuda_graph_scratch)
+    const bool bad_padding_clear = src0->buffer && ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE &&
                                    ggml_nbytes(src0) != ggml_backend_buffer_get_alloc_size(src0->buffer, src0) &&
                                    src0->view_src;
 
@@ -1823,7 +1952,8 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     // If src0 is a temporary compute buffer it may have some padding that needs to be cleared for mul_mat_vec_q or mul_mat_q.
     // But if src0 is also a view of another tensor then this cannot be done safely because it may overwrite valid tensor data.
     // Therefore, in such cases use cuBLAS.
-    const bool bad_padding_clear = ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE
+    // a graph that is sized may not have its buffers yet (see ggml_backend_cuda_graph_scratch)
+    const bool bad_padding_clear = src0->buffer && ggml_backend_buffer_get_usage(src0->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE
         && ggml_nbytes(src0) != ggml_backend_buffer_get_alloc_size(src0->buffer, src0) && src0->view_src;
     if (bad_padding_clear || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32) {
         ggml_cuda_mul_mat_cublas(ctx, src0, src1, dst);
@@ -2409,7 +2539,8 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
     }
 
     cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess) {
+    // a graph that is sized is recorded, not run: a call refused for a placeholder address is no failure there
+    if (err != cudaSuccess && !ggml_cuda_sizing) {
         GGML_LOG_ERROR("%s: %s failed\n", __func__, ggml_op_desc(dst));
         CUDA_CHECK(err);
     }
@@ -2982,6 +3113,12 @@ static bool ggml_cuda_check_fusion_memory_ranges(const ggml_cgraph * cgraph,
                                                  const int           out_count,
                                                  const bool          is_topk_moe = false) {
     auto nodes_overlap = [&](const ggml_tensor * a, const ggml_tensor * b) {
+        // a graph that is sized may not have its buffers yet (see ggml_backend_cuda_graph_scratch): fusing or not
+        // takes the same scratch
+        if (a->buffer == nullptr || b->buffer == nullptr) {
+            return false;
+        }
+
         const int64_t a_start = (int64_t) a->data;
         const int64_t a_end   = a_start + ggml_backend_buft_get_alloc_size(a->buffer->buft, a);
 
@@ -4329,6 +4466,8 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     continue;
                 }
 
+                ggml_cuda_pool_node = node;
+
                 int nodes_to_skip = ggml_cuda_try_fuse(cuda_ctx, cgraph, i);
 
                 if (nodes_to_skip != 0) {
@@ -4368,11 +4507,12 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                     try_launch_concurrent_event(node);
                }
             }
+            ggml_cuda_pool_node = nullptr;
         }
 
 #ifdef USE_CUDA_GRAPH
-        ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
         if (use_cuda_graph && cuda_graph_update_required) { // End CUDA graph capture
+            ggml_cuda_graph * graph = cuda_ctx->cuda_graph(graph_key);
             if (graph->graph != nullptr) {
                 CUDA_CHECK(cudaGraphDestroy(graph->graph));
                 graph->graph = nullptr;
@@ -4481,6 +4621,138 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     ggml_cuda_graph_evaluate_and_capture(cuda_ctx, cgraph, use_cuda_graph, cuda_graph_update_required, graph_key);
 
     return GGML_STATUS_SUCCESS;
+}
+
+// the device memory a cuBLAS handle takes with its workspace, measured once per device on a handle created for it
+static size_t ggml_cuda_cublas_cost(int device) {
+    static std::mutex mutex;
+    static size_t     cost[GGML_CUDA_MAX_DEVICES] = {};
+
+    std::lock_guard<std::mutex> guard(mutex);
+    if (cost[device] == 0) {
+        ggml_cuda_set_device(device);
+
+        size_t free_0 = 0;
+        size_t free_1 = 0;
+        size_t total  = 0;
+        CUDA_CHECK(cudaMemGetInfo(&free_0, &total));
+        cublasHandle_t handle = nullptr;
+        CUBLAS_CHECK(cublasCreate(&handle));
+        CUDA_CHECK(cudaMemGetInfo(&free_1, &total));
+
+        {
+            // as in ~ggml_backend_cuda_context: no handle is destroyed while a graph is captured in another thread
+            std::unique_lock<std::mutex> lock(ggml_cuda_lock);
+            ggml_cuda_lock_cv.wait(lock, []{ return ggml_cuda_lock_counter.load(std::memory_order_relaxed) == 0; });
+            CUBLAS_CHECK(cublasDestroy(handle));
+        }
+
+        cost[device] = (free_0 > free_1 ? free_0 - free_1 : 0) + ggml_cuda_cublas_workspace_size(device);
+    }
+    return cost[device];
+}
+
+// the device memory the backend takes outside its buffers to compute the graph: the scratch its ops take from the pools,
+// and the cuBLAS handles they call with their workspaces
+//   - the graph is recorded under stream capture and not run, and its ops take their scratch from pools that only count:
+//     the sizes are what the ops' own code asks for, also when the graph has no memory yet (a dry run with no_alloc),
+//     since nothing is run with its addresses
+//   - with alloc, that memory is taken now, so that computing graphs of the sizes seen so far takes no more; a pool that
+//     grows later says which op made it grow
+//   - returns the device memory the backend holds (alloc) or would hold (without) outside its buffers, for all the
+//     graphs sized so far
+static size_t ggml_backend_cuda_graph_scratch(ggml_backend_t backend, ggml_cgraph * cgraph, bool alloc) {
+    ggml_backend_cuda_context * ctx = (ggml_backend_cuda_context *) backend->context;
+
+    ggml_cuda_set_device(ctx->device);
+
+    if (cgraph != nullptr && cgraph->n_nodes > 0) {
+        // concurrent streams compute branches at once, each with a pool of its own: here they are sized one after the
+        // other on the main stream, and every stream is given what the main stream needs
+        ggml_cuda_stream_context & stream_ctx = ctx->stream_context();
+        auto concurrent_events = std::move(stream_ctx.concurrent_events);
+        stream_ctx.concurrent_events.clear();
+        int n_streams = 1;
+        for (const auto & [node, event] : concurrent_events) {
+            n_streams = std::max(n_streams, 1 + event.n_streams);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(ggml_cuda_lock);
+            ggml_cuda_lock_counter.fetch_add(1, std::memory_order_relaxed);
+        }
+
+        // errors are only ignored once the capture has begun, so that nothing can run with the placeholder addresses
+        const int stream_no = ctx->curr_stream_no;
+        CUDA_CHECK(cudaStreamBeginCapture(ctx->stream(), cudaStreamCaptureModeRelaxed));
+        ggml_cuda_sizing = true;
+        ggml_cuda_graph_evaluate_and_capture(ctx, cgraph, false, false, nullptr);
+        ctx->curr_stream_no = stream_no;
+        // an op that synchronizes (the mul_mat_id fallback) invalidates the capture, which ends it all the same
+        cudaGraph_t graph = nullptr;
+        (void) cudaStreamEndCapture(ctx->stream(), &graph);
+        ggml_cuda_sizing = false;
+        if (graph != nullptr) {
+            CUDA_CHECK(cudaGraphDestroy(graph));
+        }
+        (void) cudaGetLastError();
+
+        {
+            std::lock_guard<std::mutex> lock(ggml_cuda_lock);
+            if (ggml_cuda_lock_counter.fetch_sub(1, std::memory_order_relaxed) == 1) {
+                ggml_cuda_lock_cv.notify_all();
+            }
+        }
+
+        stream_ctx.concurrent_events = std::move(concurrent_events);
+
+        for (int d = 0; d < GGML_CUDA_MAX_DEVICES; ++d) {
+            for (int s = 0; s < GGML_CUDA_MAX_STREAMS; ++s) {
+                const size_t need   = ctx->pools_count[d][s] ? ctx->pools_count[d][s]->held() : 0;
+                const bool   cublas = ctx->scratch_cublas[d][s];
+                for (int i = s; i < std::min(s + n_streams, GGML_CUDA_MAX_STREAMS); ++i) {
+                    ctx->scratch_pool  [d][i] = std::max(ctx->scratch_pool[d][i], need);
+                    ctx->scratch_cublas[d][i] = ctx->scratch_cublas[d][i] || cublas;
+                }
+                ctx->pools_count[d][s].reset();
+            }
+        }
+    }
+
+    size_t held = 0;
+    for (int d = 0; d < GGML_CUDA_MAX_DEVICES; ++d) {
+        for (int s = 0; s < GGML_CUDA_MAX_STREAMS; ++s) {
+            if (!alloc) {
+                // what the pool rounds a reserve to
+                const size_t granularity = ggml_cuda_info().devices[d].vmm ? ggml_cuda_info().devices[d].vmm_granularity : 256;
+                held += granularity * ((ctx->scratch_pool[d][s] + granularity - 1)/granularity);
+                held += ctx->scratch_cublas[d][s] && d == ctx->device ? ggml_cuda_cublas_cost(d) : 0;
+                continue;
+            }
+
+            const int stream_no = ctx->curr_stream_no;
+            ctx->curr_stream_no = s;
+            if (ctx->scratch_pool[d][s] > 0) {
+                ggml_cuda_set_device(d);
+                ctx->pool(d).reserve(ctx->scratch_pool[d][s]);
+            }
+            if (ctx->scratch_cublas[d][s] && d == ctx->device && ctx->cublas_handles[d][s] == nullptr) {
+                ggml_cuda_set_device(d);
+                size_t free_0 = 0;
+                size_t free_1 = 0;
+                size_t total  = 0;
+                CUDA_CHECK(cudaMemGetInfo(&free_0, &total));
+                ctx->cublas_handle();
+                CUDA_CHECK(cudaMemGetInfo(&free_1, &total));
+                ctx->cublas_held += free_0 > free_1 ? free_0 - free_1 : 0;
+            }
+            ctx->curr_stream_no = stream_no;
+            held += ctx->pools[d][s] ? ctx->pools[d][s]->held() : 0;
+        }
+    }
+    ggml_cuda_set_device(ctx->device);
+
+    return alloc ? held + ctx->cublas_held : held;
 }
 
 static void ggml_backend_cuda_event_record(ggml_backend_t backend, ggml_backend_event_t event) {
@@ -5701,6 +5973,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_cuda_get_features;
+    }
+    if (strcmp(name, "ggml_backend_graph_scratch") == 0) {
+        return (void *)ggml_backend_cuda_graph_scratch;
     }
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     if (strcmp(name, "ggml_backend_flash_attn_ext_kv_rows") == 0) {

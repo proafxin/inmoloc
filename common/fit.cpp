@@ -1106,7 +1106,9 @@ bool common_budget_params(
  const common_fit_extra_model * extra,
                          size_t   budget,
                          size_t   budget_used,
-                 ggml_log_level   log_level) {
+                 ggml_log_level   log_level,
+                       size_t *   predicted,
+                       size_t *   free_before) {
     constexpr double MiB = 1024.0*1024.0;
 
     // the dry runs print what a real load prints; below log_level it goes to the debug log
@@ -1196,8 +1198,7 @@ bool common_budget_params(
         return true;
     };
 
-    // without a budget, the free memory of the devices is the budget, less a margin on each of them
-    constexpr size_t margin_per_dev = 1024*1024*1024; // the default margin of --fit
+    // without a budget, the free memory of the devices is the budget
     const bool budget_auto = budget == 0;
 
     size_t free_sum = 0;
@@ -1207,7 +1208,7 @@ bool common_budget_params(
         ggml_backend_dev_memory(llama_model_get_device(model, i), &free, &total);
         free_sum += free;
         if (budget_auto) {
-            budget += free > margin_per_dev ? free - margin_per_dev : 0;
+            budget += free;
         }
     }
 
@@ -1218,8 +1219,7 @@ bool common_budget_params(
     }
 
     if (budget_auto) {
-        LOG_INF("%s: memory budget: %.0f MiB, the free device memory less %.0f MiB per device\n",
-                __func__, budget/MiB, margin_per_dev/MiB);
+        LOG_INF("%s: memory budget: %.0f MiB, the free device memory\n", __func__, budget/MiB);
     }
 
     const size_t avail = budget > budget_used ? budget - budget_used : 0;
@@ -1288,7 +1288,27 @@ bool common_budget_params(
     cparams->n_seq_max  = lo;
     cparams->n_rs_cells = 0;
 
+    if (predicted) {
+        *predicted = m_best.total() + budget_used;
+    }
+    if (free_before) {
+        *free_before = free_sum;
+    }
+
     cleanup();
 
     return true;
+}
+
+size_t common_device_memory_free(const llama_model * model) {
+    size_t res = 0;
+
+    for (int i = 0; i < llama_model_n_devices(model); i++) {
+        size_t free  = 0;
+        size_t total = 0;
+        ggml_backend_dev_memory(llama_model_get_device(model, i), &free, &total);
+        res += free;
+    }
+
+    return res;
 }

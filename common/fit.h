@@ -42,9 +42,11 @@ common_params_fit_status common_fit_params(
 //     cparams->n_ctx tokens in a unified cache, the per-sequence memory (e.g. recurrent state, sliding-window cache)
 //     and the worst-case compute buffers of the main and the extra context fit in budget - budget_used
 //   - the memory is measured by creating the contexts without allocating them, so it holds for any architecture
-//   - budget 0 means the free memory of the devices, less a margin on each; a model on the host alone is left as is
+//   - budget 0 means the free memory of the devices; a model on the host alone is left as is
 //   - budget_used is memory the caller takes from the same budget, e.g. a vision encoder
 //   - returns false when not even one sequence fits, leaving cparams unchanged
+//   - predicted and free_before, when given, report the memory the configuration is projected to use and the free
+//     device memory it was measured against, so that the caller can compare them with what is used in the end
 bool common_budget_params(
                    const char * path_model,
      const llama_model_params * mparams,
@@ -52,7 +54,12 @@ bool common_budget_params(
  const common_fit_extra_model * extra,
                          size_t   budget,
                          size_t   budget_used,
-                 ggml_log_level   log_level);
+                 ggml_log_level   log_level,
+                       size_t *   predicted = nullptr,
+                       size_t *   free_before = nullptr);
+
+// the free device memory of the devices a model runs on, summed
+size_t common_device_memory_free(const llama_model * model);
 
 // print estimated memory to stdout
 void common_fit_print(

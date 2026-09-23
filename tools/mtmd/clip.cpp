@@ -3770,6 +3770,11 @@ struct clip_model_loader {
         ggml_cgraph * gf = clip_get_graph_builder(&ctx_clip, batch)->build();
         ggml_backend_sched_reserve(ctx_clip.sched.get(), gf);
 
+        // the memory the backends take outside their buffers for this graph (e.g. the CUDA pools and cuBLAS handles),
+        // taken now unless the context only measures, so that encoding does not grow it
+        std::vector<size_t> scratch(ctx_clip.backend_ptrs.size(), 0);
+        ggml_backend_sched_reserve_scratch(ctx_clip.sched.get(), scratch.data(), !ctx_clip.no_alloc);
+
         ctx_clip.mem_compute.clear();
         for (size_t i = 0; i < ctx_clip.backend_ptrs.size(); ++i) {
             ggml_backend_t backend = ctx_clip.backend_ptrs[i];
@@ -3780,7 +3785,12 @@ struct clip_model_loader {
                         ggml_backend_buft_name(buft),
                         size / 1024.0 / 1024.0);
             }
-            ctx_clip.mem_compute[ggml_backend_get_device(backend)] += size;
+            if (scratch[i] > 0) {
+                LOG_INF("%s: %10s scratch size        = %8.2f MiB (op scratch and library handles outside the buffers)\n", __func__,
+                        ggml_backend_name(backend),
+                        scratch[i] / 1024.0 / 1024.0);
+            }
+            ctx_clip.mem_compute[ggml_backend_get_device(backend)] += size + scratch[i];
         }
 
         const int n_splits = ggml_backend_sched_get_n_splits(ctx_clip.sched.get());

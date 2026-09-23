@@ -500,6 +500,7 @@ struct server_task_result_metrics : server_task_result {
     int n_tasks_deferred = 0;
 
     uint64_t n_idle_cached_tokens = 0; // tokens of idle slot prompts still held in memory
+    uint64_t device_memory_free_min = 0; // least free device memory seen while serving, 0 when not measured
 
     llama_memory_usage mem_usage = {};
 

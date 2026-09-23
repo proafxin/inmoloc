@@ -442,6 +442,7 @@ llama_context::llama_context(
         backend_buft.clear();
         backend_ptrs.clear();
         backend_buf_exp_size.clear();
+        backend_scratch_size.clear();
 
         for (auto & backend : backends) {
             auto * buft = ggml_backend_get_default_buffer_type(backend.get());
@@ -459,6 +460,7 @@ llama_context::llama_context(
             backend_buft.push_back(buft);
             backend_ptrs.push_back(backend.get());
             backend_buf_exp_size.push_back(0);
+            backend_scratch_size.push_back(0);
         }
 
         LLAMA_LOG_DEBUG("%s: backend_ptrs.size() = %zu\n", __func__, backend_ptrs.size());
@@ -689,6 +691,13 @@ void llama_context::sched_reserve() {
 
     const uint32_t n_outputs_pp = std::min(n_tokens, cparams.n_outputs_max);
 
+    // the memory the backends take outside their buffers for each worst-case graph: the scratch of their ops and the
+    // libraries those call (e.g. the CUDA pools and cuBLAS handles), taken now unless this is a dry run, so that nothing
+    // grows during inference
+    const auto reserve_scratch = [&]() {
+        ggml_backend_sched_reserve_scratch(sched.get(), backend_scratch_size.data(), !model.hparams.no_alloc);
+    };
+
     // reserve pp (prompt processing) graph first so that buffers are only allocated once
     {
         auto * gf = graph_reserve(n_tokens, n_seqs, n_outputs_pp, mctx.get(),
@@ -705,6 +714,8 @@ void llama_context::sched_reserve() {
             }
         }
 
+        reserve_scratch();
+
         n_splits_pp = ggml_backend_sched_get_n_splits(sched.get());
         n_nodes_pp  = ggml_graph_n_nodes(gf);
     }
@@ -715,6 +726,8 @@ void llama_context::sched_reserve() {
         if (!gf) {
             throw std::runtime_error("failed to allocate compute tg buffers");
         }
+
+        reserve_scratch();
 
         n_splits_tg = ggml_backend_sched_get_n_splits(sched.get());
         n_nodes_tg  = ggml_graph_n_nodes(gf);
@@ -735,6 +748,8 @@ void llama_context::sched_reserve() {
         if (!gf) {
             throw std::runtime_error("failed to allocate compute buffers for speculative steps");
         }
+
+        reserve_scratch();
 
         for (size_t i = 0; i < sizes.size(); ++i) {
             backend_buf_exp_size[i] = std::max(backend_buf_exp_size[i], sizes[i]);
@@ -761,6 +776,8 @@ void llama_context::sched_reserve() {
         if (!gf) {
             throw std::runtime_error("failed to allocate compute pp buffers");
         }
+
+        reserve_scratch();
     }
 
     for (size_t i = 0; i < backend_ptrs.size(); ++i) {
@@ -773,6 +790,11 @@ void llama_context::sched_reserve() {
             LLAMA_LOG_INFO("%s: %10s compute buffer size = %8.2f MiB\n", __func__,
                     ggml_backend_buft_name(buft),
                     backend_buf_exp_size[i] / 1024.0 / 1024.0);
+        }
+        if (backend_scratch_size[i] > 0) {
+            LLAMA_LOG_INFO("%s: %10s scratch size        = %8.2f MiB (op scratch and library handles outside the buffers)\n", __func__,
+                    ggml_backend_name(backend),
+                    backend_scratch_size[i] / 1024.0 / 1024.0);
         }
     }
 
@@ -3519,13 +3541,13 @@ llama_memory_breakdown llama_context::memory_breakdown() const {
         for (size_t i = 0; i < backends.size(); ++i) {
             ggml_backend_t             backend = backends[i].get();
             ggml_backend_buffer_type_t buft    = ggml_backend_sched_get_buffer_type(sched.get(), backend);
-            ret[buft].compute += backend_buf_exp_size[i];
+            ret[buft].compute += backend_buf_exp_size[i] + backend_scratch_size[i];
         }
     } else {
-        for (const auto & backend_ptr : backends) {
-            ggml_backend_t             backend = backend_ptr.get();
+        for (size_t i = 0; i < backends.size(); ++i) {
+            ggml_backend_t             backend = backends[i].get();
             ggml_backend_buffer_type_t buft    = ggml_backend_sched_get_buffer_type(sched.get(), backend);
-            ret[buft].compute += ggml_backend_sched_get_buffer_size(sched.get(), backend);
+            ret[buft].compute += ggml_backend_sched_get_buffer_size(sched.get(), backend) + backend_scratch_size[i];
         }
     }
     return ret;
