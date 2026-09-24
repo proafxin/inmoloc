@@ -20,7 +20,7 @@ MAX_PAGES=${MAX_PAGES:-10}   # pages per PDF
 BUDGET=${BUDGET:-}           # e.g. 21G: on a GPU that also drives a desktop, the device memory the server may use
 RUNS=${RUNS:-"ref load toolong"}   # e.g. "load" to repeat only the load run against an earlier ref
 
-COMMON="--model /models/Qwen3.8-27B-UD-IQ3_XXS.gguf --mmproj /models/mmproj-Qwen3.8-27B-BF16.gguf --image-min-tokens 1024
+COMMON="--model /models/${MODEL:-Qwen3.8-27B-AP-IQ4_XS.gguf} --mmproj /models/mmproj-Qwen3.8-27B-BF16.gguf --image-min-tokens 1024
         --chat-template-file /models/chat_template.jinja -ngl 999 --host 0.0.0.0 --port 8100
         --spec-type draft-mtp --spec-draft-n-max 2 --metrics --cache-type-k f16 --cache-type-v f16 --flash-attn on --alias lm
         --rs-rollback replay --cache-ram 0 -lv 4"

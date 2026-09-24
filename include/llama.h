@@ -373,6 +373,8 @@ extern "C" {
         uint32_t n_rs_seq;              // number of recurrent-state snapshots per seq for rollback (0 = no rollback) [EXPERIMENTAL]
         uint32_t n_rs_cells;            // recurrent-state cells shared by all sequences (0 = n_seq_max) [EXPERIMENTAL]
         enum llama_rs_rollback_type rs_rollback; // how the recurrent state rolls back, see llama_rs_rollback_type [EXPERIMENTAL]
+        enum ggml_backend_priority backend_priority; // priority of the context's work against other work on its devices,
+                                                     // e.g. a media encoder running at the same time [EXPERIMENTAL]
         uint32_t n_outputs_max;         // max outputs in a ubatch (0 = n_batch)
         uint32_t n_outputs_max_per_seq; // max outputs per sequence (0 = n_outputs_max)
         int32_t  n_threads;             // number of threads to use for generation

@@ -7776,26 +7776,29 @@ struct test_flash_attn_ext_kv_rows : public test_case {
     const int64_t kv;     // K/V rows in the cache
     const int64_t n_rows; // entries of the list, the last ones are padding
     const int64_t nb;     // queries
+    const ggml_type type_K;
+    const ggml_type type_V;
 
     std::string vars() override {
-        return VARS_TO_STR6(hs, nh, nr, kv, n_rows, nb);
+        return VARS_TO_STR8(hs, nh, nr, kv, n_rows, nb, type_K, type_V);
     }
 
     double max_nmse_err() override {
         return 5e-4;
     }
 
-    test_flash_attn_ext_kv_rows(int64_t hs = 128, int64_t nh = 4, int64_t nr = 4, int64_t kv = 1024, int64_t n_rows = 512, int64_t nb = 32)
-        : hs(hs), nh(nh), nr(nr), kv(kv), n_rows(n_rows), nb(nb) {}
+    test_flash_attn_ext_kv_rows(int64_t hs = 128, int64_t nh = 4, int64_t nr = 4, int64_t kv = 1024, int64_t n_rows = 512, int64_t nb = 32,
+            ggml_type type_K = GGML_TYPE_F16, ggml_type type_V = GGML_TYPE_F16)
+        : hs(hs), nh(nh), nr(nr), kv(kv), n_rows(n_rows), nb(nb), type_K(type_K), type_V(type_V) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hs, nb, nh*nr, 1);
         ggml_set_name(q, "q");
 
-        ggml_tensor * k = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, hs, kv, nh, 1);
+        ggml_tensor * k = ggml_new_tensor_4d(ctx, type_K, hs, kv, nh, 1);
         ggml_set_name(k, "k");
 
-        ggml_tensor * v = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, hs, kv, nh, 1);
+        ggml_tensor * v = ggml_new_tensor_4d(ctx, type_V, hs, kv, nh, 1);
         ggml_set_name(v, "v");
 
         ggml_tensor * m = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, nb, 1, 1);
@@ -10740,6 +10743,20 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
     test_cases.emplace_back(new test_flash_attn_ext_kv_rows(256, 4, 6, 8192, 3072, 128));
+    // the other K/V cache types, converted to f16 as the rows are loaded
+    for (auto [type_K, type_V] : std::vector<std::pair<ggml_type, ggml_type>>{
+            {GGML_TYPE_BF16, GGML_TYPE_BF16}, {GGML_TYPE_Q8_0, GGML_TYPE_Q8_0}, {GGML_TYPE_Q4_0, GGML_TYPE_Q4_0},
+            {GGML_TYPE_Q4_1, GGML_TYPE_Q4_1}, {GGML_TYPE_Q5_0, GGML_TYPE_Q5_0}, {GGML_TYPE_Q5_1, GGML_TYPE_Q5_1},
+            {GGML_TYPE_Q8_0, GGML_TYPE_F16},  {GGML_TYPE_F16,  GGML_TYPE_Q8_0}}) {
+        for (int64_t hs : { 64, 128, 256 }) {
+            for (int64_t nr : { 1, 4 }) {
+                for (int64_t nb : { 1, 32, 77 }) {
+                    test_cases.emplace_back(new test_flash_attn_ext_kv_rows(hs, 4, nr, 1024, 512, nb, type_K, type_V));
+                }
+            }
+        }
+        test_cases.emplace_back(new test_flash_attn_ext_kv_rows(256, 4, 6, 8192, 3072, 128, type_K, type_V));
+    }
 
     // mixed quant and Q1_0 test cases
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 4, {1, 1}, 128, 2, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0));

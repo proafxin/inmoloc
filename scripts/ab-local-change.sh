@@ -15,20 +15,24 @@ BUDGET=${BUDGET:-}            # e.g. 18G, to give both sides the same concurrenc
 mkdir -p $OUT
 cd $SRC
 
-git diff --quiet -- src ggml tools common && { echo "no uncommitted code changes to compare"; exit 1; }
+git diff --quiet -- src ggml tools common include && { echo "no uncommitted code changes to compare"; exit 1; }
 
 restore() { git stash list | grep -q ab-local-change && git stash pop -q; }
 trap restore EXIT
 
+# a failed build must stop the comparison: the run after it would use the binary of the other side
 build() {
-    docker run --rm -i --gpus all -v $SRC:/src -w /src $IMG bash -c "apt-get update >/dev/null && apt-get install -y cmake build-essential git >/dev/null && git config --global --add safe.directory /src && cmake --build build --config Release -j --target llama-server" 2>&1 | tail -1
+    local res
+    res=$(docker run --rm -i --gpus all -v $SRC:/src -w /src $IMG bash -c "apt-get update >/dev/null && apt-get install -y cmake build-essential git >/dev/null && git config --global --add safe.directory /src && cmake --build build --config Release -j --target llama-server" 2>&1 | tail -1)
+    echo "$res"
+    case "$res" in *"Built target llama-server"*) ;; *) echo "build failed, stopping"; exit 1 ;; esac
 }
 
 run() { # $1 = label
     docker rm -f lm >/dev/null 2>&1
     docker run -d --name lm --gpus all --ulimit core=0 -p 8100:8100 -v $SRC:/src -v $MODELS:/models:ro \
         -e LD_LIBRARY_PATH=/src/build/bin $IMG /src/build/bin/llama-server \
-        --model /models/Qwen3.8-27B-UD-IQ3_XXS.gguf --mmproj /models/mmproj-Qwen3.8-27B-BF16.gguf --image-min-tokens 1024 \
+        --model /models/${MODEL:-Qwen3.8-27B-AP-IQ4_XS.gguf} --mmproj /models/mmproj-Qwen3.8-27B-BF16.gguf --image-min-tokens 1024 \
         --chat-template-file /models/chat_template.jinja -ngl 999 --host 0.0.0.0 --port 8100 \
         --spec-type draft-mtp --spec-draft-n-max 2 --metrics --cache-type-k f16 --cache-type-v f16 --flash-attn on \
         --alias lm --ctx-size 65536 --parallel 32 --rs-rollback replay --cache-ram 4096 -lv 4 \
@@ -48,10 +52,17 @@ run() { # $1 = label
     fi
     docker logs lm > $OUT/server-$1.log 2>&1
     docker rm -f lm >/dev/null 2>&1
+    if [ $WORKLOAD = ocr ]; then
+        python3 $SRC/scripts/ocr-score.py $OUT/ocr-$1/ocr
+    fi
+    # iterations of the server loop slow enough to be logged while slots were generating: the stalls of generation
+    grep -h "slow iteration" $OUT/server-$1.log | grep -v "generating = 0" \
+        | sed -E 's/.*slow iteration: ([0-9]+) ms.*media ([0-9]+) ms.*/\1 \2/' \
+        | awk '{ n++; t += $1; m += $2; if ($1 > mx) mx = $1 } END { printf "generation stalls: %d slow iterations, %.1f s in total (%.1f s of it media), longest %d ms\n", n, t/1000, m/1000, mx }'
 }
 
 for r in $(seq 1 $ROUNDS); do
-    git stash push -q -m ab-local-change -- $(git diff --name-only -- src ggml tools common)
+    git stash push -q -m ab-local-change -- $(git diff --name-only -- src ggml tools common include)
     build
     run A$r
     git stash pop -q

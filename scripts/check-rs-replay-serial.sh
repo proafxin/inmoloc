@@ -6,7 +6,7 @@ set -u
 
 SRC=${SRC:-/home/masterkenway/Projects/llama.cpp}
 OUT=${OUT:-/home/masterkenway/Projects/citadel/data/model_baselines/replay_ab/cpu1}
-M=${M:-/models/Qwen3.8-27B-UD-IQ3_XXS.gguf}
+M=${M:-/models/${MODEL:-Qwen3.8-27B-AP-IQ4_XS.gguf}}
 MODELS=${MODELS:-/home/masterkenway/Projects/citadel/data/gguf_models}
 IMG=${IMG:-nvidia/cuda:13.3.0-devel-ubuntu24.04}
 N=${N:-64}

@@ -4623,6 +4623,43 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     return GGML_STATUS_SUCCESS;
 }
 
+// the streams of a high priority backend get the highest CUDA priority, so that the GPU schedules their kernels first
+// when other backends on the device (e.g. a media encoder) run at the same time; normal and low keep the default,
+// which is the lowest CUDA priority
+static void ggml_backend_cuda_set_priority(ggml_backend_t backend, enum ggml_backend_priority priority) {
+    ggml_backend_cuda_context * ctx = (ggml_backend_cuda_context *) backend->context;
+
+    ggml_cuda_set_device(ctx->device);
+
+    int least    = 0;
+    int greatest = 0;
+    CUDA_CHECK(cudaDeviceGetStreamPriorityRange(&least, &greatest));
+
+    const int stream_priority = priority == GGML_BACKEND_PRIORITY_HIGH ? greatest : least;
+    if (stream_priority == ctx->stream_priority) {
+        return;
+    }
+    ctx->stream_priority = stream_priority;
+
+    // a stream takes its priority when it is created: the streams created so far are replaced, and the cuBLAS handles
+    // bound to them follow
+    for (int d = 0; d < GGML_CUDA_MAX_DEVICES; ++d) {
+        for (int s = 0; s < GGML_CUDA_MAX_STREAMS; ++s) {
+            if (ctx->streams[d][s] == nullptr) {
+                continue;
+            }
+            ggml_cuda_set_device(d);
+            CUDA_CHECK(cudaStreamSynchronize(ctx->streams[d][s]));
+            CUDA_CHECK(cudaStreamDestroy(ctx->streams[d][s]));
+            CUDA_CHECK(cudaStreamCreateWithPriority(&ctx->streams[d][s], cudaStreamNonBlocking, stream_priority));
+            if (ctx->cublas_handles[d][s] != nullptr) {
+                CUBLAS_CHECK(cublasSetStream(ctx->cublas_handles[d][s], ctx->streams[d][s]));
+            }
+        }
+    }
+    ggml_cuda_set_device(ctx->device);
+}
+
 // the device memory a cuBLAS handle takes with its workspace, measured once per device on a handle created for it
 static size_t ggml_cuda_cublas_cost(int device) {
     static std::mutex mutex;
@@ -5976,6 +6013,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
     }
     if (strcmp(name, "ggml_backend_graph_scratch") == 0) {
         return (void *)ggml_backend_cuda_graph_scratch;
+    }
+    if (strcmp(name, "ggml_backend_set_priority") == 0) {
+        return (void *)ggml_backend_cuda_set_priority;
     }
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     if (strcmp(name, "ggml_backend_flash_attn_ext_kv_rows") == 0) {

@@ -17,7 +17,7 @@ OUT=${OUT:-$CITADEL/data/model_baselines/pool_growth}
 MODELS=$CITADEL/data/gguf_models
 IMG=nvidia/cuda:13.3.0-devel-ubuntu24.04
 
-COMMON="--model /models/Qwen3.8-27B-UD-IQ3_XXS.gguf --mmproj /models/mmproj-Qwen3.8-27B-BF16.gguf --image-min-tokens 1024
+COMMON="--model /models/${MODEL:-Qwen3.8-27B-AP-IQ4_XS.gguf} --mmproj /models/mmproj-Qwen3.8-27B-BF16.gguf --image-min-tokens 1024
         --chat-template-file /models/chat_template.jinja -ngl 999 --host 0.0.0.0 --port 8100
         --spec-type draft-mtp --spec-draft-n-max 2 --metrics --cache-type-k f16 --cache-type-v f16 --flash-attn on --alias lm
         --ctx-size 65536"

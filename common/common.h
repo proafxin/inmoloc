@@ -455,6 +455,7 @@ struct common_params {
     int32_t n_parallel            =     1; // number of parallel sequences to decode
 
     enum llama_rs_rollback_type rs_rollback = LLAMA_RS_ROLLBACK_SNAPSHOT; // how the recurrent state rolls back drafts
+    enum ggml_backend_priority backend_priority = GGML_BACKEND_PRIORITY_NORMAL; // of the contexts against other work on the devices
     int32_t n_sequences           =     1; // number of sequences to decode
     int32_t n_outputs_max         =     0; // max outputs in a batch (0 = n_batch)
     int32_t n_outputs_max_per_seq =     1; // max outputs per sequence

@@ -18,10 +18,16 @@
 #include "mtmd-helper.h"
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstddef>
 #include <cinttypes>
+#include <deque>
 #include <exception>
+#include <functional>
+#include <future>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <filesystem>
 #include <random>
 #include <utility>
@@ -310,6 +316,25 @@ struct server_slot {
     // time of the last generated token, 0 before the first one; kept across preemption so the resume gap counts as latency
     int64_t t_token_last_us = 0;
 
+    // media being encoded for this slot on the encoder thread (see server_media_encoder); the batch points at chunks of
+    // input_tokens(), so whatever frees or replaces those first calls encode_wait()
+    struct media_encode {
+        mtmd::batch_ptr      batch;
+        std::future<int32_t> res;
+        int64_t              t_us     = 0; // set by the encoder thread, read once res is ready
+        int32_t              n_chunks = 0;
+        size_t               n_tokens = 0;
+    };
+    std::unique_ptr<media_encode> encode;
+
+    // waits for the pending encode, if any, and drops it
+    void encode_wait() {
+        if (encode) {
+            encode->res.wait();
+            encode.reset();
+        }
+    }
+
     // tokens of the current media chunk already decoded into memory
     // the chunk is added to prompt.tokens only when it is complete, so these tokens are in memory but not in the prompt
     int32_t media_n_decoded = 0;
@@ -406,6 +431,9 @@ struct server_slot {
     int32_t n_gen_last = 0;
 
     void reset() {
+        // the pending encode points at chunks of the task, which goes below
+        encode_wait();
+
         SLT_DBG(*this, "%s", "\n");
 
         spec_is_replay = false;
@@ -918,6 +946,66 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
     return try_decode();
 }
 
+// runs the media encoder (e.g. a vision tower) on a thread of its own, one batch at a time and in the order submitted,
+// so that the server loop keeps decoding the other slots while a slot's media is encoded
+//   - the encoder uses its own backend context, so it runs next to the decodes of the loop
+//   - the loop waits for an encode only when no slot has other work
+struct server_media_encoder {
+    std::thread             thread;
+    std::mutex              mutex;
+    std::condition_variable cv;
+    std::deque<std::packaged_task<int32_t()>> jobs;
+    bool stop = false;
+
+    ~server_media_encoder() {
+        shutdown();
+    }
+
+    std::future<int32_t> submit(std::function<int32_t()> fn) {
+        std::packaged_task<int32_t()> job(std::move(fn));
+        std::future<int32_t> res = job.get_future();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (!thread.joinable()) {
+                stop   = false;
+                thread = std::thread([this]() { loop(); });
+            }
+            jobs.push_back(std::move(job));
+        }
+        cv.notify_one();
+        return res;
+    }
+
+    // runs the jobs left, then ends the thread
+    void shutdown() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stop = true;
+        }
+        cv.notify_one();
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
+private:
+    void loop() {
+        while (true) {
+            std::packaged_task<int32_t()> job;
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                cv.wait(lock, [this]() { return stop || !jobs.empty(); });
+                if (jobs.empty()) {
+                    return;
+                }
+                job = std::move(jobs.front());
+                jobs.pop_front();
+            }
+            job();
+        }
+    }
+};
+
 //
 // server_context_impl (private implementation)
 //
@@ -932,6 +1020,9 @@ public:
     llama_model * model_tgt = nullptr;
 
     mtmd_context * mctx = nullptr;
+    server_media_encoder media_encoder;
+    // media was decoded in the current iteration: progress even when the batch stays empty
+    bool media_progress = false;
     // note: video_params.ffmpeg_bin_dir points into params_base, which outlives this struct
     mtmd_helper_init_opt init_opt = mtmd_helper_init_opt_default();
     const llama_vocab * vocab = nullptr;
@@ -1032,6 +1123,12 @@ private:
     int64_t t_last_load_progress_ms = 0;
 
     void destroy() {
+        // the encodes in flight use mctx
+        for (auto & slot : slots) {
+            slot.encode_wait();
+        }
+        media_encoder.shutdown();
+
         spec.reset();
         spec_init.reset();
 
@@ -1185,6 +1282,12 @@ private:
                     }
                 }
             }
+        }
+
+        // the media encoder runs on its own thread next to the decodes (see server_media_encoder): the contexts that
+        // generate go first on the GPU, so that encoding an image does not stall the slots that are generating
+        if (has_mmproj) {
+            params_base.backend_priority = GGML_BACKEND_PRIORITY_HIGH;
         }
 
         // note: the draft / MTP context is fitted together with the target model, see common_fit_extra_model
@@ -2116,8 +2219,113 @@ private:
                slot.state == SLOT_STATE_GENERATING;
     }
 
+    //
+    // media encoding on the encoder thread (see server_media_encoder)
+    //
+
+    // 1 when the embeddings of the chunk at idx are in the slot's media batch, 0 while they are being encoded (the
+    // encode is submitted here if none is pending), -1 when the encode failed
+    int32_t media_ready(server_slot & slot, size_t idx, const mtmd_input_chunk * chunk) {
+        if (slot.encode && slot.encode->res.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            const int32_t res = slot.encode->res.get();
+            if (res != 0) {
+                SLT_ERR(slot, "failed to encode mtmd batch for chunk idx = %zu, res = %d\n", idx, res);
+                slot.encode.reset();
+                return -1;
+            }
+
+            metrics.t_mtmd_encode_us      += slot.encode->t_us;
+            metrics.n_mtmd_encoded_chunks += slot.encode->n_chunks;
+            metrics.n_mtmd_encoded_tokens += slot.encode->n_tokens;
+
+            slot.mbatch = std::move(slot.encode->batch);
+            slot.encode.reset();
+        }
+
+        if (slot.mbatch && mtmd_batch_get_output_embd(slot.mbatch.get(), chunk) != nullptr) {
+            return 1;
+        }
+
+        if (!slot.encode) {
+            media_encode_submit(slot, idx, chunk);
+        }
+
+        return 0;
+    }
+
+    // encodes the chunk at idx, and the media chunks after it that fit the same batch, on the encoder thread
+    void media_encode_submit(server_slot & slot, size_t idx, const mtmd_input_chunk * chunk) {
+        auto enc = std::make_unique<server_slot::media_encode>();
+
+        enc->batch.reset(mtmd_batch_init(mctx));
+        int32_t res = mtmd_batch_add_chunk(enc->batch.get(), chunk);
+        GGML_ASSERT(res == 0); // we should never have an empty batch
+
+        enc->n_chunks = 1;
+        enc->n_tokens = mtmd_input_chunk_get_n_tokens(chunk);
+
+        // try batching as much as possible
+        const auto & input_tokens = slot.input_tokens();
+        size_t idx_cur = idx;
+        while (res == 0) {
+            auto [next_chunk, next_idx] = input_tokens.find_next_media_chunk(idx_cur);
+            if (next_chunk == nullptr) {
+                break;
+            }
+            res = mtmd_batch_add_chunk(enc->batch.get(), next_chunk->get());
+            if (res == 0) {
+                enc->n_chunks++;
+                enc->n_tokens += mtmd_input_chunk_get_n_tokens(next_chunk->get());
+            }
+            idx_cur = next_idx;
+            // if res != 0, batch is full or chunk is not compatible -> this loop breaks
+        }
+
+        SLT_TRC(slot, "encoding mtmd batch from idx = %zu, n_chunks = %d, on the encoder thread\n", idx, enc->n_chunks);
+
+        mtmd_batch * batch = enc->batch.get();
+        int64_t    * t_us  = &enc->t_us;
+        enc->res = media_encoder.submit([batch, t_us]() {
+            const int64_t t_start_us = ggml_time_us();
+            const int32_t res = mtmd_batch_encode(batch);
+            *t_us = ggml_time_us() - t_start_us;
+            return res;
+        });
+
+        slot.encode = std::move(enc);
+    }
+
+    bool media_encode_pending() const {
+        for (const auto & slot : slots) {
+            if (slot.encode) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // blocks until one of the pending encodes is done
+    void media_encode_wait_any() {
+        while (true) {
+            for (auto & slot : slots) {
+                if (slot.encode && slot.encode->res.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                    return;
+                }
+            }
+            for (auto & slot : slots) {
+                if (slot.encode) {
+                    slot.encode->res.wait_for(std::chrono::milliseconds(5));
+                    break;
+                }
+            }
+        }
+    }
+
     void kv_preempt(server_slot & slot) {
         GGML_ASSERT(kv_can_preempt(slot));
+
+        // the pending encode points at chunks of the prompt being replaced below
+        slot.encode_wait();
 
         if (slot.state == SLOT_STATE_GENERATING) {
             GGML_ASSERT(!slot.resuming);
@@ -3648,6 +3856,7 @@ private:
         }
 
         const int64_t t_pre_start_us = ggml_time_us();
+        media_progress = false;
         try {
             scoped_timer t(t_pre_decode, n_pre_decode);
             pre_decode();
@@ -3663,6 +3872,17 @@ private:
         GGML_ASSERT(batch.slot_batched || batch.size() == 0);
 
         loop_t.t_pre_us += ggml_time_us() - t_pre_start_us;
+
+        // every slot with work waits for the media encoder: wait for an encode instead of spinning
+        // (the next iteration is already posted, it decodes the media)
+        if (batch.size() == 0 && !media_progress && media_encode_pending()) {
+            const int64_t t_wait_start_us = ggml_time_us();
+            queue_tasks.yield_to_queue([&]() {
+                media_encode_wait_any();
+            });
+            loop_t.t_media_us += ggml_time_us() - t_wait_start_us;
+            return;
+        }
 
         if (batch.slot_batched) {
             auto & slot_batched      = batch.slot_batched;
@@ -3954,11 +4174,13 @@ private:
             bool media_piece_decoded = false;
 
             // media chunks are split only while another slot generates, so that its tokens do not wait for a whole image
-            const bool any_generating = any_slot_generating();
+            // a slot that completes its prompt in this iteration generates from then on: the slots after it are held to
+            // the same limits, or its first token would wait for all their prompts
+            bool any_generating = any_slot_generating();
 
             // while slots generate, prompt tokens (text and media) per iteration are capped, so a long prompt does not
             // hold up their next token for a whole n_batch; see prompt_cap_tokens()
-            const int32_t n_prompt_cap = any_generating ? prompt_cap_tokens(n_ubatch, batch.size()) : 0;
+            int32_t n_prompt_cap = any_generating ? prompt_cap_tokens(n_ubatch, batch.size()) : 0;
             int32_t       n_prompt_cur = 0; // prompt tokens added in this iteration
 
             // the prompts with the fewest tokens left go first: the work is the same in any order, but a short prompt
@@ -4373,6 +4595,23 @@ private:
                         const int32_t n_chunk = (int32_t) mtmd_input_chunk_get_n_tokens(chunk.get());
                         const int32_t n_piece = slot.media_n_next(chunk.get(), n_ubatch, any_generating);
 
+                        // the media is encoded on the encoder thread: until it is, this slot steps aside and the
+                        // other slots keep decoding
+                        {
+                            const int32_t ready = media_ready(slot, cur_token_idx, chunk.get());
+                            if (ready < 0) {
+                                send_error(slot, "failed to encode mtmd chunk", ERROR_TYPE_SERVER);
+                                slot.release();
+                                return; // the slot is done, skip it entirely
+                            }
+                            if (ready == 0) {
+                                if (!has_mtmd) {
+                                    return; // nothing to add for this slot until its media is encoded
+                                }
+                                break;
+                            }
+                        }
+
                         // a piece of a split chunk: at most one per iteration over all slots, to bound the wait of the generating slots
                         if (n_piece < n_chunk && media_piece_decoded) {
                             has_mtmd = true;
@@ -4432,6 +4671,7 @@ private:
 
                         // decoding media is progress even when the text batch stays empty
                         n_empty_consecutive = 0;
+                        media_progress      = true;
 
                         slot.media_n_decoded += (int32_t) n_tokens_out;
 
@@ -4534,6 +4774,11 @@ private:
                     // entire prompt has been processed
                     if (slot.prompt.n_tokens() == slot.n_input_tokens()) {
                         slot.state = SLOT_STATE_DONE_PROMPT;
+
+                        if (!any_generating) {
+                            any_generating = true;
+                            n_prompt_cap   = prompt_cap_tokens(n_ubatch, batch.size());
+                        }
 
                         GGML_ASSERT(batch.size() > 0);
 
@@ -4787,6 +5032,7 @@ private:
                     SLT_INF(slot, "resumed after preemption, n_tokens = %d, n_gen = %d\n", slot.prompt.n_tokens(), (int) slot.stats.n_gen);
 
                     slot.resuming = false;
+                    slot.encode_wait();
                     slot.resume_tokens.clear();
                 }
 

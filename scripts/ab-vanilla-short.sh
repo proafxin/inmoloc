@@ -12,7 +12,7 @@ IMG_VANILLA=ghcr.io/ggml-org/llama.cpp:server-cuda
 LEVELS=${LEVELS:-"1 4 8"}
 ROUNDS=${ROUNDS:-2}
 
-COMMON="--model /models/Qwen3.8-27B-UD-IQ3_XXS.gguf --chat-template-file /models/chat_template.jinja
+COMMON="--model /models/${MODEL:-Qwen3.8-27B-AP-IQ4_XS.gguf} --chat-template-file /models/chat_template.jinja
         -ngl 999 --host 0.0.0.0 --port 8100 --spec-type draft-mtp --spec-draft-n-max 2 --metrics
         --cache-type-k f16 --cache-type-v f16 --flash-attn on --alias lm"
 

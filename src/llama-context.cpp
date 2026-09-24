@@ -354,6 +354,8 @@ llama_context::llama_context(
     LLAMA_LOG_INFO("%s: n_rs_seq              = %u\n",   __func__, cparams.n_rs_seq);
     LLAMA_LOG_INFO("%s: n_rs_cells            = %u\n",   __func__, cparams.n_rs_cells);
     LLAMA_LOG_INFO("%s: rs_rollback           = %s\n",   __func__, llama_rs_rollback_type_name(params.rs_rollback));
+    LLAMA_LOG_INFO("%s: backend_priority      = %s\n",   __func__,
+            params.backend_priority == GGML_BACKEND_PRIORITY_HIGH ? "high" : params.backend_priority == GGML_BACKEND_PRIORITY_LOW ? "low" : "normal");
     LLAMA_LOG_INFO("%s: n_outputs_max         = %u\n",   __func__, cparams.n_outputs_max);
     LLAMA_LOG_INFO("%s: n_outputs_max_per_seq = %u\n",   __func__, cparams.n_outputs_max_per_seq);
 
@@ -386,6 +388,18 @@ llama_context::llama_context(
                     throw std::runtime_error(format("failed to initialize %s backend", ggml_backend_dev_name(dev)));
                 }
                 backends.emplace_back(backend);
+            }
+        }
+
+        // the priority of the context's work, on the backends that support one
+        if (params.backend_priority != GGML_BACKEND_PRIORITY_NORMAL) {
+            for (auto & backend : backends) {
+                ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
+                ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
+                auto set_priority = reg ? (ggml_backend_set_priority_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_priority") : nullptr;
+                if (set_priority != nullptr) {
+                    set_priority(backend.get(), params.backend_priority);
+                }
             }
         }
 
@@ -3793,6 +3807,7 @@ llama_context_params llama_context_default_params() {
         /*.n_rs_seq                    =*/ 0,
         /*.n_rs_cells                  =*/ 0,
         /*.rs_rollback                 =*/ LLAMA_RS_ROLLBACK_SNAPSHOT,
+        /*.backend_priority            =*/ GGML_BACKEND_PRIORITY_NORMAL,
         /*.n_outputs_max               =*/ 0,
         /*.n_outputs_max_per_seq       =*/ 1,
         /*.n_threads                   =*/ GGML_DEFAULT_N_THREADS, // TODO: better default

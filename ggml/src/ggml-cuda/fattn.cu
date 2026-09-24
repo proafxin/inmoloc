@@ -561,8 +561,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         const bool head_ok = K->ne[0] == V->ne[0] &&
             (K->ne[0] == 64 || K->ne[0] == 80 || K->ne[0] == 96 || K->ne[0] == 112 || K->ne[0] == 128 || K->ne[0] == 256);
 
+        // f16 K/V are read as they are, the other types of GGML_CUDA_FA_QUANTS are converted as the rows are loaded
         if (dst->src[6] != nullptr || !GGML_CUDA_CC_IS_NVIDIA(cc) || !turing_mma_available(cc) || !head_ok ||
-                K->type != GGML_TYPE_F16 || V->type != GGML_TYPE_F16 || !mask || mask->ne[2] != 1 ||
+                !ggml_cuda_fattn_mma_kv_rows_types_ok(K->type, V->type, K->ne[0]) || !mask || mask->ne[2] != 1 ||
                 max_bias != 0.0f || logit_softcap != 0.0f || Q->ne[3] != 1) {
             return BEST_FATTN_KERNEL_NONE;
         }
@@ -726,8 +727,9 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
     switch (kernel) {
         case BEST_FATTN_KERNEL_TILE:
         case BEST_FATTN_KERNEL_MMA_F16:
-            need_f16_K = true;
-            need_f16_V = true;
+            // a list of K/V rows is converted by the kernel as it loads the rows, nothing up front
+            need_f16_K = dst->src[5] == nullptr || dst->src[6] != nullptr;
+            need_f16_V = dst->src[5] == nullptr || dst->src[6] != nullptr;
             break;
         case BEST_FATTN_KERNEL_VEC: {
             const bool f16_fallback = ggml_cuda_get_fattn_vec_case(Q->ne[0], K->type, V->type) == nullptr;

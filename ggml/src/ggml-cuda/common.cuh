@@ -1531,10 +1531,13 @@ struct ggml_backend_cuda_context {
 
     ~ggml_backend_cuda_context();
 
+    // CUDA priority of the streams, see ggml_backend_cuda_set_priority()
+    int stream_priority = 0;
+
     cudaStream_t stream(int device, int stream) {
         if (streams[device][stream] == nullptr) {
             ggml_cuda_set_device(device);
-            CUDA_CHECK(cudaStreamCreateWithFlags(&streams[device][stream], cudaStreamNonBlocking));
+            CUDA_CHECK(cudaStreamCreateWithPriority(&streams[device][stream], cudaStreamNonBlocking, stream_priority));
         }
         return streams[device][stream];
     }

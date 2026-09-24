@@ -223,6 +223,14 @@ extern "C" {
         const char * value;
     };
     typedef struct ggml_backend_feature * (*ggml_backend_get_features_t)(ggml_backend_reg_t reg);
+    // Priority of a backend's work against the work of other backends on the same device, e.g. a context that generates
+    // tokens against a media encoder running at the same time; only backends that can order work support it
+    enum ggml_backend_priority {
+        GGML_BACKEND_PRIORITY_LOW    = -1,
+        GGML_BACKEND_PRIORITY_NORMAL =  0,
+        GGML_BACKEND_PRIORITY_HIGH   =  1,
+    };
+    typedef void                         (*ggml_backend_set_priority_t)(ggml_backend_t backend, enum ggml_backend_priority priority);
     // The device memory a backend takes outside its buffers to compute a graph (e.g. scratch pools, library handles),
     // see ggml_backend_sched_reserve_scratch; with alloc the backend takes it now, otherwise it only measures it
     typedef size_t                       (*ggml_backend_graph_scratch_t)(ggml_backend_t backend, struct ggml_cgraph * graph, bool alloc);
