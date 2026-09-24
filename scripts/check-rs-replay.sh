@@ -25,7 +25,7 @@ serve() { # $1 = LLAMA_RS_REPLAY, rest = extra server args
         -v $SRC:/src -v $MODELS:/models:ro -e LD_LIBRARY_PATH=/src/build/bin $IMG /src/build/bin/llama-server \
         --model $M --chat-template-file /models/chat_template.jinja \
         --host 0.0.0.0 --port 8100 --spec-type draft-mtp --spec-draft-n-max 2 --metrics \
-        --cache-type-k f16 --cache-type-v f16 --flash-attn on --rs-rollback $(rb $replay) --alias lm -lv 5 "$@" >/dev/null
+        --cache-type-k ${KV:-q8_0} --cache-type-v ${KV:-q8_0} --flash-attn on --rs-rollback $(rb $replay) --alias lm -lv 5 "$@" >/dev/null
     until curl -sf localhost:8100/health >/dev/null || [ "$(docker inspect -f '{{.State.Running}}' lm)" != "true" ]; do sleep 1; done
 }
 

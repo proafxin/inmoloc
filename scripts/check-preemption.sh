@@ -22,7 +22,7 @@ RUNS=${RUNS:-"ref load toolong"}   # e.g. "load" to repeat only the load run aga
 
 COMMON="--model /models/${MODEL:-Qwen3.8-27B-AP-IQ4_XS.gguf} --mmproj /models/mmproj-Qwen3.8-27B-BF16.gguf --image-min-tokens 1024
         --chat-template-file /models/chat_template.jinja -ngl 999 --host 0.0.0.0 --port 8100
-        --spec-type draft-mtp --spec-draft-n-max 2 --metrics --cache-type-k f16 --cache-type-v f16 --flash-attn on --alias lm
+        --spec-type draft-mtp --spec-draft-n-max 2 --metrics --cache-type-k ${KV:-q8_0} --cache-type-v ${KV:-q8_0} --flash-attn on --alias lm
         --rs-rollback replay --cache-ram 0 -lv 4"
 
 mkdir -p $OUT

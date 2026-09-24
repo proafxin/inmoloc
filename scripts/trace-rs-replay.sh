@@ -24,7 +24,7 @@ docker run -d --name lm --gpus all -p 8100:8100 \
     --model $M --chat-template-file /models/chat_template.jinja -dev none -ngl 0 \
     --host 0.0.0.0 --port 8100 --ctx-size 2048 --parallel 1 \
     --spec-type draft-mtp --spec-draft-n-max 2 --metrics \
-    --cache-type-k f16 --cache-type-v f16 --flash-attn on --alias lm -lv 5 --rs-rollback replay >/dev/null
+    --cache-type-k ${KV:-q8_0} --cache-type-v ${KV:-q8_0} --flash-attn on --alias lm -lv 5 --rs-rollback replay >/dev/null
 
 until curl -sf localhost:8100/health >/dev/null || [ "$(docker inspect -f '{{.State.Running}}' lm)" != "true" ]; do sleep 1; done
 
