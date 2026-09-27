@@ -946,6 +946,79 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
     return try_decode();
 }
 
+// what a prompt token costs relative to a token at the start of a sequence: attending to the cells before it grows with
+// its position, so a long prompt deep in a sequence costs more per token than a short one
+//   - the time of every decode is fitted as t = c + a_p*n_p + b_p*s_p + a_g*n_g + b_g*s_g (n_p prompt tokens, s_p the sum
+//     of their positions, n_g and s_g the same for the tokens that are sampled, i.e. generation) by recursive least
+//     squares that slowly forgets, so it holds for any model, device and cache type and follows the load
+//   - generation has terms of its own: a generation batch is small and bound by reading the weights, its time per token
+//     says nothing about what depth costs a prompt token
+//   - the caller leaves out the decodes that share the device with work the fit cannot see (e.g. a media encode)
+//   - a prompt token at position p then weighs 1 + p*b_p/a_p; until the decodes cover enough positions, every token
+//     weighs 1
+struct server_prompt_cost {
+    static constexpr int N = 5;
+
+    double w[N]    = {}; // c [ms], a_p [ms/token], b_p [ms/(token*1e6 cells)], a_g, b_g
+    double P[N][N] = {};
+    int    n_update = 0;
+    double depth_min = -1.0; // mean position of the prompt batches seen, to know whether the fit has seen depth
+    double depth_max = -1.0;
+
+    server_prompt_cost() {
+        for (int i = 0; i < N; ++i) {
+            P[i][i] = 1e4;
+        }
+    }
+
+    void update(double n_prompt, double s_prompt, double n_gen, double s_gen, double t_ms) {
+        const double lambda = 0.999;
+        const double x[N] = {1.0, n_prompt, s_prompt/1e6, n_gen, s_gen/1e6};
+
+        double Px[N];
+        double denom = lambda;
+        double err   = t_ms;
+        for (int i = 0; i < N; ++i) {
+            Px[i] = 0.0;
+            for (int j = 0; j < N; ++j) {
+                Px[i] += P[i][j]*x[j];
+            }
+            denom += x[i]*Px[i];
+            err   -= w[i]*x[i];
+        }
+        for (int i = 0; i < N; ++i) {
+            w[i] += Px[i]/denom*err;
+        }
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < N; ++j) {
+                P[i][j] = std::min(1e8, (P[i][j] - Px[i]*Px[j]/denom)/lambda);
+            }
+        }
+        n_update++;
+
+        // prompt batches: a few prompt tokens are too few to tell the cost of depth
+        if (n_prompt >= 64) {
+            const double depth = s_prompt/n_prompt;
+            depth_min = depth_min < 0.0 ? depth : std::min(depth_min, depth);
+            depth_max = depth_max < 0.0 ? depth : std::max(depth_max, depth);
+        }
+    }
+
+    // the position at which a prompt token costs twice as much as one at the start, 0 while the fit cannot tell
+    double depth_twice() const {
+        if (n_update < 32 || depth_max - depth_min < 4096.0 || w[1] <= 0.0 || w[2] <= 0.0) {
+            return 0.0;
+        }
+        return std::max(1024.0, 1e6*w[1]/w[2]);
+    }
+
+    // the cost of n tokens from position p on, in tokens at the start of a sequence
+    double tokens(double n, double p) const {
+        const double d2 = depth_twice();
+        return d2 > 0.0 ? n*(1.0 + (p + 0.5*n)/d2) : n;
+    }
+};
+
 // runs the media encoder (e.g. a vision tower) on a thread of its own, one batch at a time and in the order submitted,
 // so that the server loop keeps decoding the other slots while a slot's media is encoded
 //   - the encoder uses its own backend context, so it runs next to the decodes of the loop
@@ -1021,6 +1094,7 @@ public:
 
     mtmd_context * mctx = nullptr;
     server_media_encoder media_encoder;
+    server_prompt_cost prompt_cost; // weighs the prompt tokens of an iteration against the cap, see prompt_cap_tokens()
     // media was decoded in the current iteration: progress even when the batch stays empty
     bool media_progress = false;
     // note: video_params.ffmpeg_bin_dir points into params_base, which outlives this struct
@@ -3779,10 +3853,12 @@ private:
         const int64_t t_slow_us = slow_loop_ms() * 1000;
         if (slow_loop_ms() > 0 && ((n_generating > 0 && t_iter_us >= t_slow_us) || loop_t.t_tasks_us >= t_slow_us)) {
             SRV_INF("slow iteration: %.0f ms = tasks %.0f ms (%d launches) + pre_decode %.0f ms (media %.0f ms / %d tokens) + decode %.0f ms + post_decode %.0f ms; "
-                    "batch = %d tokens, generating = %d, since previous iteration = %.0f ms\n",
+                    "batch = %d tokens, generating = %d, since previous iteration = %.0f ms, prompt token cost doubles at depth %.0f "
+                    "(fit: %.1f ms + %.3f ms/prompt token + %.3f ms/(prompt token*1e6 positions) + %.3f ms/generated token + %.3f ms/(generated token*1e6 positions))\n",
                     t_iter_us / 1e3, loop_t.t_tasks_us / 1e3, loop_t.n_launches, loop_t.t_pre_us / 1e3, loop_t.t_media_us / 1e3, loop_t.n_media,
                     loop_t.t_decode_us / 1e3, loop_t.t_post_us / 1e3, n_batch_tokens, n_generating,
-                    t_loop_end_us > 0 ? (t_now - t_loop_end_us) / 1e3 : 0.0);
+                    t_loop_end_us > 0 ? (t_now - t_loop_end_us) / 1e3 : 0.0, prompt_cost.depth_twice(),
+                    prompt_cost.w[0], prompt_cost.w[1], prompt_cost.w[2], prompt_cost.w[3], prompt_cost.w[4]);
         }
         loop_t = {};
         t_loop_end_us = t_now;
@@ -3906,6 +3982,11 @@ private:
         llama_batch batch_view;
         int32_t off_next = 0;
         int32_t n_batch = llama_n_batch(ctx_tgt);
+        int64_t t_view_start_us = 0;   // a decode and its sampling, where the loop waits for the device
+        double  n_view_prompt   = 0.0; // its prompt tokens and the sum of their positions
+        double  s_view_prompt   = 0.0;
+        double  s_view_gen      = 0.0; // the sum of the positions of its sampled tokens
+        bool    view_shared     = false; // a media encode ran next to it on the device
         for (int32_t off = 0; off < batch.size(); off = off_next) {
             const int32_t n_tokens = std::min(n_batch, batch.size() - off);
             try {
@@ -3913,6 +3994,19 @@ private:
                 // TODO @ngxson : maybe handle n_batch == 1 here instead of inside decode()
 
                 batch_view = batch.get_view(off, n_tokens);
+                t_view_start_us = ggml_time_us();
+                view_shared     = media_encode_pending();
+                n_view_prompt   = 0.0;
+                s_view_prompt   = 0.0;
+                s_view_gen      = 0.0;
+                for (int32_t i = 0; i < batch_view.n_tokens; ++i) {
+                    if (batch_view.logits[i]) {
+                        s_view_gen    += batch_view.pos[i];
+                    } else {
+                        n_view_prompt += 1.0;
+                        s_view_prompt += batch_view.pos[i];
+                    }
+                }
                 const int64_t t_decode_start_us = ggml_time_us();
                 bool ok = decode(n_batch, off, batch_view);
                 loop_t.t_decode_us += ggml_time_us() - t_decode_start_us;
@@ -3941,6 +4035,11 @@ private:
                 const int64_t t_post_start_us = ggml_time_us();
                 post_decode(n_tokens, off, batch_view);
                 loop_t.t_post_us += ggml_time_us() - t_post_start_us;
+
+                if (!view_shared && !media_encode_pending()) {
+                    prompt_cost.update(n_view_prompt, s_view_prompt, n_tokens - n_view_prompt, s_view_gen,
+                            (ggml_time_us() - t_view_start_us)/1e3);
+                }
             } catch (const std::exception & e) {
                 SRV_ERR("post_decode() failed: %s\n", e.what());
                 abort_all_slots("post_decode() failed: " + std::string(e.what()));
@@ -3952,6 +4051,8 @@ private:
     }
 
     // prompt tokens per iteration while slots generate, 0 = no cap
+    // the tokens are weighed by their cost (server_prompt_cost): a token deep in a long prompt counts for more than one,
+    // so that the iteration takes about as long whatever the depth of the prompts next to the generating slots
     // default: fill up one ubatch next to the generation tokens, so that the iteration is a single ubatch
     // (at least a quarter ubatch of prompt, so a prompt still makes progress next to many generating slots)
     // --prompt-cap: 0 disables the cap, a positive value sets it
@@ -4181,7 +4282,7 @@ private:
             // while slots generate, prompt tokens (text and media) per iteration are capped, so a long prompt does not
             // hold up their next token for a whole n_batch; see prompt_cap_tokens()
             int32_t n_prompt_cap = any_generating ? prompt_cap_tokens(n_ubatch, batch.size()) : 0;
-            int32_t       n_prompt_cur = 0; // prompt tokens added in this iteration
+            double        n_prompt_cur = 0; // prompt tokens added in this iteration, weighed by their cost, see server_prompt_cost
 
             // the prompts with the fewest tokens left go first: the work is the same in any order, but a short prompt
             // behind a long one would wait for all of it before its first token, while a long one behind short ones
@@ -4619,7 +4720,8 @@ private:
                         }
 
                         // a piece that does not fit the prompt cap waits for the next iteration, unless it is the first prompt input
-                        if (n_prompt_cap > 0 && n_prompt_cur > 0 && n_prompt_cur + n_piece > n_prompt_cap) {
+                        if (n_prompt_cap > 0 && n_prompt_cur > 0 &&
+                                n_prompt_cur + prompt_cost.tokens(n_piece, slot.prompt.tokens.pos_next() + slot.media_n_decoded) > n_prompt_cap) {
                             has_mtmd = true;
                             break;
                         }
@@ -4663,7 +4765,7 @@ private:
                         metrics.n_mtmd_decoded_tokens  += n_tokens_out;
 
                         metrics_queue_prompt(n_tokens_out);
-                        n_prompt_cur += (int32_t) n_tokens_out;
+                        n_prompt_cur += prompt_cost.tokens(n_tokens_out, slot.prompt.tokens.pos_next() + slot.media_n_decoded);
                         slot.stats.n_prompt_processed += n_tokens_out;
                         slot.stats.update_prompt_last();
 
@@ -4716,8 +4818,8 @@ private:
                             /* pos       = */ slot.prompt.tokens.pos_next(),
                             /* output    = */ slot.need_embd(),
                             /* is_prompt = */ true);
+                        n_prompt_cur += prompt_cost.tokens(1, slot.prompt.tokens.pos_next());
                         slot.prompt.tokens.push_back(cur_tok);
-                        n_prompt_cur++;
 
                         if (kv_budget_prompt > 0) {
                             kv_budget_prompt--;

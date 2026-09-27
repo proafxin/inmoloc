@@ -173,6 +173,11 @@ public:
 
     attn_stats get_attn_stats() const;
 
+    // the graph that knows how each token attends counts the read cells itself (llm_graph_input_attn_kv), the mask
+    // and index fills then count only the ranges and owned cells
+    void attn_read_counted_by_graph() const;
+    void add_attn_read(uint64_t n_cells) const;
+
     bool get_has_shift() const;
 
     ggml_type type_k() const;
@@ -208,13 +213,16 @@ public:
     // returns an empty list when no run is worth gathering, i.e. the whole ubatch attends the full view
     // in_place: the runs read their cells where they are (ggml_flash_attn_ext_set_kv_rows) instead of copying them,
     // so their size is not bounded by the copy
-    std::vector<llama_kv_attn_run> get_attn_runs(const llama_ubatch & ubatch, uint32_t n_kv, bool in_place) const;
+    // rest_indexed: the tokens outside the gather runs read their cells through indexed ranges (cparams.kv_idx_rest),
+    // so the list is not empty without gather runs: a ubatch of generation steps is one run that is not gathered
+    std::vector<llama_kv_attn_run> get_attn_runs(const llama_ubatch & ubatch, uint32_t n_kv, bool in_place, bool rest_indexed) const;
 
     // the largest runs a ubatch of this size can have, for the graphs reserved at startup
-    std::vector<llama_kv_attn_run> get_attn_runs_reserve(const llama_ubatch & ubatch, uint32_t n_kv, bool in_place) const;
+    std::vector<llama_kv_attn_run> get_attn_runs_reserve(const llama_ubatch & ubatch, uint32_t n_kv, bool in_place, bool rest_indexed) const;
 
-    // whether this cache can gather the cells of a sequence at all
-    bool attn_gather_ok() const;
+    // whether this cache can gather the cells of a sequence at all; a copy needs F16/F32 cells, the backend checked the
+    // types of the cells read in place when it enabled cparams.kv_rows
+    bool attn_gather_ok(bool in_place) const;
 
     // copies of the cells listed in idxs (I32 [n_idx]): [n_embd_head, n_head_kv, n_idx, 1], F32
     ggml_tensor * get_k_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs, const slot_info & sinfo) const;
@@ -348,6 +356,7 @@ private:
 
     // updated while filling KQ masks, see get_attn_stats()
     mutable attn_stats stats_attn;
+    mutable bool       stats_read_by_graph = false;
 
     // see fill_kq_mask_scratch()
     mutable std::vector<ggml_fp16_t> kq_mask_scratch;
@@ -462,7 +471,7 @@ public:
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
 
     // see llama_kv_cache::get_attn_runs()
-    std::vector<llama_kv_attn_run> get_attn_runs(const llama_ubatch & ubatch, bool in_place) const;
+    std::vector<llama_kv_attn_run> get_attn_runs(const llama_ubatch & ubatch, bool in_place, bool rest_indexed) const;
 
     ggml_tensor * get_k_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs) const;
     ggml_tensor * get_v_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs) const;
@@ -476,6 +485,10 @@ public:
     bool kv_idx_supported() const;
     void get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const;
     void set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const;
+
+    // see llama_kv_cache::attn_read_counted_by_graph()
+    void attn_read_counted_by_graph() const;
+    void add_attn_read(uint64_t n_cells) const;
 
     // views of all cells of the cache, for indexed attention
     ggml_tensor * get_k_all(ggml_context * ctx, int32_t il) const;

@@ -35,7 +35,7 @@ serve() { # $1 = vanilla|fork
         # one pool of 65536 tokens, as many requests at once as fit (at most 32)
         docker run -d --name lm --gpus all --ulimit core=0 -p 8100:8100 -v $SRC:/src -v $MODELS:/models:ro \
             -e LD_LIBRARY_PATH=/src/build/bin $IMG_FORK /src/build/bin/llama-server \
-            $COMMON --ctx-size 65536 --parallel 32 --rs-rollback replay --cache-ram 4096 -lv 4 >/dev/null
+            $COMMON --ctx-size ${CTX:-131072} --parallel 32 --vram-budget ${BUDGET:-22G} --rs-rollback replay --cache-ram 4096 -lv 4 >/dev/null
     fi
     until curl -sf localhost:8100/health >/dev/null || [ "$(docker inspect -f '{{.State.Running}}' lm)" != "true" ]; do sleep 1; done
     if [ "$(docker inspect -f '{{.State.Running}}' lm)" != "true" ]; then

@@ -42,7 +42,8 @@ common_params_fit_status common_fit_params(
 //     cparams->n_ctx tokens in a unified cache, the per-sequence memory (e.g. recurrent state, sliding-window cache)
 //     and the worst-case compute buffers of the main and the extra context fit in budget - budget_used
 //   - the memory is measured by creating the contexts without allocating them, so it holds for any architecture
-//   - budget 0 means the free memory of the devices; a model on the host alone is left as is
+//   - budget 0 means the free memory of the devices, and a larger budget than that is lowered to it; a model on the
+//     host alone is left as is
 //   - budget_used is memory the caller takes from the same budget, e.g. a vision encoder
 //   - returns false when not even one sequence fits, leaving cparams unchanged
 //   - predicted and free_before, when given, report the memory the configuration is projected to use and the free

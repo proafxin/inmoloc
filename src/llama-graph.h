@@ -38,16 +38,19 @@ class llama_memory_hybrid_iswa_context;
 //   gather == true : only the cells that carry seq_id, copied into a compact tensor of n_idx cells (padded)
 // attention reads a mask entry for every cell it is given, so a sequence scattered over a large pool is cheaper
 // to attend after copying its own cells, as long as that copy is small next to the view it replaces
+//   indexed == true (gather == false): each token reads the cells of its sequence through indexed ranges
+//   (cparams.kv_idx_rest), for generation steps: a few tokens of a sequence, each reading its cells once
 struct llama_kv_attn_run {
     uint32_t     t0;
     uint32_t     t1;
     bool         gather;
     llama_seq_id seq_id;
     uint32_t     n_idx;
+    bool         indexed = false;
 
     // the graph depends on the shape of a run only, seq_id just selects which cells fill its inputs
     bool same_shape(const llama_kv_attn_run & other) const {
-        return t0 == other.t0 && t1 == other.t1 && gather == other.gather && n_idx == other.n_idx;
+        return t0 == other.t0 && t1 == other.t1 && gather == other.gather && n_idx == other.n_idx && indexed == other.indexed;
     }
 };
 

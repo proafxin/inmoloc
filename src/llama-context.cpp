@@ -258,6 +258,7 @@ llama_context::llama_context(
     cparams.auto_kv_idx = true;
     cparams.kv_rows     = false;
     cparams.auto_kv_rows = true;
+    cparams.kv_idx_rest = false;
 
     cparams.fused_gdn_ar = true;
     cparams.fused_gdn_ch = true;
@@ -625,10 +626,22 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
 
     // the gather runs of a unified KV cache read the cells of their sequence in place instead of copying them, when
     // every device that runs attention supports it, see ggml_flash_attn_ext_set_kv_rows()
+    //   - with indexed attention too, the prompts keep their gather runs, whose many tokens share one list of cells,
+    //     and the other tokens (generation) read the cells of their sequence through indexed ranges
+    //   - with indexed attention alone, every token reads through indexed ranges
     if (cparams.auto_kv_rows) {
-        cparams.kv_rows = cparams.flash_attn && cparams.kv_unified && !cparams.kv_idx && !model.hparams.use_alibi;
+        const bool kv_idx = cparams.kv_idx;
+        cparams.kv_idx = false; // the gather runs are built without it
+
+        cparams.kv_rows = cparams.flash_attn && cparams.kv_unified && !model.hparams.use_alibi;
         if (cparams.kv_rows) {
             resolve(llm_fused_op_flash_attn_kv_rows_probe, cparams.kv_rows);
+        }
+
+        cparams.kv_idx_rest = kv_idx &&  cparams.kv_rows;
+        cparams.kv_idx      = kv_idx && !cparams.kv_rows;
+        if (cparams.kv_idx_rest) {
+            LLAMA_LOG_INFO("%s: generation reads the KV cells of its sequence through indexed ranges\n", func);
         }
         cparams.auto_kv_rows = false;
     }
@@ -761,6 +774,25 @@ void llama_context::sched_reserve() {
                 model.hparams.no_alloc, model.hparams.no_alloc ? sizes.data() : nullptr);
         if (!gf) {
             throw std::runtime_error("failed to allocate compute buffers for speculative steps");
+        }
+
+        reserve_scratch();
+
+        for (size_t i = 0; i < sizes.size(); ++i) {
+            backend_buf_exp_size[i] = std::max(backend_buf_exp_size[i], sizes[i]);
+        }
+    }
+
+    // a prompt of one sequence read in place attends as one run of the whole ubatch, while the pp graph above has the
+    // most runs, each of the fewest tokens (see llama_kv_cache::get_attn_runs_reserve()): the one run takes the most
+    // scratch of the attention
+    if (cparams.kv_rows && n_seqs > 1) {
+        std::vector<size_t> sizes(backend_buf_exp_size.size(), 0);
+
+        auto * gf = graph_reserve(n_tokens, 1, n_outputs_pp, mctx.get(),
+                model.hparams.no_alloc, model.hparams.no_alloc ? sizes.data() : nullptr);
+        if (!gf) {
+            throw std::runtime_error("failed to allocate compute buffers for the prompt of one sequence");
         }
 
         reserve_scratch();

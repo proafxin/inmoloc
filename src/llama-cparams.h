@@ -45,6 +45,8 @@ struct llama_cparams {
     bool auto_kv_idx;
     bool kv_rows;            // gather runs read their cells in place, see ggml_flash_attn_ext_set_kv_rows()
     bool auto_kv_rows;
+    bool kv_idx_rest;        // with kv_rows: the tokens outside the gather runs (e.g. generation) read the cells of their
+                             // sequence through indexed ranges instead of all the cells of the cache with a mask
     bool fused_gdn_ar;       // use fused gated delta net (autoregressive)
     bool fused_gdn_ch;       // use fused gated delta net (chunked)
     bool auto_fgdn;

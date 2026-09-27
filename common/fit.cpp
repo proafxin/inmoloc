@@ -1220,6 +1220,13 @@ bool common_budget_params(
 
     if (budget_auto) {
         LOG_INF("%s: memory budget: %.0f MiB, the free device memory\n", __func__, budget/MiB);
+    } else if (llama_model_n_devices(model) > 0 && budget > free_sum) {
+        // a budget can only be used as far as the devices have it free: other processes may hold the rest
+        LOG_WRN("%s: memory budget: %.0f MiB, the free device memory, less than the --vram-budget of %.0f MiB\n",
+                __func__, free_sum/MiB, budget/MiB);
+        budget = free_sum;
+    } else {
+        LOG_INF("%s: memory budget: %.0f MiB, the --vram-budget\n", __func__, budget/MiB);
     }
 
     const size_t avail = budget > budget_used ? budget - budget_used : 0;
@@ -1277,12 +1284,6 @@ bool common_budget_params(
         LOG_INF("%s: each sequence adds %.0f MiB (its state and compute), the context of %u tokens takes %.0f MiB\n",
                 __func__, (double) (m_best.total() - m_one.total())/(lo - 1)/MiB, cparams->n_ctx,
                 (m_one.main.context + m_one.dft.context)/MiB);
-    }
-
-    // a given budget can only be used if the devices have that much free
-    if (!budget_auto && m_best.total() + budget_used > free_sum) {
-        LOG_WRN("%s: the devices have only %.0f MiB free, less than the %.0f MiB this configuration needs\n",
-                __func__, free_sum/MiB, (m_best.total() + budget_used)/MiB);
     }
 
     // the dry runs hold no memory once their contexts are freed, but what they loaded stays: kernels loaded on first

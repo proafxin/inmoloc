@@ -549,8 +549,22 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
     const int cc = ggml_cuda_info().devices[device].cc;
 
-    // index lists: per query ranges (ggml_flash_attn_ext_set_kv_idx) are not implemented, a list of K/V rows shared by
-    // all queries (ggml_flash_attn_ext_set_kv_rows) is read by the sparse gather of the tensor core kernel
+    // index lists: per query ranges (ggml_flash_attn_ext_set_kv_idx) are read by the vector kernel, one query per block;
+    // a list of K/V rows shared by all queries (ggml_flash_attn_ext_set_kv_rows) by the sparse gather of the tensor core kernel
+    if (dst->src[6] != nullptr) {
+#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+        return BEST_FATTN_KERNEL_NONE;
+#else
+        float logit_softcap = 0.0f;
+        memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
+
+        if (mask || max_bias != 0.0f || logit_softcap != 0.0f || Q->ne[3] != 1 || K->ne[0] != V->ne[0] ||
+                ggml_cuda_get_fattn_vec_case(K->ne[0], K->type, V->type) == nullptr) {
+            return BEST_FATTN_KERNEL_NONE;
+        }
+        return BEST_FATTN_KERNEL_VEC;
+#endif // defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+    }
     if (dst->src[5] != nullptr) {
 #if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
         return BEST_FATTN_KERNEL_NONE;

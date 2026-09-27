@@ -6022,6 +6022,10 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
         // feature flag, see ggml_flash_attn_ext_set_kv_rows(); supports_op still checks the device and the shapes
         return (void *)ggml_flash_attn_ext_set_kv_rows;
     }
+    if (strcmp(name, "ggml_backend_flash_attn_ext_kv_idx") == 0) {
+        // feature flag, see ggml_flash_attn_ext_set_kv_idx(); supports_op still checks the types and the shapes
+        return (void *)ggml_flash_attn_ext_set_kv_idx;
+    }
 #endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     return nullptr;
 }

@@ -9,8 +9,9 @@ OUT=${OUT:-/home/masterkenway/Projects/citadel/data/model_baselines/ab_local}
 MODELS=${MODELS:-/home/masterkenway/Projects/citadel/data/gguf_models}
 IMG=${IMG:-nvidia/cuda:13.3.0-devel-ubuntu24.04}
 ROUNDS=${ROUNDS:-2}
-WORKLOAD=${WORKLOAD:-bench}   # bench = long documents next to short prompts, ocr = the citadel OCR battery
-BUDGET=${BUDGET:-}            # e.g. 18G, to give both sides the same concurrency
+WORKLOAD=${WORKLOAD:-bench}   # bench = long documents next to short prompts (BENCH_ARGS), ocr = the citadel OCR battery
+BUDGET=${BUDGET:-22G}         # the device memory the server may use (the GPU also drives the desktop)
+CTX=${CTX:-131072}           # tokens of the KV cache shared by all requests
 
 mkdir -p $OUT
 cd $SRC
@@ -35,7 +36,7 @@ run() { # $1 = label
         --model /models/${MODEL:-Qwen3.8-27B-AP-IQ4_XS.gguf} --mmproj /models/mmproj-Qwen3.8-27B-BF16.gguf --image-min-tokens 1024 \
         --chat-template-file /models/chat_template.jinja -ngl 999 --host 0.0.0.0 --port 8100 \
         --spec-type draft-mtp --spec-draft-n-max 2 --metrics --cache-type-k ${KV:-q8_0} --cache-type-v ${KV:-q8_0} --flash-attn on \
-        --alias lm --ctx-size 65536 --parallel 32 --rs-rollback replay --cache-ram 4096 -lv 4 \
+        --alias lm --ctx-size $CTX --parallel 32 --rs-rollback replay --cache-ram 4096 -lv 4 \
         ${BUDGET:+--vram-budget $BUDGET} ${WORKLOAD:+$([ $WORKLOAD = ocr ] && echo "--mmproj /models/mmproj-Qwen3.8-27B-BF16.gguf --image-min-tokens 1024")} >/dev/null
     until curl -sf localhost:8100/health >/dev/null || [ "$(docker inspect -f '{{.State.Running}}' lm)" != "true" ]; do sleep 1; done
     echo "--- $1"
@@ -48,7 +49,7 @@ run() { # $1 = label
         echo "OCR battery wall: $(echo "$(date +%s.%N) - $t0" | bc) s, $(ls $OUT/ocr-$1/ocr 2>/dev/null | wc -l) documents"
         curl -s localhost:8100/metrics | grep -vE '^#' | grep -E 'mtmd_(encode|decode)_seconds_total'
     else
-        python3 $SRC/scripts/bench-server-concurrency.py --levels 16 --long 2 --long-tokens 20000 --max-tokens 256 | tail -1
+        python3 $SRC/scripts/bench-server-concurrency.py ${BENCH_ARGS:---levels 16 --long 2 --long-tokens 20000 --max-tokens 256} | tail -1
     fi
     docker logs lm > $OUT/server-$1.log 2>&1
     docker rm -f lm >/dev/null 2>&1

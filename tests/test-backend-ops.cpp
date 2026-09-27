@@ -7846,6 +7846,88 @@ struct test_flash_attn_ext_kv_rows : public test_case {
     }
 };
 
+// GGML_OP_FLASH_ATTN_EXT with per query ranges of per group lists of K/V rows, see ggml_flash_attn_ext_set_kv_idx()
+struct test_flash_attn_ext_kv_idx : public test_case {
+    const int64_t hs;      // head size of K and V
+    const int64_t nh;      // K/V heads
+    const int64_t nr;      // query heads per K/V head
+    const int64_t kv;      // K/V rows in the cache
+    const int64_t n_group; // groups (sequences), their rows interleaved in the cache
+    const int64_t nb;      // queries
+    const ggml_type type_K;
+    const ggml_type type_V;
+
+    std::string vars() override {
+        return VARS_TO_STR8(hs, nh, nr, kv, n_group, nb, type_K, type_V);
+    }
+
+    double max_nmse_err() override {
+        return 5e-4;
+    }
+
+    test_flash_attn_ext_kv_idx(int64_t hs = 128, int64_t nh = 4, int64_t nr = 4, int64_t kv = 1024, int64_t n_group = 3, int64_t nb = 8,
+            ggml_type type_K = GGML_TYPE_F16, ggml_type type_V = GGML_TYPE_F16)
+        : hs(hs), nh(nh), nr(nr), kv(kv), n_group(n_group), nb(nb), type_K(type_K), type_V(type_V) {}
+
+    int64_t n_idx() const {
+        return (kv + n_group - 1)/n_group;
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hs, nb, nh*nr, 1);
+        ggml_set_name(q, "q");
+
+        ggml_tensor * k = ggml_new_tensor_4d(ctx, type_K, hs, kv, nh, 1);
+        ggml_set_name(k, "k");
+
+        ggml_tensor * v = ggml_new_tensor_4d(ctx, type_V, hs, kv, nh, 1);
+        ggml_set_name(v, "v");
+
+        ggml_tensor * kv_idx = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_idx(), n_group);
+        ggml_set_name(kv_idx, "kv_idx");
+
+        ggml_tensor * q_rng = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 3, nb);
+        ggml_set_name(q_rng, "q_rng");
+
+        ggml_tensor * out = ggml_flash_attn_ext(ctx, q, k, v, nullptr, 1.0f/sqrtf(hs), 0.0f, 0.0f);
+        ggml_flash_attn_ext_set_kv_idx(out, kv_idx, q_rng);
+        ggml_prec_set_acc(out, GGML_PREC_F32);
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (strcmp(t->name, "kv_idx") == 0) {
+                // group g holds the rows g, g + n_group, ...; the entries past its rows are left 0
+                std::vector<int32_t> data(n_idx()*n_group, 0);
+                for (int64_t r = 0; r < kv; ++r) {
+                    data[(r % n_group)*n_idx() + r/n_group] = (int32_t) r;
+                }
+                ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(int32_t));
+            } else if (strcmp(t->name, "q_rng") == 0) {
+                // query j: group j % n_group, a causal prefix of its rows growing with j, some ranges not from 0 and
+                // one empty range
+                std::vector<int32_t> data(3*nb);
+                for (int64_t j = 0; j < nb; ++j) {
+                    const int64_t g     = j % n_group;
+                    const int64_t n_g   = (kv - g + n_group - 1)/n_group;
+                    const int64_t hi    = std::max<int64_t>(1, n_g*(j + 1)/nb);
+                    const int64_t lo    = j % 5 == 3 ? hi/3 : 0;
+                    const bool    empty = nb > 4 && j == nb - 2;
+                    data[3*j + 0] = (int32_t) g;
+                    data[3*j + 1] = (int32_t) (empty ? hi : lo);
+                    data[3*j + 2] = (int32_t) hi;
+                }
+                ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(int32_t));
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+};
+
 // GGML_OP_CROSS_ENTROPY_LOSS
 struct test_cross_entropy_loss : public test_case {
     const ggml_type type;
@@ -10743,6 +10825,19 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
     test_cases.emplace_back(new test_flash_attn_ext_kv_rows(256, 4, 6, 8192, 3072, 128));
+    // per query ranges of per group lists of K/V rows
+    for (auto [type_K, type_V] : std::vector<std::pair<ggml_type, ggml_type>>{
+            {GGML_TYPE_F16, GGML_TYPE_F16}, {GGML_TYPE_Q8_0, GGML_TYPE_Q8_0}, {GGML_TYPE_Q4_0, GGML_TYPE_Q4_0}}) {
+        for (int64_t hs : { 64, 128, 256 }) {
+            for (int64_t nr : { 1, 6 }) {
+                for (int64_t nb : { 1, 3, 33 }) {
+                    test_cases.emplace_back(new test_flash_attn_ext_kv_idx(hs, 4, nr, 1024, 3, nb, type_K, type_V));
+                }
+            }
+        }
+        test_cases.emplace_back(new test_flash_attn_ext_kv_idx(256, 4, 6, 16384, 11, 33, type_K, type_V));
+    }
+
     // the other K/V cache types, converted to f16 as the rows are loaded
     for (auto [type_K, type_V] : std::vector<std::pair<ggml_type, ggml_type>>{
             {GGML_TYPE_BF16, GGML_TYPE_BF16}, {GGML_TYPE_Q8_0, GGML_TYPE_Q8_0}, {GGML_TYPE_Q4_0, GGML_TYPE_Q4_0},
@@ -11267,6 +11362,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
 
     // Qwen3-VL-8B https://github.com/ggml-org/llama.cpp/issues/17012
     test_cases.emplace_back(new test_flash_attn_ext(72, 72, 16, {1, 1}, 5776, 5776, false, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+
+    // K/V rows read in place through a list (ggml_flash_attn_ext_set_kv_rows): a long document deep in a 65536 cell
+    // cache, 24 query heads over 4 K/V heads of 256, a prompt batch and a few decode steps, per cache type
+    for (ggml_type type_KV : {GGML_TYPE_F16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
+        for (int64_t nb : {512, 4}) {
+            test_cases.emplace_back(new test_flash_attn_ext_kv_rows(256, 4, 6, 65536, 56320, nb, type_KV, type_KV));
+            // the same cells read as a contiguous view with a mask, for comparison
+            test_cases.emplace_back(new test_flash_attn_ext(256, 256, 4, {6, 1}, 56320, nb, true, false, 0, 0, GGML_PREC_F32, type_KV, type_KV));
+        }
+    }
 
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 8, {8, 1}, 7680, 1, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
     test_cases.emplace_back(new test_flash_attn_ext(64, 64, 8, {8, 1}, 7680, 4, true, false, 0, 0, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));

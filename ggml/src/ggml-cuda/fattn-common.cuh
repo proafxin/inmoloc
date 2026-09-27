@@ -969,7 +969,8 @@ static __global__ void flash_attn_combine_results(
         VKQ_denominator += KQ_max_scale * meta[l].y;
     }
 
-    dst[tid] = VKQ_numerator / VKQ_denominator;
+    // no weights at all (an empty range of indexed attention): 0 as on the CPU
+    dst[tid] = VKQ_denominator > 0.0f ? VKQ_numerator / VKQ_denominator : 0.0f;
 }
 
 template <int DV, int ncols1, int ncols2>
@@ -1097,6 +1098,12 @@ void launch_fattn(
     const ggml_tensor * kv_rows = KQV->src[5] != nullptr && KQV->src[6] == nullptr ? KQV->src[5] : nullptr;
     GGML_ASSERT(!kv_rows || use_sparse);
 
+    // indexed attention (ggml_flash_attn_ext_set_kv_idx): the kernel reads the per query ranges in place of the mask,
+    // the lists in place of KV_max and their length in place of ne31, see flash_attn_ext_vec
+    const ggml_tensor * kv_idx = KQV->src[6] != nullptr ? KQV->src[5] : nullptr;
+    const ggml_tensor * q_rng  = KQV->src[6];
+    GGML_ASSERT(!kv_idx || (!use_sparse && !mask && Q->ne[3] == 1));
+
     const int32_t n_kv_max = kv_rows ? int32_t(kv_rows->ne[0]) : use_sparse ? ggml_get_op_params_i32(KQV, 4) : 0;
     if (use_sparse && !kv_rows) {
         GGML_ASSERT(mask != nullptr);
@@ -1133,7 +1140,7 @@ void launch_fattn(
     GGML_ASSERT(max_blocks_per_sm > 0);
     int parallel_blocks = max_blocks_per_sm;
 
-    const int64_t n_kv = use_sparse ? n_kv_max : K->ne[1];
+    const int64_t n_kv = kv_idx ? kv_idx->ne[0] : use_sparse ? n_kv_max : K->ne[1];
     const int ntiles_KV = (n_kv + nbatch_fa - 1) / nbatch_fa; // Max. number of parallel blocks limited by KV cache length.
 
     dim3 blocks_num;
@@ -1244,15 +1251,15 @@ void launch_fattn(
         (const char *) Q->data,
         K_data,
         V_data,
-        mask ? ((const char *) mask->data) : nullptr,
+        q_rng ? (const char *) q_rng->data : mask ? ((const char *) mask->data) : nullptr,
         sinks ? ((const char *) sinks->data) : nullptr,
-        kv_rows ? (const int *) kv_rows->data : KV_max.ptr,
+        kv_idx ? (const int *) kv_idx->data : kv_rows ? (const int *) kv_rows->data : KV_max.ptr,
         !stream_k && parallel_blocks > 1 ? dst_tmp.ptr : (float *) KQV->data, dst_tmp_meta.ptr,
         scale, max_bias, m0, m1, n_head_log2, logit_softcap,
         Q->ne[0], ne01,     Q->ne[2], Q->ne[3], Q->nb[1], Q->nb[2], Q->nb[3],
         K->ne[0], n_kv, K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,
-        mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
+        kv_idx ? kv_idx->ne[0] : mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
         mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0
     );
     CUDA_CHECK(cudaGetLastError());

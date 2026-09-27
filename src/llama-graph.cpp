@@ -62,7 +62,46 @@ static std::vector<llama_kv_attn_run> build_attn_runs(
         return {};
     }
 
-    return mctx->get_attn_runs(ubatch, cparams.kv_rows);
+    return mctx->get_attn_runs(ubatch, cparams.kv_rows, cparams.kv_idx_rest && mctx->kv_idx_supported());
+}
+
+// the cells attention reads for a ubatch (see llama_kv_cache::get_attn_stats()): the listed cells of a gather run, the
+// range of each token read through indexed attention, else all n_kv cells for each token
+static uint64_t attn_cells_read(
+        const std::vector<llama_kv_attn_run> & runs,
+        const llama_cparams & cparams,
+        const ggml_tensor * q_rng,
+        uint32_t n_kv,
+        uint32_t n_tokens) {
+    const int32_t * rng = q_rng && q_rng->buffer ? (const int32_t *) q_rng->data : nullptr;
+
+    const auto indexed = [rng](uint32_t t0, uint32_t t1) {
+        uint64_t n = 0;
+        for (uint32_t t = t0; t < t1; ++t) {
+            n += rng[3*t + 2] - rng[3*t + 1];
+        }
+        return n;
+    };
+
+    if (cparams.kv_idx && rng) {
+        return indexed(0, n_tokens);
+    }
+    if (runs.empty()) {
+        return uint64_t(n_tokens)*n_kv;
+    }
+
+    uint64_t n = 0;
+    for (const auto & run : runs) {
+        const uint32_t n_run = run.t1 - run.t0;
+        if (run.gather) {
+            n += uint64_t(n_run)*run.n_idx;
+        } else if (run.indexed && rng) {
+            n += indexed(run.t0, run.t1);
+        } else {
+            n += uint64_t(n_run)*n_kv;
+        }
+    }
+    return n;
 }
 
 // a graph can be reused when the new runs have the same shapes; the reused input then takes the new runs,
@@ -586,6 +625,8 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
     mctx->set_input_k_idxs(self_k_idxs, ubatch);
     mctx->set_input_v_idxs(self_v_idxs, ubatch);
 
+    mctx->attn_read_counted_by_graph();
+
     // the mask is left unallocated when the graph only stores K/V without attending
     // (e.g. DFlash's KV-injection pass), or when every attention run is gathered
     const ggml_fp16_t * full_mask = nullptr;
@@ -600,6 +641,11 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
 
     if (self_kv_idx && self_kv_idx->buffer) {
         mctx->set_input_kv_idx(self_kv_idx, self_q_rng, ubatch, cparams.causal_attn);
+    }
+
+    // a graph that only stores K/V attends nothing
+    if ((self_kq_mask && self_kq_mask->buffer) || (self_kv_idx && self_kv_idx->buffer)) {
+        mctx->add_attn_read(attn_cells_read(attn_runs, cparams, self_q_rng, mctx->get_n_kv(), ubatch->n_tokens));
     }
 
     // the masks of the gather runs are taken from the full mask
@@ -1228,6 +1274,8 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
     mctx->get_attn()->set_input_k_idxs(inp_attn->self_k_idxs, ubatch);
     mctx->get_attn()->set_input_v_idxs(inp_attn->self_v_idxs, ubatch);
 
+    mctx->get_attn()->attn_read_counted_by_graph();
+
     // the full mask is left unallocated when every attention run is gathered, or with indexed attention
     const ggml_fp16_t * full_mask = nullptr;
 
@@ -1241,6 +1289,11 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
 
     if (inp_attn->self_kv_idx && inp_attn->self_kv_idx->buffer) {
         mctx->get_attn()->set_input_kv_idx(inp_attn->self_kv_idx, inp_attn->self_q_rng, ubatch, cparams.causal_attn);
+    }
+
+    if (inp_attn->self_kq_mask->buffer || (inp_attn->self_kv_idx && inp_attn->self_kv_idx->buffer)) {
+        mctx->get_attn()->add_attn_read(attn_cells_read(inp_attn->attn_runs, cparams, inp_attn->self_q_rng,
+                mctx->get_attn()->get_n_kv(), ubatch->n_tokens));
     }
 
     // the masks of the gather runs are taken from the full mask
@@ -2961,7 +3014,8 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
         inp->self_kq_mask_cnv = inp->self_kq_mask;
     }
 
-    if (cparams.kv_idx && cparams.flash_attn && mctx_cur->kv_idx_supported()) {
+    // the lists of indexed attention, for all tokens (kv_idx) or those outside the gather runs (kv_idx_rest)
+    if ((cparams.kv_idx || cparams.kv_idx_rest) && cparams.flash_attn && mctx_cur->kv_idx_supported()) {
         uint32_t n_idx   = 0;
         uint32_t n_group = 0;
         mctx_cur->get_kv_idx_shape(ubatch, n_idx, n_group);
@@ -3065,7 +3119,7 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * cur = nullptr;
 
-    if (inp->self_kv_idx && kq_b == nullptr) {
+    if (cparams.kv_idx && inp->self_kv_idx && kq_b == nullptr) {
         // indexed attention: views of all cells, each token reads the cells of its sequence
         ggml_tensor * k = mctx_cur->get_k_all(ctx0, il);
         ggml_tensor * v = mctx_cur->get_v_all(ctx0, il);
@@ -3096,6 +3150,19 @@ ggml_tensor * llm_graph_context::build_attn(
             ggml_tensor * v    = nullptr;
             ggml_tensor * mask = nullptr;
             ggml_tensor * rows = nullptr; // the cells of a run read in place
+
+            // the tokens outside the gather runs (e.g. generation) read the cells of their sequence through indexed
+            // ranges, rather than all the cells of the cache with a mask
+            if (run.indexed && inp->self_kv_idx) {
+                ggml_tensor * q_rng = ggml_view_2d(ctx0, inp->self_q_rng, inp->self_q_rng->ne[0], n_run,
+                        inp->self_q_rng->nb[1], run.t0*inp->self_q_rng->nb[1]);
+
+                ggml_tensor * out = build_attn_mha(q, mctx_cur->get_k_all(ctx0, il), mctx_cur->get_v_all(ctx0, il),
+                        nullptr, nullptr, sinks, v_mla, 0, kq_scale, il, inp->self_kv_idx, q_rng);
+
+                cur = cur ? ggml_concat(ctx0, cur, out, 1) : out;
+                continue;
+            }
 
             if (run.gather && !cparams.kv_rows) {
                 k    = mctx_cur->get_k_rows(ctx0, il, inp->attn_run_idxs[r]);

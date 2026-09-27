@@ -16,7 +16,10 @@ static constexpr __device__ int ggml_cuda_fattn_vec_get_nthreads_device() {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wpass-failed"
 #endif // __clang__
-template<int D, int ncols, ggml_type type_K, ggml_type type_V, bool use_logit_softcap> // D == head size
+// use_kv_idx: indexed attention (ggml_flash_attn_ext_set_kv_idx), each query attends to the rows kv_idx[lo..hi) of its
+// group; there is no mask, so the launcher passes the per query (group, lo, hi) in place of the mask, the lists in place
+// of KV_max and their length (kv_idx->ne[0]) in place of ne31
+template<int D, int ncols, ggml_type type_K, ggml_type type_V, bool use_logit_softcap, bool use_kv_idx = false> // D == head size
 __launch_bounds__(ggml_cuda_fattn_vec_get_nthreads_device(), 1)
 static __global__ void flash_attn_ext_vec(
         const char * Q_ptr,
@@ -45,9 +48,10 @@ static __global__ void flash_attn_ext_vec(
     const char * GGML_CUDA_RESTRICT Q        = Q_ptr;
     const char * GGML_CUDA_RESTRICT K        = K_ptr;
     const char * GGML_CUDA_RESTRICT V        = V_ptr;
-    const char * GGML_CUDA_RESTRICT mask     = mask_ptr;
+    const char * GGML_CUDA_RESTRICT mask     = use_kv_idx ? nullptr : mask_ptr;
     const char * GGML_CUDA_RESTRICT sinks    = sinks_ptr;
     const int  * GGML_CUDA_RESTRICT KV_max   = KV_max_ptr;
+    static_assert(!use_kv_idx || ncols == 1, "indexed attention takes one query per block");
     float      * GGML_CUDA_RESTRICT dst      = dst_ptr;
     float2     * GGML_CUDA_RESTRICT dst_meta = dst_meta_ptr;
 
@@ -247,13 +251,28 @@ static __global__ void flash_attn_ext_vec(
 #endif // V_DOT2_F32_F16_AVAILABLE
     }
 
-    const int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
-    K     += blockIdx.y*nthreads * nb11;
-    V     += blockIdx.y*nthreads * nb21;
+    // indexed attention reads the rows through the list of the query, the K/V pointers stay at the first row
+    const int32_t * kv_list = nullptr;
+    int k_VKQ_max;
+    if constexpr (use_kv_idx) {
+        const int32_t * rng = (const int32_t *) mask_ptr + 3*ic0;
+        kv_list   = KV_max + int64_t(rng[0])*ne31 + rng[1];
+        k_VKQ_max = rng[2] - rng[1];
+    } else {
+        k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
+    }
+    const char * K_row0 = K;
+    const char * V_row0 = V;
+    // the row of entry i of the list, entry 0 (read, then discarded) past its end
+    auto kv_row = [&] __device__ (const int i) -> int64_t {
+        return kv_list[i < k_VKQ_max ? i : 0];
+    };
+    K     += use_kv_idx ? 0 : blockIdx.y*nthreads * nb11;
+    V     += use_kv_idx ? 0 : blockIdx.y*nthreads * nb21;
     maskh += blockIdx.y*nthreads;
     for (int k_VKQ_0 = blockIdx.y*nthreads; k_VKQ_0 < k_VKQ_max; k_VKQ_0 += gridDim.y*nthreads,
              // Increment pointers after each loop:
-             K += gridDim.y*nthreads*nb11, V += gridDim.y*nthreads*nb21, maskh += gridDim.y*nthreads) {
+             K += use_kv_idx ? 0 : gridDim.y*nthreads*nb11, V += use_kv_idx ? 0 : gridDim.y*nthreads*nb21, maskh += gridDim.y*nthreads) {
 
         // Calculate KQ tile and keep track of new maximum KQ values:
         float KQ_reg[ncols]; // KQ in registers.
@@ -268,13 +287,19 @@ static __global__ void flash_attn_ext_vec(
         for (int i_KQ_0 = 0; i_KQ_0 < nthreads_KQ; ++i_KQ_0) {
             const int i_KQ = threadIdx.y*WARP_SIZE + (nthreads_KQ == WARP_SIZE ? 0 : (threadIdx.x & ~(nthreads_KQ-1))) + i_KQ_0;
 
+            const char * K_i = use_kv_idx ? K_row0 + kv_row(k_VKQ_0 + i_KQ)*nb11 : K + i_KQ*nb11;
+
 #pragma unroll
             for (int j = 0; j < ncols; ++j) {
-                float sum = vec_dot_KQ(K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j]);
+                float sum = vec_dot_KQ(K_i, Q_reg[j], Q_i32[j], Q_ds[j]);
                 sum = warp_reduce_sum<nthreads_KQ>(sum);
 
                 if (use_logit_softcap) {
                     sum = logit_softcap*tanhf(sum);
+                }
+
+                if (use_kv_idx && k_VKQ_0 + i_KQ >= k_VKQ_max) {
+                    sum = -INFINITY; // past the end of the list
                 }
 
                 if (mask && (ncols == 1 || ic0 + j < int(ne01.z))) {
@@ -334,14 +359,14 @@ static __global__ void flash_attn_ext_vec(
                 half2 tmp[V_rows_per_thread/2];
                 if constexpr (type_V == GGML_TYPE_BF16) {
                     float2 tmp_f[V_rows_per_thread/2];
-                    dequantize_V(V + k*nb21, tmp_f,
+                    dequantize_V((use_kv_idx ? V_row0 + kv_row(k_VKQ_0 + k)*nb21 : V + k*nb21), tmp_f,
                         2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread);
 #pragma unroll
                     for (int i_VKQ_1 = 0; i_VKQ_1 < V_rows_per_thread/2; ++i_VKQ_1) {
                         tmp[i_VKQ_1] = __float22half2_rn(tmp_f[i_VKQ_1]);
                     }
                 } else {
-                    dequantize_V(V + k*nb21, tmp,
+                    dequantize_V((use_kv_idx ? V_row0 + kv_row(k_VKQ_0 + k)*nb21 : V + k*nb21), tmp,
                         2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread);
                 }
 #pragma unroll
@@ -361,7 +386,7 @@ static __global__ void flash_attn_ext_vec(
 #pragma unroll
             for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
                 float2 tmp[V_rows_per_thread/2];
-                dequantize_V(V + k*nb21, tmp,
+                dequantize_V((use_kv_idx ? V_row0 + kv_row(k_VKQ_0 + k)*nb21 : V + k*nb21), tmp,
                     2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread);
 #pragma unroll
                 for (int i_VKQ_1 = 0; i_VKQ_1 < V_rows_per_thread/2; ++i_VKQ_1) {
@@ -496,7 +521,8 @@ static __global__ void flash_attn_ext_vec(
                     }
                 }
                 if (gridDim.y == 1) {
-                    dst_val /= KQ_sum[j_VKQ];
+                    // an empty range of indexed attention has no weights, its output is 0 as on the CPU
+                    dst_val = KQ_sum[j_VKQ] > 0.0f ? dst_val/KQ_sum[j_VKQ] : 0.0f;
                 }
                 dst[(((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i0 + tid] = dst_val;
             }
@@ -528,13 +554,13 @@ static __global__ void flash_attn_ext_vec(
 #pragma clang diagnostic pop
 #endif // __clang__
 
-template <int D, int cols_per_block, ggml_type type_K, ggml_type type_V, bool use_logit_softcap>
+template <int D, int cols_per_block, ggml_type type_K, ggml_type type_V, bool use_logit_softcap, bool use_kv_idx = false>
 void ggml_cuda_flash_attn_ext_vec_case_impl(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
 
     const int nthreads = ggml_cuda_fattn_vec_get_nthreads_host(cc);
     const int nwarps   = nthreads / WARP_SIZE;
-    fattn_kernel_t fattn_kernel = flash_attn_ext_vec<D, cols_per_block, type_K, type_V, use_logit_softcap>;
+    fattn_kernel_t fattn_kernel = flash_attn_ext_vec<D, cols_per_block, type_K, type_V, use_logit_softcap, use_kv_idx>;
     const bool need_f16_K = type_K == GGML_TYPE_F16;
     const bool need_f16_V = type_V == GGML_TYPE_F16;
     constexpr size_t nbytes_shared = 0;
@@ -548,6 +574,13 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
 
     float logit_softcap;
     memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
+
+    // indexed attention: one query per block, each with its own list (see ggml_flash_attn_ext_set_kv_idx)
+    if (KQV->src[6] != nullptr) {
+        GGML_ASSERT(logit_softcap == 0.0f);
+        ggml_cuda_flash_attn_ext_vec_case_impl<D, 1, type_K, type_V, false, true>(ctx, dst);
+        return;
+    }
 
     if (Q->ne[1] == 1) {
         constexpr int cols_per_block = 1;

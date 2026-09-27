@@ -1212,6 +1212,14 @@ llama_kv_cache::attn_stats llama_kv_cache::get_attn_stats() const {
     return stats_attn;
 }
 
+void llama_kv_cache::attn_read_counted_by_graph() const {
+    stats_read_by_graph = true;
+}
+
+void llama_kv_cache::add_attn_read(uint64_t n_cells) const {
+    stats_attn.read += n_cells;
+}
+
 void llama_kv_cache::get_usage(uint32_t & n_used, uint32_t & n_span) const {
     n_used = 0;
     n_span = 0;
@@ -1339,29 +1347,33 @@ static constexpr uint32_t attn_gather_max_cells = 16384;
 // and copying the cells every step costs more than attending the full view
 static constexpr uint32_t attn_gather_min_tokens = 32;
 
-// each gather run adds a copy and an attention op per layer, this bounds the graph size
+// each gather run adds a copy (unless read in place) and an attention op per layer, this bounds the graph size and the
+// compute buffer: the outputs of the runs are joined in token order, more runs take more memory
 static constexpr uint32_t attn_gather_max_runs = 4;
 
-bool llama_kv_cache::attn_gather_ok() const {
-    const bool type_ok = [](ggml_type t) { return t == GGML_TYPE_F16 || t == GGML_TYPE_F32; }(type_k()) &&
-                         [](ggml_type t) { return t == GGML_TYPE_F16 || t == GGML_TYPE_F32; }(type_v());
+bool llama_kv_cache::attn_gather_ok(bool in_place) const {
+    const bool type_ok = in_place ||
+                         ([](ggml_type t) { return t == GGML_TYPE_F16 || t == GGML_TYPE_F32; }(type_k()) &&
+                          [](ggml_type t) { return t == GGML_TYPE_F16 || t == GGML_TYPE_F32; }(type_v()));
 
     return n_stream == 1 && !v_trans && swa_type == LLAMA_SWA_TYPE_NONE && type_ok;
 }
 
-std::vector<llama_kv_attn_run> llama_kv_cache::get_attn_runs(const llama_ubatch & ubatch, uint32_t n_kv, bool in_place) const {
+std::vector<llama_kv_attn_run> llama_kv_cache::get_attn_runs(const llama_ubatch & ubatch, uint32_t n_kv, bool in_place, bool rest_indexed) const {
     const uint32_t max_cells  = in_place ? UINT32_MAX : attn_gather_max_cells;
     const uint32_t min_tokens = attn_gather_min_tokens;
     const uint32_t max_runs   = attn_gather_max_runs;
 
-    if (!attn_gather_ok()) {
+    if (!attn_gather_ok(in_place)) {
         return {};
     }
 
     const auto & cells = v_cells[0];
 
-    std::vector<llama_kv_attn_run> res;
+    // the runs of the sequences, in token order
+    std::vector<llama_kv_attn_run> seqs;
     uint32_t n_gather = 0;
+    bool     any_full = false; // a prompt that is not gathered
 
     for (uint32_t t0 = 0; t0 < ubatch.n_tokens;) {
         const bool single = ubatch.n_seq_id[t0] == 1;
@@ -1377,27 +1389,63 @@ std::vector<llama_kv_attn_run> llama_kv_cache::get_attn_runs(const llama_ubatch 
         if (single && t1 - t0 >= min_tokens && n_gather < max_runs) {
             const uint32_t n_idx = GGML_PAD(cells.seq_n_cells(seq_id), 256);
 
-            if (n_idx > 0 && n_idx <= max_cells && 2*n_idx <= n_kv) {
+            // a copy pays off when it is small next to the full view; read in place, the cells of the sequence are
+            // never more than the view, and the list of them is read as fast as the view
+            if (n_idx > 0 && n_idx <= max_cells && (in_place || 2*n_idx <= n_kv)) {
                 run.gather = true;
                 run.n_idx  = n_idx;
                 n_gather++;
             }
         }
 
-        // merge neighboring full runs, they share the full view
-        if (!run.gather && !res.empty() && !res.back().gather) {
-            res.back().t1 = t1;
-        } else {
-            if (!run.gather) {
-                run.seq_id = -1;
-            }
-            res.push_back(run);
+        // the generation steps of a sequence read its cells through indexed ranges; a prompt that is not gathered
+        // reads the full view: indexed attention takes one token at a time, it would read the cells again for each
+        if (!run.gather) {
+            run.indexed = rest_indexed && single && t1 - t0 < min_tokens;
+            any_full   |= !run.indexed;
         }
+
+        seqs.push_back(run);
 
         t0 = t1;
     }
 
-    if (n_gather == 0) {
+    // with a prompt that is not gathered in the ubatch (more prompts than max_runs), all the runs that are not gathered
+    // read the full view, so that the full runs and the indexed runs do not alternate: at most max_runs gather runs
+    // and the full runs between them, which is what the graph size and the compute buffers are reserved for
+    std::vector<llama_kv_attn_run> res;
+    uint32_t n_indexed = 0;
+
+    for (auto run : seqs) {
+        if (!run.gather) {
+            run.indexed = run.indexed && !any_full;
+            run.seq_id  = -1;
+            n_indexed  += run.indexed;
+        }
+
+        // merge neighboring runs that are not gathered, they share the view
+        if (!run.gather && !res.empty() && !res.back().gather) {
+            res.back().t1 = run.t1;
+        } else {
+            res.push_back(run);
+        }
+    }
+
+    // read in place, a full run reads all the cells of the view through the list of them: the same cells as the view,
+    // without the F16 copy of a quantized view that the attention of a view may take (e.g. CUDA, 2 bytes per element
+    // of the K and V views in the compute buffer); so the view is never attended in place mode
+    if (in_place) {
+        for (auto & run : res) {
+            if (!run.gather && !run.indexed) {
+                run.gather = true;
+                run.seq_id = -1;
+                run.n_idx  = GGML_PAD(n_kv, 256);
+            }
+        }
+        return res;
+    }
+
+    if (n_gather == 0 && n_indexed == 0) {
         return {};
     }
 
@@ -1407,16 +1455,37 @@ std::vector<llama_kv_attn_run> llama_kv_cache::get_attn_runs(const llama_ubatch 
 // the largest gather runs a ubatch of this size can have, for the compute buffers reserved at startup: the most runs,
 // each copying the most cells, over the fewest tokens each, and one full run over the rest of the tokens, which needs
 // the full mask too; without this the buffers grow when the first prompts that gather arrive
-std::vector<llama_kv_attn_run> llama_kv_cache::get_attn_runs_reserve(const llama_ubatch & ubatch, uint32_t n_kv, bool in_place) const {
-    if (!attn_gather_ok()) {
+// with rest_indexed, the rest is split into a full run and an indexed run, since a ubatch has either, and both are sized
+std::vector<llama_kv_attn_run> llama_kv_cache::get_attn_runs_reserve(const llama_ubatch & ubatch, uint32_t n_kv, bool in_place, bool rest_indexed) const {
+    if (!attn_gather_ok(in_place)) {
         return {};
     }
 
-    const uint32_t n_idx  = std::min(in_place ? UINT32_MAX : attn_gather_max_cells, n_kv/2/256*256);
+    // read in place, a run is gathered up to all the cells of the view, and a full run reads all of them through a
+    // list of them (see get_attn_runs())
+    const uint32_t n_idx  = in_place ? GGML_PAD(n_kv, 256) : std::min(attn_gather_max_cells, n_kv/2/256*256);
     const uint32_t n_runs = std::min(attn_gather_max_runs, ubatch.n_tokens/attn_gather_min_tokens);
 
+    // a full run over [t0, t1)
+    const auto full = [&](uint32_t t0, uint32_t t1) -> llama_kv_attn_run {
+        return in_place ? llama_kv_attn_run{ t0, t1, true, -1, n_idx } : llama_kv_attn_run{ t0, t1, false, -1, 0 };
+    };
+
     if (n_idx == 0 || n_runs == 0) {
+        // a ubatch too small to gather is generation, read through indexed ranges as in get_attn_runs()
+        if (rest_indexed) {
+            return { { 0, ubatch.n_tokens, false, -1, 0, true } };
+        }
+        if (in_place && n_idx > 0) {
+            return { full(0, ubatch.n_tokens) };
+        }
         return {};
+    }
+
+    // the tokens of one sequence read in place are one run, as large as the ubatch: its attention takes the most
+    // scratch (e.g. the partial results of the CUDA kernels grow with the tokens of the run)
+    if (in_place && ubatch.n_seqs_unq == 1) {
+        return { { 0, ubatch.n_tokens, true, 0, n_idx } };
     }
 
     std::vector<llama_kv_attn_run> res;
@@ -1424,8 +1493,20 @@ std::vector<llama_kv_attn_run> llama_kv_cache::get_attn_runs_reserve(const llama
         const uint32_t t0 = r*attn_gather_min_tokens;
         res.push_back({ t0, t0 + attn_gather_min_tokens, true, 0, n_idx }); // the seq only selects the cells of the inputs
     }
-    if (n_runs*attn_gather_min_tokens < ubatch.n_tokens) {
-        res.push_back({ n_runs*attn_gather_min_tokens, ubatch.n_tokens, false, -1, 0 });
+    const uint32_t t_rest = n_runs*attn_gather_min_tokens;
+    if (t_rest < ubatch.n_tokens) {
+        // the indexed run takes the generation steps of a sequence at most, fewer than attn_gather_min_tokens
+        const uint32_t n_rest = ubatch.n_tokens - t_rest;
+        const uint32_t n_ind  = rest_indexed ? std::min(n_rest/2, attn_gather_min_tokens - 1) : 0;
+
+        if (n_ind > 0) {
+            res.push_back(full(t_rest, ubatch.n_tokens - n_ind));
+            res.push_back({ ubatch.n_tokens - n_ind, ubatch.n_tokens, false, -1, 0, true });
+        } else if (rest_indexed) {
+            res.push_back({ t_rest, ubatch.n_tokens, false, -1, 0, true });
+        } else {
+            res.push_back(full(t_rest, ubatch.n_tokens));
+        }
     }
 
     return res;
@@ -1463,14 +1544,23 @@ void llama_kv_cache::set_input_attn_run(ggml_tensor * idxs, ggml_tensor * mask, 
 
     GGML_ASSERT(idxs->ne[0] == n_idx);
 
-    std::vector<uint32_t> seq_cells;
-    v_cells[0].seq_cells(run.seq_id, seq_cells);
-
-    GGML_ASSERT((int64_t) seq_cells.size() <= n_idx);
-
     // without a mask of its own the run reads its cells in place, with the full mask, and a padding entry of -1 is
     // left out (see ggml_flash_attn_ext_set_kv_rows); a copied run points its padding at a valid cell and masks it
     const bool in_place = mask == nullptr;
+
+    // a run of no sequence in particular (seq_id < 0) reads all the cells of the view in place, see get_attn_runs()
+    std::vector<uint32_t> seq_cells;
+    if (run.seq_id < 0) {
+        GGML_ASSERT(in_place);
+        seq_cells.resize(n_kv);
+        for (uint32_t c = 0; c < (uint32_t) n_kv; ++c) {
+            seq_cells[c] = c;
+        }
+    } else {
+        v_cells[0].seq_cells(run.seq_id, seq_cells);
+    }
+
+    GGML_ASSERT((int64_t) seq_cells.size() <= n_idx);
 
     for (const uint32_t cell : seq_cells) {
         GGML_ASSERT(cell < n_kv); // inside the view the run attends
@@ -2003,7 +2093,9 @@ void llama_kv_cache::fill_kq_mask(ggml_type type, void * data, int64_t n_kv, int
                 it = seq_cost.emplace(seq_id, std::make_pair(range, owned)).first;
             }
 
-            stats_attn.read  += n_kv;
+            if (!stats_read_by_graph) {
+                stats_attn.read += n_kv;
+            }
             stats_attn.range += it->second.first;
             stats_attn.owned += it->second.second;
         }
@@ -2178,7 +2270,9 @@ void llama_kv_cache::set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng,
         rng[3*i + 1] = lo;
         rng[3*i + 2] = hi;
 
-        stats_attn.read  += hi - lo;
+        if (!stats_read_by_graph) {
+            stats_attn.read += hi - lo;
+        }
         stats_attn.range += n;
         stats_attn.owned += n;
     }
@@ -3157,9 +3251,9 @@ ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il) cons
     return kv->get_v(ctx, il, n_kv, sinfos[i_cur]);
 }
 
-std::vector<llama_kv_attn_run> llama_kv_cache_context::get_attn_runs(const llama_ubatch & ubatch, bool in_place) const {
+std::vector<llama_kv_attn_run> llama_kv_cache_context::get_attn_runs(const llama_ubatch & ubatch, bool in_place, bool rest_indexed) const {
     // the context of the whole cache only builds the graphs reserved at startup, which must cover the largest runs
-    return is_full ? kv->get_attn_runs_reserve(ubatch, n_kv, in_place) : kv->get_attn_runs(ubatch, n_kv, in_place);
+    return is_full ? kv->get_attn_runs_reserve(ubatch, n_kv, in_place, rest_indexed) : kv->get_attn_runs(ubatch, n_kv, in_place, rest_indexed);
 }
 
 ggml_tensor * llama_kv_cache_context::get_k_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs) const {
@@ -3184,10 +3278,24 @@ bool llama_kv_cache_context::kv_idx_supported() const {
 
 void llama_kv_cache_context::get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const {
     kv->get_kv_idx_shape(ubatch, n_idx, n_group);
+
+    // a reserve has no cells yet: its lists take the whole cache, the most a sequence can hold, so that the input
+    // buffers do not grow once the sequences do
+    if (is_full) {
+        n_idx = kv->get_size();
+    }
 }
 
 void llama_kv_cache_context::set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const {
     kv->set_input_kv_idx(kv_idx, q_rng, ubatch, causal_attn);
+}
+
+void llama_kv_cache_context::attn_read_counted_by_graph() const {
+    kv->attn_read_counted_by_graph();
+}
+
+void llama_kv_cache_context::add_attn_read(uint64_t n_cells) const {
+    kv->add_attn_read(n_cells);
 }
 
 ggml_tensor * llama_kv_cache_context::get_k_all(ggml_context * ctx, int32_t il) const {

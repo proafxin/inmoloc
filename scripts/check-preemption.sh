@@ -17,7 +17,7 @@ OUT=${OUT:-$CITADEL/data/model_baselines/preemption}
 MODELS=$CITADEL/data/gguf_models
 IMG=nvidia/cuda:13.3.0-devel-ubuntu24.04
 MAX_PAGES=${MAX_PAGES:-10}   # pages per PDF
-BUDGET=${BUDGET:-}           # e.g. 21G: on a GPU that also drives a desktop, the device memory the server may use
+BUDGET=${BUDGET:-22G}        # the device memory the server may use (the GPU also drives the desktop)
 RUNS=${RUNS:-"ref load toolong"}   # e.g. "load" to repeat only the load run against an earlier ref
 
 COMMON="--model /models/${MODEL:-Qwen3.8-27B-AP-IQ4_XS.gguf} --mmproj /models/mmproj-Qwen3.8-27B-BF16.gguf --image-min-tokens 1024
