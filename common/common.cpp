@@ -2289,6 +2289,22 @@ bool common_prompt_batch_decode(
     return true;
 }
 
+uint8_t * common_state_buffer::alloc(size_t n_new) {
+    if (!buf || buf.use_count() > 1 || cap < n_new) {
+        buf.reset(new uint8_t[n_new]); // default-initialized: the state overwrites every byte
+        cap = n_new;
+    }
+    n = n_new;
+
+    return buf.get();
+}
+
+void common_state_buffer::clear() {
+    buf.reset();
+    n   = 0;
+    cap = 0;
+}
+
 size_t common_prompt_checkpoint::size() const {
     return data_tgt.size() + data_dft.size() + data_spec.size();
 }
@@ -2327,9 +2343,7 @@ void common_prompt_checkpoint::update_tgt(
 
     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
 
-    data_tgt.resize(ckpt_size);
-
-    const size_t n = llama_state_seq_get_data_ext(ctx, data_tgt.data(), ckpt_size, seq_id, flags);
+    const size_t n = llama_state_seq_get_data_ext(ctx, data_tgt.alloc(ckpt_size), ckpt_size, seq_id, flags);
     if (n != ckpt_size) {
         GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", ckpt_size, n);
     }
@@ -2345,9 +2359,7 @@ void common_prompt_checkpoint::update_dft(
 
     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
 
-    data_dft.resize(ckpt_size);
-
-    const size_t n = llama_state_seq_get_data_ext(ctx, data_dft.data(), ckpt_size, seq_id, flags);
+    const size_t n = llama_state_seq_get_data_ext(ctx, data_dft.alloc(ckpt_size), ckpt_size, seq_id, flags);
     if (n != ckpt_size) {
         GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", ckpt_size, n);
     }

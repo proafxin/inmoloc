@@ -601,11 +601,12 @@ struct server_prompt {
 };
 
 struct server_prompt_data {
-    std::vector<uint8_t> main;
-    std::vector<uint8_t> drft;
+    common_state_buffer main;
+    common_state_buffer drft;
 
+    // the memory held, a buffer reused for a smaller state keeps its size
     size_t size() const {
-        return main.size() + drft.size();
+        return main.capacity() + drft.capacity();
     }
 };
 
@@ -632,6 +633,10 @@ struct server_prompt_cache {
 
     std::list<server_prompt_cache_state> states;
 
+    // the state buffers of removed entries, reused by new entries: a new buffer of hundreds of MiB costs page faults
+    // and zeroing by the kernel, and freeing it returns the memory to the system; within the size limit with the entries
+    std::vector<common_state_buffer> spare;
+
     // in bytes, 0 = no limit
     size_t limit_size = 0;
 
@@ -647,6 +652,18 @@ struct server_prompt_cache {
     bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot);
 
     void update();
+
+private:
+    // removes an entry, keeping its state buffers as spares
+    std::list<server_prompt_cache_state>::iterator remove(std::list<server_prompt_cache_state>::iterator it);
+
+    // a buffer for a state of n bytes: the smallest spare that holds it, else an empty one
+    common_state_buffer take_spare(size_t n);
+
+    // frees spares until the entries and the spares are within the size limit
+    void trim_spare();
+
+    size_t size_spare() const;
 };
 
 // used exclusively by router mode

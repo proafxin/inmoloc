@@ -363,23 +363,41 @@ struct server_slot {
             return false;
         }
 
+        const int64_t t_start_us = ggml_time_us();
+
         const size_t cur_size_tgt =           llama_state_seq_get_size_ext(ctx_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
         const size_t cur_size_dft = ctx_dft ? llama_state_seq_get_size_ext(ctx_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE) : 0;
 
         const size_t cur_size = cur_size_tgt + cur_size_dft;
 
-        SRV_TRC(" - saving prompt with length %d, total state size = %.3f MiB (draft: %.3f MiB)\n",
-                (int) prompt.tokens.size(), cur_size / (1024.0 * 1024.0), cur_size_dft / (1024.0 * 1024.0));
+        size_t ckpt_size = 0;
+        for (const auto & ckpt : prompt.checkpoints) {
+            ckpt_size += ckpt.size();
+        }
 
+        const int64_t t_size_us = ggml_time_us();
+
+        // the entry allocates the state and copies the checkpoints of the prompt
         auto * cur = prompt_cache.alloc(prompt, cur_size_tgt, cur_size_dft);
         if (cur == nullptr) {
             return false;
         }
 
-        llama_state_seq_get_data_ext(ctx_tgt, cur->data.main.data(), cur_size_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
+        const int64_t t_alloc_us = ggml_time_us();
+
+        // the buffers the entry allocated (alloc() returns them again, they are not shared)
+        llama_state_seq_get_data_ext(ctx_tgt, cur->data.main.alloc(cur_size_tgt), cur_size_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
         if (ctx_dft) {
-            llama_state_seq_get_data_ext(ctx_dft, cur->data.drft.data(), cur_size_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE);
+            llama_state_seq_get_data_ext(ctx_dft, cur->data.drft.alloc(cur_size_dft), cur_size_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE);
         }
+
+        const int64_t t_end_us = ggml_time_us();
+
+        SRV_TRC(" - saving prompt with length %d, total state size = %.3f MiB (draft: %.3f MiB), checkpoints %zu = %.3f MiB: "
+                "%.1f ms = size %.1f ms + alloc and copy of the checkpoints %.1f ms + state %.1f ms\n",
+                (int) prompt.tokens.size(), cur_size / (1024.0 * 1024.0), cur_size_dft / (1024.0 * 1024.0),
+                prompt.checkpoints.size(), ckpt_size / (1024.0 * 1024.0),
+                (t_end_us - t_start_us)/1e3, (t_size_us - t_start_us)/1e3, (t_alloc_us - t_size_us)/1e3, (t_end_us - t_alloc_us)/1e3);
 
         return true;
     }

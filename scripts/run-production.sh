@@ -17,6 +17,8 @@ CTX=${CTX:-131072}
 BUDGET=${BUDGET:-22G}
 MAX_PAGES=${MAX_PAGES:-10}   # pages per PDF in the pool
 RUNS=${RUNS:-"battery pool text"}
+PARALLEL=${PARALLEL:-64}     # the most sequences at once, the budget may allow fewer
+CACHE_RAM=${CACHE_RAM:-0}    # MiB of host memory for the prompt cache, 0 disables it: citadel requests share no prompts
 
 mkdir -p $OUT
 
@@ -26,7 +28,7 @@ docker run -d --name lm --gpus all --ulimit core=0 -p 8100:8100 -v $SRC:/src -v 
     --model /models/$MODEL --mmproj /models/mmproj-Qwen3.8-27B-BF16.gguf --image-min-tokens 1024 \
     --chat-template-file /models/chat_template.jinja -ngl 999 --host 0.0.0.0 --port 8100 \
     --spec-type draft-mtp --spec-draft-n-max 2 --metrics --cache-type-k $KV --cache-type-v $KV --flash-attn on --alias lm \
-    --ctx-size $CTX --parallel 64 --vram-budget $BUDGET --rs-rollback replay --cache-ram 4096 -lv 4 >/dev/null
+    --ctx-size $CTX --parallel $PARALLEL --vram-budget $BUDGET --rs-rollback replay --cache-ram $CACHE_RAM -lv 4 >/dev/null
 until curl -sf localhost:8100/health >/dev/null || [ "$(docker inspect -f '{{.State.Running}}' lm)" != "true" ]; do sleep 1; done
 if [ "$(docker inspect -f '{{.State.Running}}' lm)" != "true" ]; then
     docker logs lm > $OUT/server.log 2>&1

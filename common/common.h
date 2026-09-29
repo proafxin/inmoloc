@@ -9,6 +9,7 @@
 #include "llama.h"
 
 #include <list>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <string>
@@ -1179,6 +1180,27 @@ enum ggml_opt_optimizer_type common_opt_get_optimizer(const char *);
 // prompt utils
 //
 
+// the bytes of a llama state (a checkpoint, a cached prompt): written once, when allocated, and only read afterwards,
+// so copies share the bytes instead of copying them, and they are not zeroed when allocated
+struct common_state_buffer {
+    std::shared_ptr<uint8_t[]> buf;
+
+    size_t n   = 0; // bytes of the state
+    size_t cap = 0; // bytes allocated, the buffer can be reused for a smaller state
+
+    size_t size()     const { return n; }
+    size_t capacity() const { return cap; }
+    bool   empty()    const { return n == 0; }
+
+    const uint8_t * data() const { return buf.get(); }
+
+    // n_new bytes to write the state into, never the bytes of a copy: the buffer held if it is not shared and large
+    // enough, else a new one (throws std::bad_alloc)
+    uint8_t * alloc(size_t n_new);
+
+    void clear();
+};
+
 struct common_prompt_checkpoint {
     int64_t n_tokens;
 
@@ -1188,8 +1210,8 @@ struct common_prompt_checkpoint {
     llama_pos pos_min;
     llama_pos pos_max;
 
-    std::vector<uint8_t> data_tgt;
-    std::vector<uint8_t> data_dft;
+    common_state_buffer data_tgt;
+    common_state_buffer data_dft;
 
     // (optional) speculative-decoding implementation state stashed with the checkpoint
     // (e.g. eagle3's deferred-boundary g_embd row)
