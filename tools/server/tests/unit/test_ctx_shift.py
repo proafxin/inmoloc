@@ -21,14 +21,15 @@ Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deseru
 def create_server():
     global server
     server = ServerPreset.tinyllama2()
-    server.n_ctx = 512
+    # the requests share one cache, so each request can use all of it: 256 tokens of context per request
+    server.n_ctx = 256
     server.n_slots = 2
     server.n_predict = 128
 
 
 def test_ctx_shift_enabled():
     # the prompt is 226 tokens
-    # the slot context is 512/2 = 256 tokens
+    # the context is 256 tokens
     # 96 tokens are generated thanks to shifting the context when it gets full
     global server
     server.enable_ctx_shift = True

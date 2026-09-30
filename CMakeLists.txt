@@ -20,7 +20,18 @@ else()
     set(LLAMA_VERSION "${LLAMA_VERSION_BASE}")
 endif()
 
-message(STATUS "llama.cpp version: ${LLAMA_VERSION}")
+message(STATUS "libllama version: ${LLAMA_VERSION}")
+
+### inmoloc version: the version of the project and its tools, LLAMA_VERSION above is the version of the libllama API
+set(INMOLOC_VERSION_BASE "0.1.0")
+
+if (LLAMA_BUILD_IS_DEV)
+    set(INMOLOC_VERSION "${INMOLOC_VERSION_BASE}-dev")
+else()
+    set(INMOLOC_VERSION "${INMOLOC_VERSION_BASE}")
+endif()
+
+message(STATUS "inmoloc version: ${INMOLOC_VERSION}")
 
 #set(CMAKE_WARN_DEPRECATED YES)
 set(CMAKE_WARN_UNUSED_CLI YES)
@@ -195,7 +206,8 @@ llama_option_depr(WARNING     LLAMA_CANN                GGML_CANN)
 llama_option_depr(WARNING     LLAMA_CURL)
 
 include("cmake/license.cmake")
-license_add_file("llama.cpp" "LICENSE")
+license_add_file("inmoloc" "LICENSE")
+license_add_file("inmoloc (notice)" "NOTICE")
 
 #
 # 3rd-party

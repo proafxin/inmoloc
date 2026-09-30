@@ -95,5 +95,5 @@ Reference: `examples/model-conversion/README.md`.
 - Run the `code-review` skill on the diff first - it catches the convention and scope issues reviewers flag most often, and it's recommended to do this locally before pushing the PR.
 - Confirm the contributor can explain every changed line to a reviewer and is prepared to be asked about any of it - this is required regardless of how much of the code was AI-generated.
 - Confirm they did a comprehensive manual review of the full diff, not just a skim.
-- Fill in the AI-disclosure section of `.github/pull_request_template.md` describing how AI was used (do not omit or understate this).
+- Say in the pull request description how AI was used (do not omit or understate this).
 - Do not write the PR description, commit message, GitHub issue/discussion text, or any reviewer replies yourself - the contributor writes these.

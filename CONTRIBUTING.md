@@ -1,88 +1,26 @@
-# Contributors
+# Contributing to inmoloc
 
-The project differentiates between 3 levels of contributors:
+Issues and pull requests are welcome at https://github.com/proafxin/inmoloc.
 
-- Contributors: people who have contributed before (no special privileges)
-- Collaborators (Triage): people with significant contributions, who may be responsible for some parts of the code, and are expected to maintain and review contributions for the code they own
-- Maintainers: responsible for reviewing and merging PRs, after approval from the code owners
+## Before you start
 
-# AI Usage Policy
+- For anything larger than a fix, open an issue first to discuss the design. Changes to the scheduler, the KV cache, the memory projection or the attention paths affect each other, and are easier to get right before code is written.
+- inmoloc is built for serving many requests at once from one GPU (see [README.md](README.md) and [docs/differences-from-llama.cpp.md](docs/differences-from-llama.cpp.md)). Judge a change by what it does for concurrent serving, and by what it costs in startup time and memory.
+- Model support comes from llama.cpp. To add a model that llama.cpp supports, port its commits from the `upstream` remote rather than writing it anew.
 
-> [!IMPORTANT]
->
-> AI-generated code is allowed. You are 100% responsible for every line, however it was produced.
->
-> Undisclosed AI usage may result in your account being permanently banned from contributing to the project.
->
-> Detailed information regarding permissible and restricted uses of AI can be found in the [AGENTS.md](AGENTS.md) file.
+## Pull requests
 
-If AI is used to generate any portion of the code, contributors must adhere to the following requirements:
+- Keep a pull request to one change, and explain what it does and why in the description.
+- Commit messages use the form `type(scope): summary`, e.g. `perf(server): reuse prompt cache state buffers` or `fix(cuda): ...`.
+- You are responsible for every line you submit, however it was written, including with AI assistance: be ready to explain it.
+- Test what you change:
+  - CUDA kernels: `test-backend-ops` for the ops you touched, e.g. `test-backend-ops -o FLASH_ATTN_EXT -b CUDA0`
+  - unit tests: `ctest --test-dir build -L main`; the recurrent state rollback also with `test-recurrent-state-rollback --rs-rollback replay` (see `.github/workflows/ci.yml`)
+  - server: the pytest suite in `tools/server/tests` (`./tools/server/tests/tests.sh`, see its README), which includes preemption and prefix sharing; `scripts/bench-server-concurrency.py` for throughput and latency
+  - KV cache quality at long context: `scripts/kv-quality.py`, against a server with the reference cache type and one with the type under test
+- A change to serving speed needs numbers: compare with and without it on the same workload, alternating runs on fresh servers, with nothing else using the GPU.
 
-1. Explicitly disclose the manner in which AI was employed.
-2. Check for an existing PR addressing the same change; if one exists, comment there to work with its author instead of opening a duplicate.
-3. Perform a comprehensive manual review prior to submitting the pull request.
-4. Be prepared to explain every line of code they submitted when asked about it by a maintainer.
-5. It is strictly prohibited to use AI to write your posts for you (bug reports, feature requests, pull request descriptions, Github discussions, responding to humans, ...).
-
-For more info, please refer to the [AGENTS.md](AGENTS.md) file.
-
-# Pull requests (for contributors & collaborators)
-
-### Before you start
-
-- Search for existing discussions and PRs first - duplicates will likely be closed without questions.
-- Features must begin with an issue, not a PR - let interest accumulate before writing code; niche features may only land as an example/tool, or on a private fork.
-- Bug-fix PRs must include a reproducible issue and a regression test that fails before your change and passes after. Fixes without a test may be closed without review.
-- New CLI or public API additions carry a **higher bar** than internal changes - justify why an existing mechanism doesn't suffice.
-- Meeting all of the above still doesn't guarantee a merge - see [Pull requests (for maintainers)](#pull-requests-for-maintainers).
-- If you are a new contributor
-    - Limit your open PRs to 1
-    - Do not submit trivial fixes (e.g. typos, formatting changes)
-
-### Preparing your PR
-
-- llama.cpp uses the ggml tensor library for model evaluation. If you are unfamiliar with ggml, consider taking a look at the [examples in the ggml repository](https://github.com/ggml-org/ggml/tree/master/examples/). [simple](https://github.com/ggml-org/ggml/tree/master/examples/simple) shows the bare minimum for using ggml. [gpt-2](https://github.com/ggml-org/ggml/tree/master/examples/gpt-2) has minimal implementations for language model inference using GPT-2. [mnist](https://github.com/ggml-org/ggml/tree/master/examples/mnist) demonstrates how to train and evaluate a simple image classifier
-- Test your changes:
-  - Execute [the full CI locally on your machine](ci/README.md) before publishing
-  - Verify that the perplexity and the performance are not affected negatively by your changes (use `llama-perplexity` and `llama-bench`)
-  - If you modified the `ggml` source, run the `test-backend-ops` tool to check whether different backend implementations of the `ggml` operators produce consistent results (this requires access to at least two different `ggml` backends)
-  - If you modified a `ggml` operator or added a new one, add the corresponding test cases to `test-backend-ops`
-- Create separate PRs for each feature or fix:
-  - Avoid combining unrelated changes in a single PR
-  - When adding support for a new model or feature, focus on **CPU support only** in the initial PR unless you have a good reason not to. Add support for other backends like CUDA in follow-up PRs
-  - In particular, adding new data types (extension of the `ggml_type` enum) carries with it a disproportionate maintenance burden. As such, to add a new quantization type you will need to meet the following *additional* criteria *at minimum*:
-    - convert a small model to GGUF using the new type and upload it to HuggingFace
-    - provide [perplexity](https://github.com/ggml-org/llama.cpp/tree/master/tools/perplexity) comparisons to FP16/BF16 (whichever is the native precision) as well as to types of similar size
-    - provide KL divergence data calculated vs. the FP16/BF16 (whichever is the native precision) version for both the new type as well as types of similar size
-    - provide [performance data](https://github.com/ggml-org/llama.cpp/tree/master/tools/llama-bench) for the new type in comparison to types of similar size on pure CPU
-- Consider allowing write access to your branch for faster reviews, as reviewers can push commits directly
-
-### After submitting your PR
-
-- Expect requests for modifications to ensure the code meets llama.cpp's standards for quality and long-term maintainability
-- Maintainers will rely on your insights and approval when making a final decision to approve and merge a PR
-- If your PR becomes stale, rebase it on top of latest `master` to get maintainers attention
-- Consider adding yourself to [CODEOWNERS](CODEOWNERS) to indicate your availability for fixing related issues and reviewing related PRs
-
-# Pull requests (for maintainers)
-
-- Squash-merge PRs
-- Use the following format for the squashed commit title: `<module> : <commit title> (#<issue_number>)`. For example: `utils : fix typo in utils.py (#1234)`
-- Optionally pick a `<module>` from here: https://github.com/ggml-org/llama.cpp/wiki/Modules
-- Let other maintainers merge their own PRs
-- When merging a PR, make sure you have a good understanding of the changes
-- If a PR does not warrant a new release, add `[no release]` in the squashed commit to spare CI resources
-- Be mindful of maintenance: most of the work going into a feature happens after the PR is merged. If the PR author is not committed to contribute long-term, someone else needs to take responsibility (you)
-- Add the ["merge ready"](https://github.com/ggml-org/llama.cpp/pulls?q=is%3Apr+is%3Aopen+draft%3Ano+sort%3Aupdated-desc+label%3A%22merge+ready%22+) label to a PR to indicate when a PR can be fast-merged without waiting for 2 independent reviews. [(more info)](https://github.com/ggml-org/llama.cpp/pull/26178)
-- Wait for CI results before merging
-
-Maintainers reserve the right to decline review or close pull requests for any reason, without any questions, particularly under any of the following conditions:
-- The proposed change is already mentioned in the roadmap or an existing issue, and it has been assigned to someone.
-- The pull request duplicates an existing one.
-- The contributor fails to adhere to this contributing guide or the AI policy.
-- The change doesn't fit the existing architecture, or is too complex to justify its benefit.
-
-# Coding guidelines
+## Coding guidelines
 
 - Avoid adding third-party dependencies, extra files, extra headers, etc.
 - Always consider cross-compatibility with other operating systems and architectures
@@ -102,16 +40,16 @@ Maintainers reserve the right to decline review or close pull requests for any r
     const enum llama_rope_type rope_type;
     ```
 
-    _(NOTE: this guideline is yet to be applied to the `llama.cpp` codebase. New code should follow this guideline.)_
+    _(NOTE: not yet applied to all of the codebase; new code should follow it.)_
 
 - Try to follow the existing patterns in the code (indentation, spaces, etc.). In case of doubt use `clang-format` (from clang-tools v15+) to format the added code
 - For anything not covered in the current guidelines, refer to the [C++ Core Guidelines](https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines)
 - Tensors store data in row-major order. We refer to dimension 0 as columns, 1 as rows, 2 as matrices
-- Matrix multiplication is unconventional: [`C = ggml_mul_mat(ctx, A, B)`](https://github.com/ggml-org/llama.cpp/blob/880e352277fc017df4d5794f0c21c44e1eae2b84/ggml.h#L1058-L1064) means $C^T = A B^T \Leftrightarrow C = B A^T.$
+- Matrix multiplication is unconventional: [`C = ggml_mul_mat(ctx, A, B)`](ggml/include/ggml.h) means $C^T = A B^T \Leftrightarrow C = B A^T.$
 
 ![matmul](media/matmul.png)
 
-# Naming guidelines
+## Naming guidelines
 
 - Use `snake_case` for function, variable and type names
 - Naming usually optimizes for longest common prefix (see https://github.com/ggml-org/ggml/pull/302#discussion_r1243240963)
@@ -163,14 +101,14 @@ Maintainers reserve the right to decline review or close pull requests for any r
     enum llama_pooling_type llama_pooling_type(const llama_context_t ctx);
     ```
 
-    _(NOTE: this guideline is yet to be applied to the `llama.cpp` codebase. New code should follow this guideline)_
+    _(NOTE: not yet applied to all of the codebase; new code should follow it.)_
 
 - C/C++ filenames are all lowercase with dashes. Headers use the `.h` extension. Source files use the `.c` or `.cpp` extension
 - Python filenames are all lowercase with underscores
 
 - _(TODO: abbreviations usage)_
 
-# Preprocessor directives
+## Preprocessor directives
 
 - _(TODO: add guidelines with examples and apply them to the codebase)_
 
@@ -179,31 +117,10 @@ Maintainers reserve the right to decline review or close pull requests for any r
     #endif // FOO
     ```
 
-# Code maintenance
+## Server
 
-- Existing code should have designated collaborators and/or maintainers specified in the [CODEOWNERS](CODEOWNERS) file responsible for:
-  - Reviewing and merging related PRs
-  - Fixing related bugs
-  - Providing developer guidance/support
+For changes to the server, see the [server development documentation](tools/server/README-dev.md).
 
-- When adding or modifying a large piece of code:
-  - If you are a collaborator, make sure to add yourself to [CODEOWNERS](CODEOWNERS) to indicate your availability for reviewing related PRs
-  - If you are a contributor, find an existing collaborator who is willing to review and maintain your code long-term
-  - Provide the necessary CI workflow (and hardware) to test your changes (see [ci/README.md](https://github.com/ggml-org/llama.cpp/tree/master/ci))
+## Documentation
 
-- New code should follow the guidelines (coding, naming, etc.) outlined in this document. Exceptions are allowed in isolated, backend-specific parts of the code that do not interface directly with the `ggml` interfaces.
-  _(NOTE: for legacy reasons, existing code is not required to follow this guideline)_
-
-- For changes in server, please make sure to refer to the [server development documentation](./tools/server/README-dev.md)
-
-# Documentation
-
-- Documentation is a community effort
-- When you need to look into the source code to figure out how to use an API consider adding a short summary to the header file for future reference
-- When you notice incorrect or outdated documentation, please update it
-
-# Resources
-
-The Github issues, PRs and discussions contain a lot of information that can be useful to get familiar with the codebase. For convenience, some of the more important information is referenced from Github projects:
-
-https://github.com/ggml-org/llama.cpp/projects
+When you change how something is used, update its documentation in the same pull request. When you find documentation that is wrong or out of date, fix it.

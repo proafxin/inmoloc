@@ -2081,7 +2081,7 @@ struct markdown_printer : public printer {
     }
 
     void print_footer() override {
-        fprintf(fout, "\nbuild: %s (%d)\n", test::build_commit.c_str(), test::build_number);
+        fprintf(fout, "\nbuild: inmoloc %s (commit %s)\n", inmoloc_version(), test::build_commit.c_str());
     }
 };
 

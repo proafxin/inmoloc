@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu:
+    name: CPU build and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DLLAMA_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release -j $(nproc)
+
+      - name: Unit tests
+        run: ctest --test-dir build -L main --output-on-failure -j $(nproc)
+
+      # the unit tests run the recurrent state rollback in snapshot mode, on the tiny models they generate
+      - name: Recurrent state rollback by replay
+        run: |
+          for model in qwen35-dense nemotron_h-dense; do
+            echo "== $model"
+            ./build/bin/test-recurrent-state-rollback -m build/tests/test-models/$model.gguf -dev none -ngl 0 --rs-rollback replay
+          done
+
+  server:
+    name: Server tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF
+          cmake --build build --config Release -j $(nproc) --target llama-server
+
+      - name: Install test requirements
+        run: pip install -r tools/server/tests/requirements.txt
+
+      # the tests download their tiny models from Hugging Face
+      - name: Tests
+        run: ./tools/server/tests/tests.sh
+
+  cuda:
+    name: CUDA build
+    runs-on: ubuntu-24.04
+    container: nvidia/cuda:13.3.0-devel-ubuntu24.04
+    steps:
+      - name: Install build tools
+        run: apt-get update && apt-get install -y cmake build-essential git
+
+      - uses: actions/checkout@v4
+
+      # the runners have no GPU: this checks that the CUDA kernels and the server build
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120a -DLLAMA_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --config Release -j $(nproc) --target llama-server test-backend-ops

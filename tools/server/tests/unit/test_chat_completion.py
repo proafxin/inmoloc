@@ -40,7 +40,7 @@ def test_chat_completion(model, system_prompt, user_prompt, max_tokens, re_conte
     })
     assert res.status_code == 200
     assert "cmpl" in res.body["id"] # make sure the completion id has the expected format
-    assert res.body["system_fingerprint"].startswith("b")
+    assert is_build_info(res.body["system_fingerprint"])
     # we no longer reflect back the model name, see https://github.com/ggml-org/llama.cpp/pull/17668
     # assert res.body["model"] == model if model is not None else server.model_alias
     assert res.body["usage"]["prompt_tokens"] == n_prompt
@@ -102,7 +102,7 @@ def test_chat_completion_stream(system_prompt, user_prompt, max_tokens, re_conte
                 assert choice["delta"]["role"] == "assistant"
             else:
                 assert "role" not in choice["delta"]
-            assert data["system_fingerprint"].startswith("b")
+            assert is_build_info(data["system_fingerprint"])
             assert data["model"] == "llama-test-model"
             if last_cmpl_id is None:
                 last_cmpl_id = data["id"]
@@ -133,7 +133,7 @@ def test_chat_completion_with_openai_library():
         seed=42,
         temperature=0.8,
     )
-    assert res.system_fingerprint is not None and res.system_fingerprint.startswith("b")
+    assert is_build_info(res.system_fingerprint)
     assert res.choices[0].finish_reason == "length"
     assert res.choices[0].message.content is not None
     assert match_regex("(Suddenly)+", res.choices[0].message.content)
@@ -483,7 +483,7 @@ def test_context_size_exceeded():
     assert res.body["error"]["n_prompt_tokens"] > 0
     assert server.n_ctx is not None
     assert server.n_slots is not None
-    assert res.body["error"]["n_ctx"] == server.n_ctx // server.n_slots
+    assert res.body["error"]["n_ctx"] == server.n_ctx  # the requests share one cache
 
 
 def test_context_size_exceeded_stream():
@@ -505,7 +505,7 @@ def test_context_size_exceeded_stream():
         assert e.body["error"]["n_prompt_tokens"] > 0
         assert server.n_ctx is not None
         assert server.n_slots is not None
-        assert e.body["error"]["n_ctx"] == server.n_ctx // server.n_slots
+        assert e.body["error"]["n_ctx"] == server.n_ctx  # the requests share one cache
 
 
 @pytest.mark.parametrize(

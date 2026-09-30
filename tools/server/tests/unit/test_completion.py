@@ -102,7 +102,7 @@ def test_completion_with_openai_library():
         prompt="I believe the meaning of life is",
         max_tokens=8,
     )
-    assert res.system_fingerprint is not None and res.system_fingerprint.startswith("b")
+    assert is_build_info(res.system_fingerprint)
     assert res.choices[0].finish_reason == "length"
     assert res.choices[0].text is not None
     assert match_regex("(going|bed)+", res.choices[0].text)

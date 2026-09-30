@@ -1,3 +1,4 @@
+import re
 import pytest
 from utils import *
 
@@ -30,8 +31,11 @@ def parse_metrics(text: str) -> dict:
             types[name] = kind
         elif line.startswith("llamacpp:") and "{" not in line:
             name, value = line.split(" ", 1)
-            assert name in types, f"{name} has no # TYPE line"
-            out[name] = (types[name], float(value))
+            # the _sum and _count samples of a histogram have the # TYPE line of the histogram
+            base = re.sub(r"_(sum|count)$", "", name)
+            kind = types.get(name, types.get(base) if types.get(base) == "histogram" else None)
+            assert kind is not None, f"{name} has no # TYPE line"
+            out[name] = (kind, float(value))
     return out
 
 

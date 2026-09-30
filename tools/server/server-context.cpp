@@ -1139,8 +1139,49 @@ public:
         }
     }
 
-    server_metrics get_metrics() const {
-        return metrics;
+    // what the /metrics endpoint reports: the server metrics and those of its contexts; while sleeping, the endpoint
+    // reports what this returned when the server went to sleep
+    server_task_result_metrics collect_metrics() {
+        server_task_result_metrics res;
+
+        for (server_slot & slot : slots) {
+            if (slot.is_processing()) {
+                res.n_processing_slots++;
+                if (slot.state == SLOT_STATE_PREEMPTED) {
+                    res.n_preempted_slots++;
+                }
+            } else {
+                res.n_idle_cached_tokens += slot.prompt.n_tokens();
+            }
+        }
+        SRV_DBG("n_processing_slots = %d\n", res.n_processing_slots);
+
+        // the counters add up over the contexts freed by sleeping
+        auto perf  = perf_slept;
+        auto usage = usage_slept;
+        if (ctx_tgt) {
+            const auto cur = llama_perf_context(ctx_tgt);
+            perf.n_reused         += cur.n_reused;
+            perf.n_graph_computes += cur.n_graph_computes;
+            perf.t_graph_build_ms += cur.t_graph_build_ms;
+            perf.t_graph_alloc_ms += cur.t_graph_alloc_ms;
+
+            usage = llama_memory_get_usage(llama_get_memory(ctx_tgt));
+            usage.attn_cells_read  += usage_slept.attn_cells_read;
+            usage.attn_cells_range += usage_slept.attn_cells_range;
+            usage.attn_cells_owned += usage_slept.attn_cells_owned;
+        }
+
+        res.n_tasks_deferred       = queue_tasks.queue_tasks_deferred_size();
+        res.device_memory_free_min = device_memory_free_min;
+        res.mem_usage              = usage;
+        res.n_graph_reused         = perf.n_reused;
+        res.n_graph_computes       = perf.n_graph_computes;
+        res.t_graph_build_ms       = perf.t_graph_build_ms;
+        res.t_graph_alloc_ms       = perf.t_graph_alloc_ms;
+        res.metrics                = metrics;
+
+        return res;
     }
 
     void reset_metrics_bucket() {
@@ -1212,6 +1253,11 @@ private:
 
     bool sleeping = false;
 
+    // the counters of the contexts freed by sleeping, so that the metrics keep counting across a sleep, and the memory
+    // usage at the last sleep, which the metrics report while sleeping
+    llama_perf_context_data perf_slept  = {};
+    llama_memory_usage      usage_slept = {};
+
     int64_t t_last_load_progress_ms = 0;
 
     void destroy() {
@@ -1244,6 +1290,21 @@ private:
                 // note: for sleeping == false, event is emitted by load_model()
             }
             SRV_INF("%s", "server is entering sleeping state\n");
+            if (ctx_tgt) {
+                const auto perf  = llama_perf_context(ctx_tgt);
+                const auto usage = llama_memory_get_usage(llama_get_memory(ctx_tgt));
+
+                perf_slept.n_reused         += perf.n_reused;
+                perf_slept.n_graph_computes += perf.n_graph_computes;
+                perf_slept.t_graph_build_ms += perf.t_graph_build_ms;
+                perf_slept.t_graph_alloc_ms += perf.t_graph_alloc_ms;
+
+                const auto attn = usage_slept;
+                usage_slept = usage;
+                usage_slept.attn_cells_read  += attn.attn_cells_read;
+                usage_slept.attn_cells_range += attn.attn_cells_range;
+                usage_slept.attn_cells_owned += attn.attn_cells_owned;
+            }
             destroy();
         } else {
             SRV_INF("%s", "server is exiting sleeping state\n");
@@ -3519,38 +3580,8 @@ private:
                 } break;
             case SERVER_TASK_TYPE_METRICS:
                 {
-                    int n_processing_slots = 0;
-                    int n_preempted_slots  = 0;
-
-                    uint64_t n_idle_cached_tokens = 0;
-
-                    for (server_slot & slot : slots) {
-                        if (slot.is_processing()) {
-                            n_processing_slots++;
-                            if (slot.state == SLOT_STATE_PREEMPTED) {
-                                n_preempted_slots++;
-                            }
-                        } else {
-                            n_idle_cached_tokens += slot.prompt.n_tokens();
-                        }
-                    }
-                    SRV_DBG("n_processing_slots = %d\n", n_processing_slots);
-
-                    const auto perf_tgt = llama_perf_context(ctx_tgt);
-
-                    auto res = std::make_unique<server_task_result_metrics>();
-                    res->id                   = task.id;
-                    res->n_processing_slots   = n_processing_slots;
-                    res->n_preempted_slots    = n_preempted_slots;
-                    res->n_tasks_deferred     = queue_tasks.queue_tasks_deferred_size();
-                    res->n_idle_cached_tokens = n_idle_cached_tokens;
-                    res->device_memory_free_min = device_memory_free_min;
-                    res->mem_usage            = llama_memory_get_usage(llama_get_memory(ctx_tgt));
-                    res->n_graph_reused       = perf_tgt.n_reused;
-                    res->n_graph_computes     = perf_tgt.n_graph_computes;
-                    res->t_graph_build_ms     = perf_tgt.t_graph_build_ms;
-                    res->t_graph_alloc_ms     = perf_tgt.t_graph_alloc_ms;
-                    res->metrics              = metrics;
+                    auto res = std::make_unique<server_task_result_metrics>(collect_metrics());
+                    res->id = task.id;
 
                     if (task.metrics_reset_bucket) {
                         metrics.reset_bucket();
@@ -4811,9 +4842,22 @@ private:
                     const auto & spans = slot.task->params.message_spans;
                     const auto last_user_pos = spans.last_user_message_pos();
 
+                    // an input that cannot be split (e.g. a pooled embedding) goes into the batch whole, up to the next
+                    // media chunk, or waits for the next iteration: neither the prompt cap nor the KV budget cuts it
+                    const bool split = slot.can_split();
+                    if (!split && kv_budget_prompt >= 0) {
+                        int32_t n_text = 0;
+                        while (slot.prompt.n_tokens() + n_text < slot.n_input_tokens() && input_tokens[slot.prompt.n_tokens() + n_text] != LLAMA_TOKEN_NULL) {
+                            n_text++;
+                        }
+                        if (n_text > kv_budget_prompt) {
+                            return;
+                        }
+                    }
+
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.n_input_tokens() && batch.size() < n_batch && kv_budget_prompt != 0 &&
-                           (n_prompt_cap <= 0 || n_prompt_cur < n_prompt_cap)) {
+                           (n_prompt_cap <= 0 || !split || n_prompt_cur < n_prompt_cap)) {
                         // get next token to process
                         llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                         if (cur_tok == LLAMA_TOKEN_NULL) {
@@ -5994,14 +6038,12 @@ void server_routes::init_routes() {
         // render response using cached_metrics
         auto use_cached_metrics = [&]() {
             std::unique_lock<std::mutex> lock(mutex_cache);
-            res->headers["Process-Start-Time-Unix"] = std::to_string(cached_metrics.t_start);
-            server_task_result_metrics tmp;
-            tmp.metrics = cached_metrics;
+            res->headers["Process-Start-Time-Unix"] = std::to_string(cached_metrics.metrics.t_start);
             res->content_type = "text/plain; version=0.0.4";
             res->status = 200;
-            res->data = tmp.to_metrics();
+            res->data = cached_metrics.to_metrics();
             // the gauges are averaged over the window between two scrapes
-            cached_metrics.reset_bucket();
+            cached_metrics.metrics.reset_bucket();
             should_reset_buckets = true;
         };
 
@@ -6863,7 +6905,7 @@ void server_routes::update_cached_responses(bool is_sleeping) {
     if (is_sleeping) {
         cached_models  = get_res_models(*meta);
         cached_props   = get_res_props(*meta, params, true);
-        cached_metrics = ctx_server.get_metrics();
+        cached_metrics = ctx_server.collect_metrics();
 
         should_reset_buckets = false;
 

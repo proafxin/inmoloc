@@ -114,6 +114,7 @@ class ServerProcess:
     sleep_idle_seconds: int | None = None
     cache_ram: int | None = None
     no_cache_idle_slots: bool = False
+    no_prefix_share: bool = False
     log_path: str | None = None
     ui_mcp_proxy: bool = False
     backend_sampling: bool = False
@@ -280,6 +281,8 @@ class ServerProcess:
             server_args.extend(["--cache-ram", self.cache_ram])
         if self.no_cache_idle_slots:
             server_args.append("--no-cache-idle-slots")
+        if self.no_prefix_share:
+            server_args.append("--no-prefix-share")
         if self.ui_mcp_proxy:
             server_args.append("--ui-mcp-proxy")
         if self.server_tools:
@@ -652,6 +655,11 @@ class ServerPreset:
         server.n_predict = 16
         server.seed = 42
         return server
+
+
+def is_build_info(value: str | None) -> bool:
+    """the version and commit the server reports as build info, e.g. 0.1.0-dev-46cafc393"""
+    return value is not None and re.fullmatch(r"\d+\.\d+\.\d+(-dev)?-[0-9a-f]+|\d+\.\d+\.\d+(-dev)?-unknown", value) is not None
 
 
 def parallel_function_calls(function_list: List[Tuple[Callable[..., Any], Tuple[Any, ...]]]) -> List[Any]:

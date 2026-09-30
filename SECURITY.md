@@ -1,106 +1,44 @@
 # Security Policy
 
- - [**Reporting a vulnerability**](#reporting-a-vulnerability)
- - [**Requirements**](#requirements)
- - [**Covered Topics**](#covered-topics)
- - [**Using llama.cpp securely**](#using-llamacpp-securely)
-   - [Untrusted models](#untrusted-models)
-   - [Untrusted inputs](#untrusted-inputs)
-   - [Data privacy](#data-privacy)
-   - [Untrusted environments or networks](#untrusted-environments-or-networks)
-   - [Multi-Tenant environments](#multi-tenant-environments)
-
 ## Reporting a vulnerability
 
-> [!IMPORTANT]
-> The private security disclosure program is disabled until further notice. Please submit patches with fixes directly to the repo as public PRs. Emails will be ignored.
+If you find a security vulnerability in inmoloc, report it privately through a [security advisory](https://github.com/proafxin/inmoloc/security/advisories/new). Do not open a public issue for it. Include a proof of concept (a script and/or files) and the commit you tested.
 
-If you have discovered a security vulnerability in this project that falls inside the [covered topics](#covered-topics), please report it privately. **Do not disclose it as a public issue.** This gives us time to work with you to fix the issue before public exposure, reducing the chance that the exploit will be used before a patch is released.
+inmoloc is maintained on a best-effort basis. Please allow 90 days for a fix before disclosing the issue publicly.
 
-Please disclose it as a private [security advisory](https://github.com/ggml-org/llama.cpp/security/advisories/new).
+Vulnerabilities in the third-party code under `vendor/` should be reported to those projects. Vulnerabilities in code that inmoloc shares with llama.cpp (e.g. `ggml/`, the GGUF parser) are best reported to llama.cpp as well; inmoloc will port the fix.
 
-A team of volunteers on a reasonable-effort basis maintains this project. As such, please give us at least 90 days to work on a fix before public exposure.
+### Covered
 
-### AI-powered code scan
+- `src/`, `ggml/`, `common/`, `gguf-py/`
+- `tools/server/`, excluding the web UI, features marked experimental, and features not meant for untrusted environments (router mode, MCP)
 
-llama.cpp has an AI security scanner that scans the code periodically. The full prompts and tool set can be found in [ggml-org/security-scan-prompt](https://github.com/ggml-org/security-scan-prompt).
+Denial-of-service bugs are looked at case by case and are not generally treated as vulnerabilities.
 
-We greatly appreciate reports that reflect genuine research effort, and we are happy to spend our time reviewing them. Findings that an autonomous AI agent can surface on its own add little on top of the scans we already run.
-
-### Requirements
-
-Before submitting your report, ensure you meet the following requirements:
-
-- You have read this policy and fully understand it.
-- You have searched for existing discussions of the issue. If it has already been reported, your report will likely be rejected as a duplicate.
-- AI is only permitted in an assistive capacity as stated in [AGENTS.md](AGENTS.md). We do not accept reports that are written exclusively by AI.
-- Your report must include a working Proof-of-Concept in the form of a script and/or attached files.
-
-Maintainers reserve the right to close the report if these requirements are not fulfilled.
-
-### Covered Topics
-
-Only vulnerabilities that fall within these parts of the project are considered valid. For problems falling outside of this list, please report them as issues.
-
-- `src/**/*`
-- `ggml/**/*`
-- `gguf-py/**/*`
-- `tools/server/*`, **excluding** the following topics:
-    - Web UI
-    - Features marked as experimental
-    - Features not recommended for use in untrusted environments (e.g., router, MCP)
-    - Bugs that can lead to Denial-of-Service attack
-
-Note that none of the topics under [Using llama.cpp securely](#using-llamacpp-securely) are considered vulnerabilities in LLaMA C++.
-
-Denial-of-Service (DoS) bugs are generally not treated as vulnerabilities. We don't reject them outright, but we look at them case-by-case and only accept those that are genuinely worth fixing.
-
-For vulnerabilities that fall within the `vendor` directory, please report them directly to the third-party project.
-
-## Using llama.cpp securely
+## Running inmoloc securely
 
 ### Untrusted models
-Be careful when running untrusted models. This classification includes models created by unknown developers or utilizing data obtained from unknown sources.
 
-*Always execute untrusted models within a secure, isolated environment such as a sandbox* (e.g., containers, virtual machines). This helps protect your system from potentially malicious code.
-
-> [!NOTE]
-> The trustworthiness of a model is not binary. You must always determine the proper level of caution depending on the specific model and how it matches your use case and risk tolerance.
+Run models from unknown sources only in an isolated environment such as a container or a virtual machine. How much to trust a model depends on where it comes from and how you use it.
 
 ### Untrusted inputs
 
-Some models accept various input formats (text, images, audio, etc.). The libraries converting these inputs have varying security levels, so it's crucial to isolate the model and carefully pre-process inputs to mitigate script injection risks.
+Models can take text, images and audio, and the libraries that decode these differ in how hardened they are. When the inputs are not trusted:
 
-For maximum security when handling untrusted inputs, you may need to employ the following:
+- run inference in an isolated environment
+- validate and sanitize inputs before they reach the model
+- keep inmoloc and its dependencies up to date
+- test how the model responds to prompt injection before exposing it
 
-* Sandboxing: Isolate the environment where the inference happens.
-* Pre-analysis: Check how the model performs by default when exposed to prompt injection (e.g. using [fuzzing for prompt injection](https://github.com/FonduAI/awesome-prompt-injection?tab=readme-ov-file#tools)). This will give you leads on how hard you will have to work on the next topics.
-* Updates: Keep both LLaMA C++ and your libraries updated with the latest security patches.
-* Input Sanitation: Before feeding data to the model, sanitize inputs rigorously. This involves techniques such as:
-    * Validation: Enforce strict rules on allowed characters and data types.
-    * Filtering: Remove potentially malicious scripts or code fragments.
-    * Encoding: Convert special characters into safe representations.
-    * Verification: Run tooling that identifies potential script injections (e.g. [models that detect prompt injection attempts](https://python.langchain.com/docs/guides/safety/hugging_face_prompt_injection)).
+### Untrusted networks
 
-### Data privacy
+The server is meant to run behind your own access control. If it must be reachable from an untrusted network:
 
-To protect sensitive data from potential leaks or unauthorized access, it is crucial to sandbox the model execution. This means running the model in a secure, isolated environment, which helps mitigate many attack vectors.
+- do not expose the RPC backend (`ggml-rpc-server`) or the server itself directly
+- put the server behind an authenticating reverse proxy, and set `--api-key`
+- verify the hashes of downloaded models against known-good values
+- encrypt traffic over the network
 
-### Untrusted environments or networks
+### Several tenants on one server
 
-If you can't run your models in a secure and isolated environment or if it must be exposed to an untrusted network, make sure to take the following security precautions:
-* Do not use the RPC backend, [ggml-rpc-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc) and [llama-server](https://github.com/ggml-org/llama.cpp/tree/master/tools/server) functionality (see https://github.com/ggml-org/llama.cpp/pull/13061).
-* Confirm the hash of any downloaded artifact (e.g. pre-trained model weights) matches a known-good value.
-* Encrypt your data if sending it over the network.
-
-### Multi-Tenant environments
-
-If you intend to run multiple models in parallel with shared memory, it is your responsibility to ensure the models do not interact or access each other's data. The primary areas of concern are tenant isolation, resource allocation, model sharing and hardware attacks.
-
-1. Tenant Isolation: Models should run separately with strong isolation methods to prevent unwanted data access. Separating networks is crucial for isolation, as it prevents unauthorized access to data or models and malicious users from sending graphs to execute under another tenant's identity.
-
-2. Resource Allocation: A denial of service caused by one model can impact the overall system health. Implement safeguards like rate limits, access controls, and health monitoring.
-
-3. Model Sharing: In a multitenant model sharing design, tenants and users must understand the security risks of running code provided by others. Since there are no reliable methods to detect malicious models, sandboxing the model execution is the recommended approach to mitigate the risk.
-
-4. Hardware Attacks: GPUs or TPUs can also be attacked. [Researches](https://scholar.google.com/scholar?q=gpu+side+channel) has shown that side channel attacks on GPUs are possible, which can make data leak from other models or processes running on the same system at the same time.
+Requests to one server share its model, its KV cache and its GPU. inmoloc keeps the KV cells of each request separate (a request attends only to its own cells, or to a shared prefix identical to its own), but the requests still share hardware, and research has shown side channels on GPUs. Where tenants must not affect or observe each other, give each its own server and GPU, and use rate limits and monitoring to keep one tenant from starving the others.

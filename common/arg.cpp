@@ -1718,6 +1718,17 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_BATCHED, LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_PARALLEL}));
     add_opt(common_arg(
+        {"-kvu", "--kv-unified"},
+        {"-no-kvu", "--no-kv-unified"},
+        "the requests processed at once always share one KV cache of --ctx-size tokens; accepted for compatibility",
+        [](common_params & params, bool value) {
+            if (!value) {
+                throw std::invalid_argument("error: the server always shares one KV cache between the requests it processes at once, --no-kv-unified is not supported\n");
+            }
+            params.kv_unified = true;
+        }
+    ).set_env("LLAMA_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--prefix-share"},
         {"--no-prefix-share"},
         string_format("let a new request start from the memory of another slot that holds the same prefix "
@@ -2592,7 +2603,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "the weights, the vision encoder, the draft model, a unified KV cache of --ctx-size tokens and the compute\n"
         "buffers are measured, and the number of requests processed at once becomes the largest that fits, at most\n"
         "--parallel; the per-request memory (e.g. recurrent state) depends on --rs-rollback\n"
-        "(default: the free device memory, less 1 GiB per device)",
+        "(default: the free device memory; a larger budget is lowered to it)",
         [](common_params & params, const std::string & value) {
             size_t pos = 0;
             const double num = std::stod(value, &pos);
