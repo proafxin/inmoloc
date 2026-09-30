@@ -6,7 +6,7 @@
 # and what the server did meanwhile: requests at once, generation stalls, preemptions, memory.
 set -u
 
-SRC=${SRC:-/home/masterkenway/Projects/llama.cpp}
+SRC=${SRC:-$(cd "$(dirname "$0")/.." && pwd)}
 CITADEL=${CITADEL:-/home/masterkenway/Projects/citadel}
 OUT=${OUT:-$CITADEL/data/model_baselines/production}
 MODELS=$CITADEL/data/gguf_models

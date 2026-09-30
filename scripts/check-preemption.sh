@@ -11,7 +11,7 @@
 #   toolong - one document of ~20k tokens with --ctx-size 16384: must be refused with an error, not crash or hang
 set -u
 
-SRC=${SRC:-/home/masterkenway/Projects/llama.cpp}
+SRC=${SRC:-$(cd "$(dirname "$0")/.." && pwd)}
 CITADEL=${CITADEL:-/home/masterkenway/Projects/citadel}
 OUT=${OUT:-$CITADEL/data/model_baselines/preemption}
 MODELS=$CITADEL/data/gguf_models

@@ -4,7 +4,7 @@
 # and any difference is an error of the replay, not rounding noise.
 set -u
 
-SRC=${SRC:-/home/masterkenway/Projects/llama.cpp}
+SRC=${SRC:-$(cd "$(dirname "$0")/.." && pwd)}
 OUT=${OUT:-/home/masterkenway/Projects/citadel/data/model_baselines/replay_ab/cpu1}
 M=${M:-/models/${MODEL:-Qwen3.8-27B-AP-IQ4_XS.gguf}}
 MODELS=${MODELS:-/home/masterkenway/Projects/citadel/data/gguf_models}

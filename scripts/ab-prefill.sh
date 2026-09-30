@@ -5,7 +5,7 @@
 # both servers, alternating V F V F with a fresh server per run, since single runs vary by ~10% on this card.
 set -u
 
-SRC=${SRC:-/home/masterkenway/Projects/llama.cpp}
+SRC=${SRC:-$(cd "$(dirname "$0")/.." && pwd)}
 VAN=${VAN:-/home/masterkenway/Projects/llama.cpp-vanilla}
 CITADEL=${CITADEL:-/home/masterkenway/Projects/citadel}
 OUT=${OUT:-$CITADEL/data/model_baselines/ab_prefill}

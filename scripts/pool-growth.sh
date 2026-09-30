@@ -10,7 +10,7 @@
 #               at startup is all used, and the battery must still complete
 set -u
 
-SRC=${SRC:-/home/masterkenway/Projects/llama.cpp}
+SRC=${SRC:-$(cd "$(dirname "$0")/.." && pwd)}
 VAN=${VAN:-/home/masterkenway/Projects/llama.cpp-vanilla}
 CITADEL=${CITADEL:-/home/masterkenway/Projects/citadel}
 OUT=${OUT:-$CITADEL/data/model_baselines/pool_growth}

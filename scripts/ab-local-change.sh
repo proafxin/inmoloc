@@ -4,7 +4,7 @@
 # The changes are set aside with git stash for the A runs and restored afterwards, also when a run fails.
 set -u
 
-SRC=${SRC:-/home/masterkenway/Projects/llama.cpp}
+SRC=${SRC:-$(cd "$(dirname "$0")/.." && pwd)}
 OUT=${OUT:-/home/masterkenway/Projects/citadel/data/model_baselines/ab_local}
 MODELS=${MODELS:-/home/masterkenway/Projects/citadel/data/gguf_models}
 IMG=${IMG:-nvidia/cuda:13.3.0-devel-ubuntu24.04}

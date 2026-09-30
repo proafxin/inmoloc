@@ -5,7 +5,7 @@
 # verifies, and an f16 cache leaves no room for it.
 set -u
 
-SRC=${SRC:-/home/masterkenway/Projects/llama.cpp}
+SRC=${SRC:-$(cd "$(dirname "$0")/.." && pwd)}
 CITADEL=${CITADEL:-/home/masterkenway/Projects/citadel}
 OUT=${OUT:-$CITADEL/data/model_baselines/kv_quality}
 MODELS=$CITADEL/data/gguf_models

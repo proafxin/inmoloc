@@ -2,7 +2,7 @@
 # short CPU run with the rollback trace on, to see what the replay bookkeeping actually does per step
 set -u
 
-SRC=${SRC:-/home/masterkenway/Projects/llama.cpp}
+SRC=${SRC:-$(cd "$(dirname "$0")/.." && pwd)}
 OUT=${OUT:-/tmp/rs-replay}
 M=${M:-/models/${MODEL:-Qwen3.8-27B-AP-IQ4_XS.gguf}}
 MODELS=${MODELS:-/home/masterkenway/Projects/citadel/data/gguf_models}

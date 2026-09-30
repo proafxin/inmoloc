@@ -3,7 +3,7 @@
 # on the CPU and on the GPU. Takes a few minutes, mostly the build.
 set -u
 
-SRC=${SRC:-/home/masterkenway/Projects/llama.cpp}
+SRC=${SRC:-$(cd "$(dirname "$0")/.." && pwd)}
 OUT=${OUT:-/home/masterkenway/Projects/citadel/data/model_baselines/replay_ab/unit}
 IMG=${IMG:-nvidia/cuda:13.3.0-devel-ubuntu24.04}
 

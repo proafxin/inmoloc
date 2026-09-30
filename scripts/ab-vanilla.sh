@@ -11,7 +11,7 @@
 # at the level of batching nondeterminism.
 set -u
 
-SRC=${SRC:-/home/masterkenway/Projects/llama.cpp}
+SRC=${SRC:-$(cd "$(dirname "$0")/.." && pwd)}
 CITADEL=${CITADEL:-/home/masterkenway/Projects/citadel}
 OUT=${OUT:-$CITADEL/data/model_baselines/ab_vanilla}
 MODELS=$CITADEL/data/gguf_models
