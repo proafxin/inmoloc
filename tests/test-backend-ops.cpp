@@ -500,7 +500,7 @@ enum test_mode {
     MODE_SUPPORT,
 };
 
-// Output format support similar to llama-bench
+// Output format support similar to local-inference-bench
 enum output_formats { CONSOLE, SQL, CSV };
 
 static const char * output_format_str(output_formats format) {
@@ -11682,8 +11682,8 @@ static bool op_names_filter_selects(const char * op_names_filter, const char * o
 // Covers padded rows, sinks, kvpad, multi-SIMDgroup reduction, quantized K/V, and MLA views.
 // The override is backend-global, so this runs after all parallel workers have joined.
 static bool run_fa_vec_slice(ggml_backend_t backend, ggml_backend_t backend_cpu, const char * op_names_filter) {
-    const char * LLAMA_TEST_FA_VEC_DISABLE = getenv("LLAMA_TEST_FA_VEC_DISABLE");
-    if (LLAMA_TEST_FA_VEC_DISABLE) {
+    const char * LOCAL_INFERENCE_TEST_FA_VEC_DISABLE = getenv("LOCAL_INFERENCE_TEST_FA_VEC_DISABLE");
+    if (LOCAL_INFERENCE_TEST_FA_VEC_DISABLE) {
         return true;
     }
 
@@ -11691,7 +11691,7 @@ static bool run_fa_vec_slice(ggml_backend_t backend, ggml_backend_t backend_cpu,
         return true;
     }
 
-    printf("Running FA vec slice tests (env LLAMA_TEST_FA_VEC_DISABLE=1 to skip)\n");
+    printf("Running FA vec slice tests (env LOCAL_INFERENCE_TEST_FA_VEC_DISABLE=1 to skip)\n");
 
     auto * reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(backend));
 

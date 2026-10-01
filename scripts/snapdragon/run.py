@@ -328,7 +328,7 @@ def main():
 
     # Resolve executable path
     executable = cmd_args[0]
-    known_binaries = ["llama-cli", "llama-bench", "llama-completion", "llama-mtmd-cli", "test-backend-ops"]
+    known_binaries = ["local-inference-cli", "local-inference-bench", "local-inference-completion", "local-inference-mtmd-cli", "test-backend-ops"]
     if executable in known_binaries:
         if target_type in ("android", "linux"):
             resolved_exec = f"./bin/{executable}"
@@ -388,26 +388,26 @@ def main():
         or args.hex_profile is not None
         or args.hex_optrace is not None
     )
-    if verbose_trigger and basename in ("llama-cli", "llama-completion", "llama-bench", "llama-server", "llama-mtmd-cli"):
+    if verbose_trigger and basename in ("local-inference-cli", "local-inference-completion", "local-inference-bench", "local-inference-server", "local-inference-mtmd-cli"):
         if "-v" not in cmd_args and "--verbose" not in cmd_args:
             cmd_args.append("-v")
 
-    # Inject defaults for llama-cli, llama-completion, and llama-server if not overridden by the user
-    if basename in ("llama-cli", "llama-completion", "llama-server"):
+    # Inject defaults for local-inference-cli, local-inference-completion, and local-inference-server if not overridden by the user
+    if basename in ("local-inference-cli", "local-inference-completion", "local-inference-server"):
         if "-ngl" not in cmd_args and "--n-gpu-layers" not in cmd_args:
             cmd_args += ["-ngl", "99"]
         if "-fa" not in cmd_args and "--flash-attn" not in cmd_args:
             cmd_args += ["-fa", "on"]
 
     # Use ubatch-size 1024 for hexagon backend (HTP devices)
-    if hex_devices and basename in ("llama-cli", "llama-completion", "llama-server", "llama-bench"):
+    if hex_devices and basename in ("local-inference-cli", "local-inference-completion", "local-inference-server", "local-inference-bench"):
         if "--ubatch-size" not in cmd_args and "-ub" not in cmd_args:
             cmd_args += ["--ubatch-size", "1024"]
-    elif basename in ("llama-cli", "llama-completion", "llama-server"):
+    elif basename in ("local-inference-cli", "local-inference-completion", "local-inference-server"):
         if "--ubatch-size" not in cmd_args and "-ub" not in cmd_args:
             cmd_args += ["--ubatch-size", "1024"]
 
-    if basename in ("llama-cli", "llama-completion", "llama-server", "llama-bench"):
+    if basename in ("local-inference-cli", "local-inference-completion", "local-inference-server", "local-inference-bench"):
         if "-t" not in cmd_args and "--threads" not in cmd_args:
             cmd_args += ["-t", "6"]
 

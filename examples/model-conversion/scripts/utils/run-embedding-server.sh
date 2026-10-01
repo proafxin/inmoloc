@@ -20,8 +20,8 @@ fi
 
 echo $CONVERTED_MODEL
 
-cmake --build $BUILD_DIR --target llama-server
+cmake --build $BUILD_DIR --target local-inference-server
 
-${BUILD_DIR}/bin/llama-server -m $CONVERTED_MODEL \
+${BUILD_DIR}/bin/local-inference-server -m $CONVERTED_MODEL \
     --embedding \
     --pooling none

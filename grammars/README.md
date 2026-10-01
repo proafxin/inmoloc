@@ -115,7 +115,7 @@ item ::= [^\n]+ "\n"
 
 This guide provides a brief overview. Check out the GBNF files in this directory (`grammars/`) for examples of full grammars. You can try them out with:
 ```
-./llama-cli -m <model> --grammar-file grammars/some-grammar.gbnf -p 'Some prompt'
+./local-inference-cli -m <model> --grammar-file grammars/some-grammar.gbnf -p 'Some prompt'
 ```
 
 `llama.cpp` can also convert JSON schemas to grammars either ahead of time or at each request, see below.
@@ -134,18 +134,18 @@ While semantically correct, the syntax `x? x? x?.... x?` (with N repetitions) ma
 
 You can use GBNF grammars:
 
-- In [llama-server](../tools/server)'s completion endpoints, passed as the `grammar` body field
-- In [llama-cli](../tools/cli) and [llama-completion](../tools/completion), passed as the `--grammar` & `--grammar-file` flags
+- In [local-inference-server](../tools/server)'s completion endpoints, passed as the `grammar` body field
+- In [local-inference-cli](../tools/cli) and [local-inference-completion](../tools/completion), passed as the `--grammar` & `--grammar-file` flags
 - With [test-gbnf-validator](../tests/test-gbnf-validator.cpp), to test them against strings.
 
 ## JSON Schemas → GBNF
 
 `llama.cpp` supports converting a subset of https://json-schema.org/ to GBNF grammars:
 
-- In [llama-server](../tools/server):
+- In [local-inference-server](../tools/server):
     - For any completion endpoints, passed as the `json_schema` body field
     - For the `/chat/completions` endpoint, passed inside the `response_format` body field (e.g. `{"type", "json_object", "schema": {"items": {}}}` or `{ type: "json_schema", json_schema: {"schema": ...} }`)
-- In [llama-cli](../tools/cli) and [llama-completion](../tools/completion), passed as the `--json` / `-j` flag
+- In [local-inference-cli](../tools/cli) and [local-inference-completion](../tools/completion), passed as the `--json` / `-j` flag
 - To convert to a grammar ahead of time:
     - in CLI, with [examples/json_schema_to_grammar.py](../examples/json_schema_to_grammar.py)
 
@@ -155,7 +155,7 @@ You can use GBNF grammars:
 Take a look at [tests](../tests/test-json-schema-to-grammar.cpp) to see which features are likely supported (you'll also find usage examples in https://github.com/ggml-org/llama.cpp/pull/5978, https://github.com/ggml-org/llama.cpp/pull/6659 & https://github.com/ggml-org/llama.cpp/pull/6555).
 
 ```bash
-llama-cli \
+local-inference-cli \
   -hfr bartowski/Phi-3-medium-128k-instruct-GGUF \
   -hff Phi-3-medium-128k-instruct-Q8_0.gguf \
   -j '{

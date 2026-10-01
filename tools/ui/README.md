@@ -1,10 +1,10 @@
 # llama-ui
 
-A modern, feature-rich web interface for llama-server built with SvelteKit. This UI provides an intuitive chat interface with advanced file handling, conversation management, and comprehensive model interaction capabilities.
+A modern, feature-rich web interface for local-inference-server built with SvelteKit. This UI provides an intuitive chat interface with advanced file handling, conversation management, and comprehensive model interaction capabilities.
 
 Llama UI supports two server operation modes:
 
-- **MODEL mode** - Single model operation (standard llama-server)
+- **MODEL mode** - Single model operation (standard local-inference-server)
 - **ROUTER mode** - Multi-model operation with dynamic model loading/unloading
 
 ---
@@ -83,7 +83,7 @@ Llama UI supports two server operation modes:
 
 - **Node.js** 18+ (20+ recommended)
 - **npm** 9+
-- **llama-server** running locally (for API access)
+- **local-inference-server** running locally (for API access)
 
 ### 1. Install Dependencies
 
@@ -92,16 +92,16 @@ cd tools/ui
 npm ci
 ```
 
-### 2. Start llama-server
+### 2. Start local-inference-server
 
 In a separate terminal, start the backend server:
 
 ```bash
 # Single model (MODEL mode)
-./llama-server -m model.gguf
+./local-inference-server -m model.gguf
 
 # Multi-model (ROUTER mode)
-./llama-server --models-dir /path/to/models
+./local-inference-server --models-dir /path/to/models
 ```
 
 ### 3. Start Development Servers
@@ -115,7 +115,7 @@ This starts:
 - **Vite dev server** at `http://localhost:5173` - The main UI frontend app
 - **Storybook** at `http://localhost:6006` - Component documentation
 
-The Vite dev server proxies API requests to `SERVER_ORIGIN` (with fallback to default llama-server `8080` port):
+The Vite dev server proxies API requests to `SERVER_ORIGIN` (with fallback to default local-inference-server `8080` port):
 
 ```typescript
 // vite.config.ts proxy configuration
@@ -177,7 +177,7 @@ Runs Vite in development mode with:
 
 - Hot Module Replacement (HMR)
 - Source maps
-- Proxy to llama-server
+- Proxy to local-inference-server
 
 ### Production Build
 
@@ -188,7 +188,7 @@ npm run build
 The build process:
 
 1. **Vite Build** - Bundles all TypeScript, Svelte, and CSS
-2. **Static Adapter** - Outputs to `../../build/tools/ui/dist` (llama-server's static file directory)
+2. **Static Adapter** - Outputs to `../../build/tools/ui/dist` (local-inference-server's static file directory)
 3. **Post-Build Script** - Cleans up intermediate files
 4. **Custom Plugin** - Creates `index.html` with:
    - Inlined favicon as base64
@@ -197,7 +197,7 @@ The build process:
 
 ```text
 tools/ui/        →  build  →  build/tools/ui/dist/
-├── src/                                 ├── index.html  (served by llama-server)
+├── src/                                 ├── index.html  (served by local-inference-server)
 ├── static/                              └── (favicon inlined)
 └── ...
 ```
@@ -217,13 +217,13 @@ output: {
 }
 ```
 
-### Integration with llama-server
+### Integration with local-inference-server
 
-llama-ui is embedded directly into the llama-server binary:
+llama-ui is embedded directly into the local-inference-server binary:
 
 1. `npm run build` outputs `index.html` to `build/tools/ui/dist/`
-2. llama-server compiles this into the binary at build time
-3. When accessing `/`, llama-server serves the bundled HTML
+2. local-inference-server compiles this into the binary at build time
+3. When accessing `/`, local-inference-server serves the bundled HTML
 
 This results in a **single portable binary** with the full Llama UI included.
 
@@ -294,7 +294,7 @@ flowchart TB
         ST2["LocalStorage"]
     end
 
-    subgraph APIs["🌐 llama-server"]
+    subgraph APIs["🌐 local-inference-server"]
         API1["/v1/chat/completions"]
         API2["/props"]
         API3["/models/*"]
@@ -451,7 +451,7 @@ sequenceDiagram
     participant UI
     participant Stores
     participant DB as IndexedDB
-    participant API as llama-server
+    participant API as local-inference-server
 
     Note over User,API: Initialization
     UI->>Stores: initStores() (awaited by route loads)
@@ -480,7 +480,7 @@ sequenceDiagram
     participant User
     participant UI
     participant Stores
-    participant API as llama-server
+    participant API as local-inference-server
 
     Note over User,API: Initialization
     Stores->>API: GET /props
@@ -683,7 +683,7 @@ flowchart TB
 npm run test
 
 # Individual test suites
-npm run test:e2e      # End-to-end (requires llama-server)
+npm run test:e2e      # End-to-end (requires local-inference-server)
 npm run test:client   # Client-side unit tests
 npm run test:server   # Server-side unit tests
 npm run test:ui       # Storybook visual tests

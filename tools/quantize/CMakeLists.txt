@@ -1,6 +1,6 @@
-# llama-quantize-impl: quantize logic, reusable by app
+# local-inference-quantize-impl: quantize logic, reusable by app
 
-set(TARGET llama-quantize-impl)
+set(TARGET local-inference-quantize-impl)
 
 add_library(${TARGET} quantize.cpp)
 set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
@@ -12,12 +12,12 @@ if(LLAMA_TOOLS_INSTALL)
     install(TARGETS ${TARGET} LIBRARY)
 endif()
 
-# llama-quantize executable
+# local-inference-quantize executable
 
-set(TARGET llama-quantize)
+set(TARGET local-inference-quantize)
 
 add_executable(${TARGET} main.cpp)
-target_link_libraries(${TARGET} PRIVATE llama-quantize-impl)
+target_link_libraries(${TARGET} PRIVATE local-inference-quantize-impl)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 if(LLAMA_TOOLS_INSTALL)

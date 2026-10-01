@@ -222,7 +222,7 @@ static void test(void) {
         }
     }
 
-    // non-existence arg in specific example (--draft cannot be used outside llama-speculative)
+    // non-existence arg in specific example (--draft cannot be used outside local-inference-speculative)
     argv = {"binary_name", "--draft", "123"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_EMBEDDING));
 
@@ -249,7 +249,7 @@ static void test(void) {
     assert(params.n_predict == 6789);
     assert(params.n_batch == 9090);
 
-    // --draft cannot be used outside llama-speculative
+    // --draft cannot be used outside local-inference-speculative
     argv = {"binary_name", "--spec-draft-n-max", "123"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SPECULATIVE));
     assert(params.speculative.draft.n_max == 123);
@@ -309,45 +309,45 @@ static void test(void) {
 #else
     printf("test-arg-parser: test environment variables (valid + invalid usages)\n\n");
 
-    setenv("LLAMA_ARG_THREADS", "blah", true);
+    setenv("LOCAL_INFERENCE_ARG_THREADS", "blah", true);
     argv = {"binary_name"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
 
-    setenv("LLAMA_ARG_MODEL", "blah.gguf", true);
-    setenv("LLAMA_ARG_THREADS", "1010", true);
+    setenv("LOCAL_INFERENCE_ARG_MODEL", "blah.gguf", true);
+    setenv("LOCAL_INFERENCE_ARG_THREADS", "1010", true);
     argv = {"binary_name"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.model.path == "blah.gguf");
     assert(params.cpuparams.n_threads == 1010);
 
-    setenv("LLAMA_ARG_LOAD_MODE", "blah", true);
+    setenv("LOCAL_INFERENCE_ARG_LOAD_MODE", "blah", true);
     argv = {"binary_name"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
 
-    setenv("LLAMA_ARG_LOAD_MODE", "mmap", true);
+    setenv("LOCAL_INFERENCE_ARG_LOAD_MODE", "mmap", true);
     argv = {"binary_name"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.load_mode == LLAMA_LOAD_MODE_MMAP);
 
-    setenv("LLAMA_ARG_LOAD_MODE", "mlock", true);
+    setenv("LOCAL_INFERENCE_ARG_LOAD_MODE", "mlock", true);
     argv = {"binary_name"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.load_mode == LLAMA_LOAD_MODE_MLOCK);
 
-    setenv("LLAMA_ARG_LOAD_MODE", "mmap+mlock", true);
+    setenv("LOCAL_INFERENCE_ARG_LOAD_MODE", "mmap+mlock", true);
     argv = {"binary_name"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK);
 
-    setenv("LLAMA_ARG_LOAD_MODE", "dio", true);
+    setenv("LOCAL_INFERENCE_ARG_LOAD_MODE", "dio", true);
     argv = {"binary_name"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.load_mode == LLAMA_LOAD_MODE_DIRECT_IO);
 
     printf("test-arg-parser: test negated environment variables\n\n");
 
-    setenv("LLAMA_ARG_LOAD_MODE", "none", true);
-    setenv("LLAMA_ARG_NO_PERF", "1", true); // legacy format
+    setenv("LOCAL_INFERENCE_ARG_LOAD_MODE", "none", true);
+    setenv("LOCAL_INFERENCE_ARG_NO_PERF", "1", true); // legacy format
     argv = {"binary_name"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.load_mode == LLAMA_LOAD_MODE_NONE);
@@ -355,8 +355,8 @@ static void test(void) {
 
     printf("test-arg-parser: test environment variables being overwritten\n\n");
 
-    setenv("LLAMA_ARG_MODEL", "blah.gguf", true);
-    setenv("LLAMA_ARG_THREADS", "1010", true);
+    setenv("LOCAL_INFERENCE_ARG_MODEL", "blah.gguf", true);
+    setenv("LOCAL_INFERENCE_ARG_THREADS", "1010", true);
     argv = {"binary_name", "-m", "overwritten.gguf"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.model.path == "overwritten.gguf");

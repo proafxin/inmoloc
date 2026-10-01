@@ -25,8 +25,8 @@ if [ -z "$BUILD_DIR" ]; then
     BUILD_DIR="../../build"
 fi
 
-cmake --build $BUILD_DIR --target llama-perplexity -j8
+cmake --build $BUILD_DIR --target local-inference-perplexity -j8
 
-${BUILD_DIR}/bin/llama-perplexity -m $QUANTIZED_MODEL -f ppl/wikitext-2-raw/wiki.test.raw
+${BUILD_DIR}/bin/local-inference-perplexity -m $QUANTIZED_MODEL -f ppl/wikitext-2-raw/wiki.test.raw
 
 

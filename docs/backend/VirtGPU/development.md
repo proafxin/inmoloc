@@ -63,7 +63,7 @@ TARGETS="ggml-metal"
 cmake --build $LLAMA_MAC_BUILD --parallel 8 --target $TARGETS
 
 # Build additional tools for native benchmarking
-EXTRA_TARGETS="llama-run llama-bench"
+EXTRA_TARGETS="llama-run local-inference-bench"
 cmake --build $LLAMA_MAC_BUILD --parallel 8 --target $EXTRA_TARGETS
 ```
 
@@ -131,7 +131,7 @@ RUN mkdir -p build \\
  && cmake -S . -B ../build \${LLAMA_CPP_CMAKE_FLAGS} \\
  && cmake --build ../build/ \${LLAMA_CPP_CMAKE_BUILD_FLAGS}
 
-ENTRYPOINT ["/app/remoting/src/build/bin/llama-server"]
+ENTRYPOINT ["/app/remoting/src/build/bin/local-inference-server"]
 EOF
 
 mkdir -p empty_dir
@@ -193,7 +193,7 @@ podman run $PODMAN_CACHE_ARGS -it --rm --device /dev/dri localhost/llama-cpp.vir
 ```bash
 
 # Run performance benchmark
-/app/remoting/build/bin/llama-bench -m ./llama3.2
+/app/remoting/build/bin/local-inference-bench -m ./llama3.2
 ```
 
 Expected output (performance may vary):

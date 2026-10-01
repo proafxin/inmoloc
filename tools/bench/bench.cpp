@@ -2278,7 +2278,7 @@ int llama_bench(int argc, char ** argv) {
     for (const auto & inst : params_instances) {
         params_idx++;
         if (params.progress) {
-            fprintf(stderr, "llama-bench: benchmark %d/%zu: starting\n", params_idx, params_count);
+            fprintf(stderr, "local-inference-bench: benchmark %d/%zu: starting\n", params_idx, params_count);
         }
         auto mparams = inst.to_llama_mparams();
         auto cparams = inst.to_llama_cparams();
@@ -2372,7 +2372,7 @@ int llama_bench(int argc, char ** argv) {
         if (!params.no_warmup) {
             if (t.n_prompt > 0) {
                 if (params.progress) {
-                    fprintf(stderr, "llama-bench: benchmark %d/%zu: warmup prompt run\n", params_idx, params_count);
+                    fprintf(stderr, "local-inference-bench: benchmark %d/%zu: warmup prompt run\n", params_idx, params_count);
                 }
                 //test_prompt(ctx, std::min(t.n_batch, std::min(t.n_prompt, 32)), 0, t.n_batch, t.n_threads);
                 bool res = test_prompt(ctx, t.n_prompt, t.n_batch, t.n_threads);
@@ -2385,7 +2385,7 @@ int llama_bench(int argc, char ** argv) {
             }
             if (t.n_gen > 0) {
                 if (params.progress) {
-                    fprintf(stderr, "llama-bench: benchmark %d/%zu: warmup generation run\n", params_idx, params_count);
+                    fprintf(stderr, "local-inference-bench: benchmark %d/%zu: warmup generation run\n", params_idx, params_count);
                 }
                 bool res = test_gen(ctx, 1, t.n_threads);
                 if (!res) {
@@ -2414,7 +2414,7 @@ int llama_bench(int argc, char ** argv) {
 
                 if (!is_cached) {
                     if (params.progress) {
-                        fprintf(stderr, "llama-bench: benchmark %d/%zu: depth run %d/%d\n", params_idx, params_count,
+                        fprintf(stderr, "local-inference-bench: benchmark %d/%zu: depth run %d/%d\n", params_idx, params_count,
                                 i + 1, params.reps);
                     }
                     bool res = test_prompt(ctx, t.n_depth, t.n_batch, t.n_threads);
@@ -2431,7 +2431,7 @@ int llama_bench(int argc, char ** argv) {
                     llama_state_seq_get_data(ctx, cstate.buf.data(), cstate.buf.size(), 0);
                 } else {
                     if (params.progress) {
-                        fprintf(stderr, "llama-bench: benchmark %d/%zu: depth run %d/%d (cached)\n", params_idx, params_count,
+                        fprintf(stderr, "local-inference-bench: benchmark %d/%zu: depth run %d/%d (cached)\n", params_idx, params_count,
                                 i + 1, params.reps);
                     }
                 }
@@ -2441,7 +2441,7 @@ int llama_bench(int argc, char ** argv) {
 
             if (t.n_prompt > 0) {
                 if (params.progress) {
-                    fprintf(stderr, "llama-bench: benchmark %d/%zu: prompt run %d/%d\n", params_idx, params_count,
+                    fprintf(stderr, "local-inference-bench: benchmark %d/%zu: prompt run %d/%d\n", params_idx, params_count,
                             i + 1, params.reps);
                 }
                 bool res = test_prompt(ctx, t.n_prompt, t.n_batch, t.n_threads);
@@ -2454,7 +2454,7 @@ int llama_bench(int argc, char ** argv) {
             }
             if (t.n_gen > 0) {
                 if (params.progress) {
-                    fprintf(stderr, "llama-bench: benchmark %d/%zu: generation run %d/%d\n", params_idx, params_count,
+                    fprintf(stderr, "local-inference-bench: benchmark %d/%zu: generation run %d/%d\n", params_idx, params_count,
                             i + 1, params.reps);
                 }
                 bool res = test_gen(ctx, t.n_gen, t.n_threads);

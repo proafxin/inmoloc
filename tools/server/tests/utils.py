@@ -140,21 +140,21 @@ class ServerProcess:
     def start(self, timeout_seconds: int = DEFAULT_HTTP_TIMEOUT) -> None:
         env = {
             **os.environ,
-            "LLAMA_SERVER_DEBUG_FAKE_TIMING": "1",
+            "LOCAL_INFERENCE_SERVER_DEBUG_FAKE_TIMING": "1",
         }
-        if "LLAMA_CACHE" not in os.environ:
-            env["LLAMA_CACHE"] = "tmp"
+        if "LOCAL_INFERENCE_CACHE" not in os.environ:
+            env["LOCAL_INFERENCE_CACHE"] = "tmp"
         if self.external_server:
             print(f"[external_server]: Assuming external server running on {self.server_host}:{self.server_port}")
             return
         if self.server_path is not None:
             server_path = self.server_path
-        elif "LLAMA_SERVER_BIN_PATH" in os.environ:
-            server_path = os.environ["LLAMA_SERVER_BIN_PATH"]
+        elif "LOCAL_INFERENCE_SERVER_BIN_PATH" in os.environ:
+            server_path = os.environ["LOCAL_INFERENCE_SERVER_BIN_PATH"]
         elif os.name == "nt":
-            server_path = "../../../build/bin/Release/llama-server.exe"
+            server_path = "../../../build/bin/Release/local-inference-server.exe"
         else:
-            server_path = "../../../build/bin/llama-server"
+            server_path = "../../../build/bin/local-inference-server"
         server_args = [
             "--host",
             self.server_host,
@@ -491,7 +491,7 @@ class ServerProcess:
                 else:
                     # When `include_usage` is True (the default), we expect the last chunk of the stream
                     # immediately preceding the `data: [DONE]` message to contain a `choices` field with an empty array
-                    # and a `usage` field containing the usage statistics (n.b., llama-server also returns `timings` in
+                    # and a `usage` field containing the usage statistics (n.b., local-inference-server also returns `timings` in
                     # the last chunk)
                     assert 'usage' in chunk, f"Expected finish_reason in chunk: {chunk}"
                     assert 'timings' in chunk, f"Expected finish_reason in chunk: {chunk}"

@@ -117,7 +117,7 @@ def test_mcp_tool_invocation():
 
 
 def test_mcp_bad_command_does_not_crash():
-    """A misconfigured MCP server should not crash the llama-server."""
+    """A misconfigured MCP server should not crash the local-inference-server."""
     global server
     mcp_json = _mcp_config_json({
         "nonexistent": {

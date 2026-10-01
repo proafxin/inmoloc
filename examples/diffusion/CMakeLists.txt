@@ -1,10 +1,10 @@
-set(TARGET llama-diffusion)
+set(TARGET local-inference-diffusion)
 add_library(${TARGET} STATIC diffusion.cpp diffusion.h)
 target_link_libraries(${TARGET} PUBLIC llama llama-common ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PUBLIC cxx_std_17)
 
-set(TARGET llama-diffusion-cli)
+set(TARGET local-inference-diffusion-cli)
 add_executable(${TARGET} diffusion-cli.cpp)
 install(TARGETS ${TARGET} RUNTIME)
-target_link_libraries(${TARGET} PRIVATE llama-diffusion llama llama-common ${CMAKE_THREAD_LIBS_INIT})
+target_link_libraries(${TARGET} PRIVATE local-inference-diffusion llama llama-common ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)

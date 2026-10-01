@@ -544,8 +544,8 @@ llama_model_loader::llama_model_loader(
         const llama_model_tensor_buft_override * param_tensor_buft_overrides_p)
         : metadata(meta), set_tensor_data(set_tensor_data), set_tensor_data_ud(set_tensor_data_ud) {
     int trace = 0;
-    if (getenv("LLAMA_TRACE")) {
-        trace = atoi(getenv("LLAMA_TRACE"));
+    if (getenv("LOCAL_INFERENCE_TRACE")) {
+        trace = atoi(getenv("LOCAL_INFERENCE_TRACE"));
     }
 
     if (param_overrides_p != nullptr) {

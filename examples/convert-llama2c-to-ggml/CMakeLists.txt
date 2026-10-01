@@ -1,4 +1,4 @@
-set(TARGET llama-convert-llama2c-to-ggml)
+set(TARGET local-inference-convert-llama2c-to-ggml)
 add_executable(${TARGET} convert-llama2c-to-ggml.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_link_libraries(${TARGET} PRIVATE llama-common llama ${CMAKE_THREAD_LIBS_INIT})

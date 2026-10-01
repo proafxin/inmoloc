@@ -3,12 +3,12 @@
 llama.cpp binaries can automatically fit the projected memory use of a model to the free device memory available at runtime,
 this is controlled using the CLI arguments starting with `-fit`/`--fit`.
 Internally the code is calling `llama_params_fit` to adjust the `llama_model_params` and `llama_context_params` structs.
-`llama-fit-params` is a simple utility that prints the CLI arguments corresponding to these adjustments to stdout.
+`local-inference-fit-params` is a simple utility that prints the CLI arguments corresponding to these adjustments to stdout.
 Example usage:
 
 ``` bash
-# First, run llama-fit-params and store the results in a file:
-> ./build/bin/llama-fit-params --model /opt/models/qwen_3-30b3a-f16.gguf | tee args.txt
+# First, run local-inference-fit-params and store the results in a file:
+> ./build/bin/local-inference-fit-params --model /opt/models/qwen_3-30b3a-f16.gguf | tee args.txt
 ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
 ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
 ggml_cuda_init: found 1 CUDA devices:
@@ -26,7 +26,7 @@ Printing fitted CLI arguments to stdout...
 -c 4096 -ngl 48 -ot blk\.14\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.15\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.16\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.17\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.18\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.19\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.20\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.21\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.22\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.23\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.24\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.25\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.26\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.27\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.28\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.29\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.30\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.31\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.32\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.33\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.34\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.35\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.36\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.37\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.38\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.39\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.40\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.41\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.42\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.43\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.44\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.45\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.46\.ffn_(up|down|gate)_(ch|)exps=CPU,blk\.47\.ffn_(up|down|gate)_(ch|)exps=CPU
 
 # Next, use those results for a llama.cpp binary:
-> cat args.txt | xargs ./build/bin/llama-server --model /opt/models/qwen_3-30b3a-f16.gguf
+> cat args.txt | xargs ./build/bin/local-inference-server --model /opt/models/qwen_3-30b3a-f16.gguf
 ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
 ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
 ggml_cuda_init: found 1 CUDA devices:

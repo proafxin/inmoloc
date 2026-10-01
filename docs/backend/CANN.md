@@ -293,13 +293,13 @@ cmake --build build --config release
     - Use device 0:
 
     ```sh
-    ./build/bin/llama-cli -m path_to_model -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 33 -sm none -mg 0
+    ./build/bin/local-inference-cli -m path_to_model -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 33 -sm none -mg 0
     ```
 
     - Use multiple devices:
 
     ```sh
-    ./build/bin/llama-cli -m path_to_model -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 33 -sm layer
+    ./build/bin/local-inference-cli -m path_to_model -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 33 -sm layer
     ```
 
 ### **GitHub contribution**:

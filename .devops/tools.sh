@@ -10,15 +10,15 @@ shift
 if [[ "$arg1" == '--convert' || "$arg1" == '-c' ]]; then
     exec python3 ./convert_hf_to_gguf.py "$@"
 elif [[ "$arg1" == '--quantize' || "$arg1" == '-q' ]]; then
-    exec ./llama-quantize "$@"
+    exec ./local-inference-quantize "$@"
 elif [[ "$arg1" == '--run' || "$arg1" == '-r' ]]; then
-    exec ./llama-cli "$@"
+    exec ./local-inference-cli "$@"
 elif [[ "$arg1" == '--run-legacy' || "$arg1" == '-l' ]]; then
-    exec ./llama-completion "$@"
+    exec ./local-inference-completion "$@"
 elif [[ "$arg1" == '--bench' || "$arg1" == '-b' ]]; then
-    exec ./llama-bench "$@"
+    exec ./local-inference-bench "$@"
 elif [[ "$arg1" == '--perplexity' || "$arg1" == '-p' ]]; then
-    exec ./llama-perplexity "$@"
+    exec ./local-inference-perplexity "$@"
 elif [[ "$arg1" == '--all-in-one' || "$arg1" == '-a' ]]; then
     echo "Converting PTH to GGML..."
     for i in $(ls $1/$2/ggml-model-f16.bin*); do
@@ -26,11 +26,11 @@ elif [[ "$arg1" == '--all-in-one' || "$arg1" == '-a' ]]; then
             echo "Skip model quantization, it already exists: ${i/f16/q4_0}"
         else
             echo "Converting PTH to GGML: $i into ${i/f16/q4_0}..."
-            exec ./llama-quantize "$i" "${i/f16/q4_0}" q4_0
+            exec ./local-inference-quantize "$i" "${i/f16/q4_0}" q4_0
         fi
     done
 elif [[ "$arg1" == '--server' || "$arg1" == '-s' ]]; then
-    exec ./llama-server "$@"
+    exec ./local-inference-server "$@"
 else
     echo "Unknown command: $arg1"
     echo "Available commands: "

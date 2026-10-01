@@ -1,4 +1,4 @@
-set(TARGET llama-batched)
+set(TARGET local-inference-batched)
 add_executable(${TARGET} batched.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_link_libraries(${TARGET} PRIVATE llama-common llama ${CMAKE_THREAD_LIBS_INIT})

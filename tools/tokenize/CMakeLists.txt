@@ -1,4 +1,4 @@
-set(TARGET llama-tokenize)
+set(TARGET local-inference-tokenize)
 add_executable(${TARGET} tokenize.cpp)
 if(LLAMA_TOOLS_INSTALL)
     install(TARGETS ${TARGET} RUNTIME)

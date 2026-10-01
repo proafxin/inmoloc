@@ -1510,8 +1510,8 @@ static void test_resolves_to_string() {
 }
 
 int main() {
-    fprintf(stderr, "LLAMA_NODE_AVAILABLE = %s\n", getenv("LLAMA_NODE_AVAILABLE") ? "true" : "false");
-    fprintf(stderr, "LLAMA_PYTHON_AVAILABLE = %s\n", getenv("LLAMA_PYTHON_AVAILABLE") ? "true" : "false");
+    fprintf(stderr, "LOCAL_INFERENCE_NODE_AVAILABLE = %s\n", getenv("LOCAL_INFERENCE_NODE_AVAILABLE") ? "true" : "false");
+    fprintf(stderr, "LOCAL_INFERENCE_PYTHON_AVAILABLE = %s\n", getenv("LOCAL_INFERENCE_PYTHON_AVAILABLE") ? "true" : "false");
 
     test_resolves_to_string();
 
@@ -1630,10 +1630,10 @@ int main() {
         });
     }
 
-    if (getenv("LLAMA_SKIP_TESTS_SLOW_ON_EMULATOR")) {
+    if (getenv("LOCAL_INFERENCE_SKIP_TESTS_SLOW_ON_EMULATOR")) {
         fprintf(stderr, "\033[33mWARNING: Skipping slow tests on emulator.\n\033[0m");
     } else {
-        if (getenv("LLAMA_PYTHON_AVAILABLE") || (std::system("python -c \"import sys; exit(1) if sys.version_info < (3, 8) else print('Python version is sufficient')\"") == 0)) {
+        if (getenv("LOCAL_INFERENCE_PYTHON_AVAILABLE") || (std::system("python -c \"import sys; exit(1) if sys.version_info < (3, 8) else print('Python version is sufficient')\"") == 0)) {
             test_all("Python", [](const TestCase & tc) {
                 write("test-json-schema-input.tmp", tc.schema);
                 tc.verify_status(std::system(

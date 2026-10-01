@@ -1004,6 +1004,17 @@ std::string common_get_env(const std::string & name) {
     return value == nullptr ? "" : value;
 }
 
+// the directory of this application under `base`: the llama.cpp one of an earlier install is kept while ours does not
+// exist, so its downloads and config.ini are still found
+static std::string fs_get_app_directory(const std::string & base) {
+    const std::string dir    = base + "local-inference";
+    const std::string legacy = base + "llama.cpp";
+    if (!fs_is_directory(dir) && fs_is_directory(legacy)) {
+        return legacy;
+    }
+    return dir;
+}
+
 void common_set_env(const std::string & name, const std::string & value) {
 #if defined(_WIN32)
     _putenv_s(name.c_str(), value.c_str());
@@ -1025,7 +1036,7 @@ std::string fs_get_cache_directory() {
         }
         return p;
     };
-    cache_directory = common_get_env("LLAMA_CACHE");
+    cache_directory = common_get_env("LOCAL_INFERENCE_CACHE");
     if (cache_directory.empty()) {
 #if defined(__linux__) || defined(__FreeBSD__) || defined(_AIX) || \
         defined(__OpenBSD__) || defined(__NetBSD__)
@@ -1064,8 +1075,7 @@ std::string fs_get_cache_directory() {
 #else
 #  error Unknown architecture
 #endif
-        cache_directory = ensure_trailing_slash(cache_directory);
-        cache_directory += "llama.cpp";
+        cache_directory = fs_get_app_directory(ensure_trailing_slash(cache_directory));
     }
     return ensure_trailing_slash(cache_directory);
 }
@@ -1110,8 +1120,7 @@ std::string fs_get_config_directory() {
 #else
 #  error Unknown architecture
 #endif
-    config_directory = ensure_trailing_slash(config_directory);
-    config_directory += "llama.cpp";
+    config_directory = fs_get_app_directory(ensure_trailing_slash(config_directory));
     return ensure_trailing_slash(config_directory);
 }
 

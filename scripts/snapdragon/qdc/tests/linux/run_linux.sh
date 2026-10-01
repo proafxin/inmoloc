@@ -140,8 +140,8 @@ run_completion_case() {
   echo 'What is the capital of France?' > "$prompt"
   local extra
   extra=$(completion_extra_args "$name")
-  echo "=== [completion:$name] llama-completion --device $device (NDEV=$ndev) ==="
-  timeout 600 env GGML_HEXAGON_NDEV=$ndev ./bin/llama-completion \
+  echo "=== [completion:$name] local-inference-completion --device $device (NDEV=$ndev) ==="
+  timeout 600 env GGML_HEXAGON_NDEV=$ndev ./bin/local-inference-completion \
       -m "$MODEL_PATH" \
       -f "$prompt" \
       $extra \
@@ -163,8 +163,8 @@ run_bench_case() {
   local log="$LOG_DIR/llama_bench_${log_suffix}.log"
   local ubatch_arg=""
   [ "$name" = "npu" ] && ubatch_arg="--ubatch-size 1024"
-  echo "=== [bench:$name] llama-bench --device $device (NDEV=$ndev) ==="
-  timeout 600 env GGML_HEXAGON_NDEV=$ndev ./bin/llama-bench \
+  echo "=== [bench:$name] local-inference-bench --device $device (NDEV=$ndev) ==="
+  timeout 600 env GGML_HEXAGON_NDEV=$ndev ./bin/local-inference-bench \
       -m "$MODEL_PATH" \
       --device "$device" \
       -ngl 99 \

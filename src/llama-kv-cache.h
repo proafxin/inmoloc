@@ -329,7 +329,7 @@ private:
     // SWA
     const uint32_t n_swa = 0;
 
-    // env: LLAMA_ATTN_ROT_DISABLE
+    // env: LOCAL_INFERENCE_ATTN_ROT_DISABLE
     bool attn_rot_k = false;
     bool attn_rot_v = false;
 
@@ -341,7 +341,7 @@ private:
     // pre-computed hadamard martrices
     std::unordered_map<int64_t, std::vector<float>> attn_rot_hadamard;
 
-    // env: LLAMA_KV_CACHE_DEBUG
+    // env: LOCAL_INFERENCE_KV_CACHE_DEBUG
     int debug = 0;
 
     // this is the SWA type of the cache - not to be confused with the model SWA type

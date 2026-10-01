@@ -4,7 +4,7 @@
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 cd $SCRIPT_DIR
 
-#export LLAMA_CACHE="$SCRIPT_DIR/tmp"
+#export LOCAL_INFERENCE_CACHE="$SCRIPT_DIR/tmp"
 
 set -eux
 
@@ -157,12 +157,12 @@ fi
 
 ###############
 
-cmake --build build -j --target llama-mtmd-cli
+cmake --build build -j --target local-inference-mtmd-cli
 
 arr_res=()
 
 for i in "${!arr_hf[@]}"; do
-    bin="llama-mtmd-cli"
+    bin="local-inference-mtmd-cli"
     prefix="${arr_prefix[$i]}"
     hf="${arr_hf[$i]}"
     extra_args="${arr_extra_args[$i]}"

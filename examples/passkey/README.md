@@ -11,5 +11,5 @@ See the following PRs for more info:
 ### Usage
 
 ```bash
-llama-passkey -m ./models/llama-7b-v2/ggml-model-f16.gguf --junk 250
+local-inference-passkey -m ./models/llama-7b-v2/ggml-model-f16.gguf --junk 250
 ```

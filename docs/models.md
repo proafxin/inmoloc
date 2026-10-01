@@ -7,7 +7,7 @@ The [Hugging Face](https://huggingface.co) platform hosts [thousands of models](
 You can use any `llama.cpp`-compatible model from [Hugging Face](https://huggingface.co/) using this CLI argument: `-hf <user>/<model>[:quant]`. For example:
 
 ```sh
-llama cli -hf ggml-org/gemma-3-1b-it-GGUF
+local-inference cli -hf ggml-org/gemma-3-1b-it-GGUF
 ```
 
 You can use the same CLI invocation to download from other sites, by pointing the `MODEL_ENDPOINT` environment variable to an endpoint compatible with the Hugging Face API.

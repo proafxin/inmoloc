@@ -26,6 +26,6 @@ fi
 echo $CONVERTED_MODEL
 echo $MODEL_TESTING_PROMPT
 
-cmake --build ${BUILD_DIR} --target llama-debug -j8
+cmake --build ${BUILD_DIR} --target local-inference-debug -j8
 
-${BUILD_DIR}/bin/llama-debug -m "$CONVERTED_MODEL" -p "$MODEL_TESTING_PROMPT" --save-logits
+${BUILD_DIR}/bin/local-inference-debug -m "$CONVERTED_MODEL" -p "$MODEL_TESTING_PROMPT" --save-logits

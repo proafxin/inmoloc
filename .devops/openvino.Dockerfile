@@ -217,21 +217,21 @@ ENTRYPOINT ["/app/tools.sh"]
 ### Light, CLI only
 FROM base AS light
 
-COPY --from=build /app/full/llama /app/full/llama-cli /app/full/llama-completion /app/
+COPY --from=build /app/full/local-inference /app/full/local-inference-cli /app/full/local-inference-completion /app/
 
 WORKDIR /app
 
-ENTRYPOINT [ "/app/llama-cli" ]
+ENTRYPOINT [ "/app/local-inference-cli" ]
 
 ### Server, Server only
 FROM base AS server
 
-ENV LLAMA_ARG_HOST=0.0.0.0
+ENV LOCAL_INFERENCE_ARG_HOST=0.0.0.0
 
-COPY --from=build /app/full/llama /app/full/llama-server /app/
+COPY --from=build /app/full/local-inference /app/full/local-inference-server /app/
 
 WORKDIR /app
 
 HEALTHCHECK CMD [ "curl", "-f", "http://localhost:8080/health" ]
 
-ENTRYPOINT [ "/app/llama-server" ]
+ENTRYPOINT [ "/app/local-inference-server" ]

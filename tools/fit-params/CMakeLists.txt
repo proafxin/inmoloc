@@ -1,6 +1,6 @@
-# llama-fit-params-impl: fit-params logic, reusable by app
+# local-inference-fit-params-impl: fit-params logic, reusable by app
 
-set(TARGET llama-fit-params-impl)
+set(TARGET local-inference-fit-params-impl)
 
 add_library(${TARGET} fit-params.cpp)
 set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
@@ -12,12 +12,12 @@ if(LLAMA_TOOLS_INSTALL)
     install(TARGETS ${TARGET} LIBRARY)
 endif()
 
-# llama-fit-params executable
+# local-inference-fit-params executable
 
-set(TARGET llama-fit-params)
+set(TARGET local-inference-fit-params)
 
 add_executable(${TARGET} main.cpp)
-target_link_libraries(${TARGET} PRIVATE llama-fit-params-impl)
+target_link_libraries(${TARGET} PRIVATE local-inference-fit-params-impl)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 if(LLAMA_TOOLS_INSTALL)

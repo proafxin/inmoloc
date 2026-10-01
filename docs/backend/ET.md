@@ -17,8 +17,7 @@ RISC-V accelerator platform [ET-SOC](https://github.com/aifoundry-org/et-man).
 
 The ET backend runs several of the major OSS models with some limitations:
 
-- Only limited set of operations is supported (check [../ops.md](../ops.md)
-  and [../ops/ET.csv](../ops/ET.csv)).
+- Only limited set of operations is supported (`test-backend-ops` lists which ones on the ET device).
 - Only `q8_0`, `q4_0` (and partially `fp16`, `q4_K`) quantization is supported.
 - Only one llama.cpp instance can use device at the same time (current firmware
   limitation).
@@ -90,12 +89,12 @@ Run llama.cpp binaries as usual. (Of course, please make sure you have the
 ET-SOC device installed and kernel driver loaded).
 
 ```sh
-llama-cli -m mymodel.gguf
+local-inference-cli -m mymodel.gguf
 # or
-llama-server -hf ggml-org/Qwen3-8B-GGUF:q8_0
+local-inference-server -hf ggml-org/Qwen3-8B-GGUF:q8_0
 ```
 
-If you want to run llama.cpp binaries (e.g. `llama-cli`) inside docker
+If you want to run llama.cpp binaries (e.g. `local-inference-cli`) inside docker
 container, you should let it access device files:
 
 ```sh
@@ -137,9 +136,6 @@ Most kernels are very naive with lots of low hanging fruits left:
 > originally developed for firmware needs and is not included into compute
 > kernel build process. Feel free to take ideas/code from there or try linking
 > it in.
-
-Before committing any changes to operations and/or kernels, don't forget
-to update supported ops reports (instructions at `docs/ops.md`).
 
 When logging is enabled (e.g. by setting `--log-file` cli param),
 each compute kernel run outputs a line with

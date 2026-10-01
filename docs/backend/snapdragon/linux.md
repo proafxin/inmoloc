@@ -68,26 +68,26 @@ $ wget https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/
 ## How to Run
 You can run locally on the Snapdragon Linux device:
 ```
-$ ./scripts/snapdragon/run.py --devices HTP0 -- llama-cli -m Llama-3.2-3B-Instruct-Q4_0.gguf -ngl 99 -p "what is the most popular cookie in the world?"
+$ ./scripts/snapdragon/run.py --devices HTP0 -- local-inference-cli -m Llama-3.2-3B-Instruct-Q4_0.gguf -ngl 99 -p "what is the most popular cookie in the world?"
 ```
 
 Or run remotely from your host development machine using the SSH target option:
 ```
-$ ./scripts/snapdragon/run.py --target lnx:user@host --devices HTP0 -- llama-cli -m Llama-3.2-3B-Instruct-Q4_0.gguf -ngl 99 -p "what is the most popular cookie in the world?"
+$ ./scripts/snapdragon/run.py --target lnx:user@host --devices HTP0 -- local-inference-cli -m Llama-3.2-3B-Instruct-Q4_0.gguf -ngl 99 -p "what is the most popular cookie in the world?"
 ```
 
 For multi-NPU systems, you can run a tensor split completion command targeting a remote Linux system:
 ```
-$ ./scripts/snapdragon/run.py --target ubuntu:maxk@192.168.1.87 --device HTP0:0,HTP1:0 -- llama-completion -m models/gemma-2b-it-Q4_0.gguf -f prompts/sample_prompt_1024.txt --jinja -st --split-mode tensor --ctx-size 8192
+$ ./scripts/snapdragon/run.py --target ubuntu:maxk@192.168.1.87 --device HTP0:0,HTP1:0 -- local-inference-completion -m models/gemma-2b-it-Q4_0.gguf -f prompts/sample_prompt_1024.txt --jinja -st --split-mode tensor --ctx-size 8192
 ```
 
 This translates to the following command being executed remotely via SSH:
 ```
-+ ssh maxk@192.168.1.87 "cd ~/llama.cpp && ulimit -c unlimited && LD_LIBRARY_PATH=./lib ADSP_LIBRARY_PATH=./lib GGML_HEXAGON_DEVICES=HTP0:0,HTP1:0 GGML_HEXAGON_OPPOLL=1 ./bin/llama-completion -m models/gemma-2b-it-Q4_0.gguf -f prompts/sample_prompt_1024.txt --jinja -st --split-mode tensor --ctx-size 8192 -v -n 16 --device HTP0:0,HTP1:0 -ngl 99 --ubatch-size 1024 -fa on -t 6"
++ ssh maxk@192.168.1.87 "cd ~/llama.cpp && ulimit -c unlimited && LD_LIBRARY_PATH=./lib ADSP_LIBRARY_PATH=./lib GGML_HEXAGON_DEVICES=HTP0:0,HTP1:0 GGML_HEXAGON_OPPOLL=1 ./bin/local-inference-completion -m models/gemma-2b-it-Q4_0.gguf -f prompts/sample_prompt_1024.txt --jinja -st --split-mode tensor --ctx-size 8192 -v -n 16 --device HTP0:0,HTP1:0 -ngl 99 --ubatch-size 1024 -fa on -t 6"
 ```
 
 Alternatively, you can run the binary directly on the device:
 ```
-$ ./bin/llama-cli -m Llama-3.2-3B-Instruct-Q4_0.gguf --device HTP0 -ngl 99 -p "what is the most popular cookie in the world?"
+$ ./bin/local-inference-cli -m Llama-3.2-3B-Instruct-Q4_0.gguf --device HTP0 -ngl 99 -p "what is the most popular cookie in the world?"
 ```
 

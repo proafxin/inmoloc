@@ -7,9 +7,9 @@
 ## Images
 We have three Docker images available for this project:
 
-1. `ghcr.io/ggml-org/llama.cpp:full`: This image includes both the `llama-cli` and `llama-completion` executables and the tools to convert LLaMA models into ggml and convert into 4-bit quantization. (platforms: `linux/amd64`, `linux/arm64`, `linux/s390x`)
-2. `ghcr.io/ggml-org/llama.cpp:light`: This image only includes the `llama-cli` and `llama-completion` executables. (platforms: `linux/amd64`, `linux/arm64`, `linux/s390x`)
-3. `ghcr.io/ggml-org/llama.cpp:server`: This image only includes the `llama-server` executable. (platforms: `linux/amd64`, `linux/arm64`, `linux/s390x`)
+1. `ghcr.io/ggml-org/llama.cpp:full`: This image includes both the `local-inference-cli` and `local-inference-completion` executables and the tools to convert LLaMA models into ggml and convert into 4-bit quantization. (platforms: `linux/amd64`, `linux/arm64`, `linux/s390x`)
+2. `ghcr.io/ggml-org/llama.cpp:light`: This image only includes the `local-inference-cli` and `local-inference-completion` executables. (platforms: `linux/amd64`, `linux/arm64`, `linux/s390x`)
+3. `ghcr.io/ggml-org/llama.cpp:server`: This image only includes the `local-inference-server` executable. (platforms: `linux/amd64`, `linux/arm64`, `linux/s390x`)
 
 Additionally, there the following images, similar to the above:
 
@@ -60,8 +60,8 @@ docker run -v /path/to/models:/models ghcr.io/ggml-org/llama.cpp:full --run-lega
 or with a light image:
 
 ```bash
-docker run -v /path/to/models:/models --entrypoint /app/llama-cli ghcr.io/ggml-org/llama.cpp:light -m /models/7B/ggml-model-q4_0.gguf
-docker run -v /path/to/models:/models --entrypoint /app/llama-completion ghcr.io/ggml-org/llama.cpp:light -m /models/32B/ggml-model-q8_0.gguf -no-cnv -p "Building a mobile app can be done in 15 steps:" -n 512
+docker run -v /path/to/models:/models --entrypoint /app/local-inference-cli ghcr.io/ggml-org/llama.cpp:light -m /models/7B/ggml-model-q4_0.gguf
+docker run -v /path/to/models:/models --entrypoint /app/local-inference-completion ghcr.io/ggml-org/llama.cpp:light -m /models/32B/ggml-model-q8_0.gguf -no-cnv -p "Building a mobile app can be done in 15 steps:" -n 512
 ```
 
 or with a server image:
@@ -70,7 +70,7 @@ or with a server image:
 docker run -v /path/to/models:/models -p 8080:8080 ghcr.io/ggml-org/llama.cpp:server -m /models/7B/ggml-model-q4_0.gguf --port 8080 --host 0.0.0.0 -n 512
 ```
 
-In the above examples, `--entrypoint /app/llama-cli` is specified for clarity, but you can safely omit it since it's the default entrypoint in the container.
+In the above examples, `--entrypoint /app/local-inference-cli` is specified for clarity, but you can safely omit it since it's the default entrypoint in the container.
 
 ## Docker With CUDA
 
@@ -93,9 +93,9 @@ The defaults are:
 
 The resulting images, are essentially the same as the non-CUDA images:
 
-1. `local/llama.cpp:full-cuda`: This image includes both the `llama-cli` and `llama-completion` executables and the tools to convert LLaMA models into ggml and convert into 4-bit quantization.
-2. `local/llama.cpp:light-cuda`: This image only includes the `llama-cli` and `llama-completion` executables.
-3. `local/llama.cpp:server-cuda`: This image only includes the `llama-server` executable.
+1. `local/llama.cpp:full-cuda`: This image includes both the `local-inference-cli` and `local-inference-completion` executables and the tools to convert LLaMA models into ggml and convert into 4-bit quantization.
+2. `local/llama.cpp:light-cuda`: This image only includes the `local-inference-cli` and `local-inference-completion` executables.
+3. `local/llama.cpp:server-cuda`: This image only includes the `local-inference-server` executable.
 
 ## Usage
 
@@ -127,9 +127,9 @@ The defaults are:
 
 The resulting images, are essentially the same as the non-MUSA images:
 
-1. `local/llama.cpp:full-musa`: This image includes both the `llama-cli` and `llama-completion` executables and the tools to convert LLaMA models into ggml and convert into 4-bit quantization.
-2. `local/llama.cpp:light-musa`: This image only includes the `llama-cli` and `llama-completion` executables.
-3. `local/llama.cpp:server-musa`: This image only includes the `llama-server` executable.
+1. `local/llama.cpp:full-musa`: This image includes both the `local-inference-cli` and `local-inference-completion` executables and the tools to convert LLaMA models into ggml and convert into 4-bit quantization.
+2. `local/llama.cpp:light-musa`: This image only includes the `local-inference-cli` and `local-inference-completion` executables.
+3. `local/llama.cpp:server-musa`: This image only includes the `local-inference-server` executable.
 
 ## Usage
 
@@ -156,9 +156,9 @@ Refer to [.devops/intel.Dockerfile](../.devops/intel.Dockerfile) for the availab
 
 The resulting images, are essentially the same as the non-SYCL images:
 
-1. `local/llama.cpp:full-intel`: This image includes both the `llama-cli` and `llama-completion` executables and the tools to convert LLaMA models into ggml and convert into 4-bit quantization.
-2. `local/llama.cpp:light-intel`: This image only includes the `llama-cli` and `llama-completion` executables.
-3. `local/llama.cpp:server-intel`: This image only includes the `llama-server` executable.
+1. `local/llama.cpp:full-intel`: This image includes both the `local-inference-cli` and `local-inference-completion` executables and the tools to convert LLaMA models into ggml and convert into 4-bit quantization.
+2. `local/llama.cpp:light-intel`: This image only includes the `local-inference-cli` and `local-inference-completion` executables.
+3. `local/llama.cpp:server-intel`: This image only includes the `local-inference-server` executable.
 
 ## Usage
 

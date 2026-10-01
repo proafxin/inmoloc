@@ -5,7 +5,7 @@ import type { ClientCapabilities, Implementation } from '$lib/types';
 import type { Component } from 'svelte';
 
 export const DEFAULT_CLIENT_VERSION = '1.0.0';
-export const MCP_CLIENT_NAME = 'llama-ui-mcp';
+export const MCP_CLIENT_NAME = 'local-inference-ui-mcp';
 export const DEFAULT_IMAGE_MIME_TYPE = MimeTypeImage.PNG;
 
 /** MIME types considered safe for rendering MCP server icons */

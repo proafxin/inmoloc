@@ -1222,9 +1222,9 @@ private:
     // slots / clients
     std::vector<server_slot> slots;
 
-    int trace = 0;        // env: LLAMA_TRACE
-    int slots_debug = 0;  // env: LLAMA_SERVER_SLOTS_DEBUG
-    int slots_n_diff = 0; // env: LLAMA_SERVER_SLOTS_N_DIFF
+    int trace = 0;        // env: LOCAL_INFERENCE_TRACE
+    int slots_debug = 0;  // env: LOCAL_INFERENCE_SERVER_SLOTS_DEBUG
+    int slots_n_diff = 0; // env: LOCAL_INFERENCE_SERVER_SLOTS_N_DIFF
 
     int n_empty_consecutive = 0;
 
@@ -1656,29 +1656,29 @@ private:
         }
 
         {
-            const char * LLAMA_TRACE = getenv("LLAMA_TRACE");
-            trace = LLAMA_TRACE ? atoi(LLAMA_TRACE) : 0;
+            const char * LOCAL_INFERENCE_TRACE = getenv("LOCAL_INFERENCE_TRACE");
+            trace = LOCAL_INFERENCE_TRACE ? atoi(LOCAL_INFERENCE_TRACE) : 0;
 
             if (trace) {
-                SRV_WRN("LLAMA_TRACE = %d\n", trace);
+                SRV_WRN("LOCAL_INFERENCE_TRACE = %d\n", trace);
             }
         }
 
         {
-            const char * LLAMA_SERVER_SLOTS_DEBUG = getenv("LLAMA_SERVER_SLOTS_DEBUG");
-            slots_debug = LLAMA_SERVER_SLOTS_DEBUG ? atoi(LLAMA_SERVER_SLOTS_DEBUG) : 0;
+            const char * LOCAL_INFERENCE_SERVER_SLOTS_DEBUG = getenv("LOCAL_INFERENCE_SERVER_SLOTS_DEBUG");
+            slots_debug = LOCAL_INFERENCE_SERVER_SLOTS_DEBUG ? atoi(LOCAL_INFERENCE_SERVER_SLOTS_DEBUG) : 0;
 
             if (slots_debug) {
-                SRV_WRN("LLAMA_SERVER_SLOTS_DEBUG = %d\n", slots_debug);
+                SRV_WRN("LOCAL_INFERENCE_SERVER_SLOTS_DEBUG = %d\n", slots_debug);
             }
         }
 
         {
-            const char * LLAMA_SERVER_SLOTS_N_DIFF = getenv("LLAMA_SERVER_SLOTS_N_DIFF");
-            slots_n_diff = LLAMA_SERVER_SLOTS_N_DIFF ? atoi(LLAMA_SERVER_SLOTS_N_DIFF) : 0;
+            const char * LOCAL_INFERENCE_SERVER_SLOTS_N_DIFF = getenv("LOCAL_INFERENCE_SERVER_SLOTS_N_DIFF");
+            slots_n_diff = LOCAL_INFERENCE_SERVER_SLOTS_N_DIFF ? atoi(LOCAL_INFERENCE_SERVER_SLOTS_N_DIFF) : 0;
 
             if (slots_n_diff) {
-                SRV_WRN("LLAMA_SERVER_SLOTS_N_DIFF = %d\n", slots_n_diff);
+                SRV_WRN("LOCAL_INFERENCE_SERVER_SLOTS_N_DIFF = %d\n", slots_n_diff);
             }
         }
 
@@ -5913,7 +5913,7 @@ static json get_res_model_info(const server_context_meta & meta) {
         {"tags",     meta.model_tags},
         {"object",   "model"},
         {"created",  std::time(0)},
-        {"owned_by", "llamacpp"},
+        {"owned_by", "local-inference"},
         {"meta",     {
             {"vocab_type",  meta.model_vocab_type},
             {"n_vocab",     meta.model_vocab_n_tokens},

@@ -716,7 +716,7 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
     }
 
     static const bool debug = []() {
-        const char * env = getenv("LLAMA_DSV4_COMPRESS_DEBUG");
+        const char * env = getenv("LOCAL_INFERENCE_DSV4_COMPRESS_DEBUG");
         return env && atoi(env) > 0;
     }();
 

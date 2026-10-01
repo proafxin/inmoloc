@@ -38,6 +38,6 @@ fi
 cat <<EOF
 Usage:
 
-  llama-perplexity -m model.gguf -f $FILE [other params]
+  local-inference-perplexity -m model.gguf -f $FILE [other params]
 
 EOF

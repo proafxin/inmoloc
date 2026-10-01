@@ -311,7 +311,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="llama-server simulator for testing eval scripts"
+        description="local-inference-server simulator for testing eval scripts"
     )
     parser.add_argument(
         "--port",

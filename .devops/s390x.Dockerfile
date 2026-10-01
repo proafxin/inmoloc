@@ -124,22 +124,22 @@ WORKDIR /llama.cpp/bin
 
 # Copy llama.cpp binaries and libraries
 COPY --from=collector /llama.cpp/bin/*.so /llama.cpp/bin
-COPY --from=collector /llama.cpp/bin/llama /llama.cpp/bin/llama-cli /llama.cpp/bin/llama-completion /llama.cpp/bin
+COPY --from=collector /llama.cpp/bin/local-inference /llama.cpp/bin/local-inference-cli /llama.cpp/bin/local-inference-completion /llama.cpp/bin
 
-ENTRYPOINT [ "/llama.cpp/bin/llama-cli" ]
+ENTRYPOINT [ "/llama.cpp/bin/local-inference-cli" ]
 
 
 ### Server
 FROM base AS server
 
-ENV LLAMA_ARG_HOST=0.0.0.0
+ENV LOCAL_INFERENCE_ARG_HOST=0.0.0.0
 
 WORKDIR /llama.cpp/bin
 
 # Copy llama.cpp binaries and libraries
 COPY --from=collector /llama.cpp/bin/*.so /llama.cpp/bin
-COPY --from=collector /llama.cpp/bin/llama /llama.cpp/bin/llama-server /llama.cpp/bin
+COPY --from=collector /llama.cpp/bin/local-inference /llama.cpp/bin/local-inference-server /llama.cpp/bin
 
 EXPOSE 8080
 
-ENTRYPOINT [ "/llama.cpp/bin/llama-server" ]
+ENTRYPOINT [ "/llama.cpp/bin/local-inference-server" ]

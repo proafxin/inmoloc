@@ -9,7 +9,7 @@
 </div>
 
 inmoloc (Inferencia de Modelos Locales) serves many requests at once from one GPU. It starts in seconds, fits the number of concurrent requests to the memory you give it, and keeps each request's cost tied to its own context rather than to everything else in the cache. It runs GGUF models through an OpenAI-compatible HTTP API, including vision models.
-
+ 
 inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps its model support, quantization formats and backends. See [NOTICE](NOTICE) for credits.
 
 ## Why a separate project
@@ -52,13 +52,13 @@ Build with CUDA (see [the build guide](docs/build.md) for other backends):
 
 ```sh
 cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release -j --target llama-server
+cmake --build build --config Release -j --target local-inference-server
 ```
 
 Serve a model with a 128k-token context shared by all requests, a q8_0 KV cache and a 22 GiB memory budget:
 
 ```sh
-build/bin/llama-server -m model.gguf --mmproj mmproj.gguf -ngl 999 --flash-attn on \
+build/bin/local-inference-server -m model.gguf --mmproj mmproj.gguf -ngl 999 --flash-attn on \
     --ctx-size 131072 --cache-type-k q8_0 --cache-type-v q8_0 \
     --vram-budget 22G --parallel 64 --metrics --port 8100
 ```

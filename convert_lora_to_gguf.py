@@ -501,7 +501,7 @@ if __name__ == '__main__':
             def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
                 dest = list(super().modify_tensors(data_torch, name, bid))
                 # some archs may have the same tensor for lm_head and output (tie word embeddings)
-                # in this case, adapters targeting lm_head will fail when using llama-export-lora
+                # in this case, adapters targeting lm_head will fail when using local-inference-export-lora
                 # therefore, we ignore them for now
                 # see: https://github.com/ggml-org/llama.cpp/issues/9065
                 if name == "lm_head.weight" and len(dest) == 0:

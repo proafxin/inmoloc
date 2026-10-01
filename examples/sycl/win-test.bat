@@ -10,7 +10,7 @@ REM MIT license
 REM Copyright (C) 2024 Intel Corporation
 REM SPDX-License-Identifier: MIT
 
-set "BIN_FILE=.\build\bin\llama-completion.exe"
+set "BIN_FILE=.\build\bin\local-inference-completion.exe"
 set "SEED=0"
 set "GPUS_SETTING="
 

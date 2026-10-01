@@ -1872,7 +1872,7 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
     // shared across all sequences
     common_ngram_mod mod;
 
-    // enable trace logging if LLAMA_TRACE is set
+    // enable trace logging if LOCAL_INFERENCE_TRACE is set
     const bool verbose;
 
     struct seq_info {
@@ -1894,7 +1894,7 @@ struct common_speculative_impl_ngram_mod : public common_speculative_impl {
         : common_speculative_impl(COMMON_SPECULATIVE_TYPE_NGRAM_MOD, n_seq, params.ngram_mod.n_max)
         , params(params.ngram_mod)
         , mod(params.ngram_mod.n_match, 4*1024*1024)
-        , verbose(std::getenv("LLAMA_TRACE") != nullptr) {
+        , verbose(std::getenv("LOCAL_INFERENCE_TRACE") != nullptr) {
         static_assert(sizeof(llama_token) == sizeof(common_ngram_mod::entry_t));
 
         SPC_TRC("%s", "adding speculative implementation 'ngram-mod'\n");

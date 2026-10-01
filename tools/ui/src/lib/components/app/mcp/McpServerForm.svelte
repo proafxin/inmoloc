@@ -241,13 +241,13 @@
 			/>
 
 			<span>
-				<span class="text-xs text-muted-foreground">Use llama-server proxy</span>
+				<span class="text-xs text-muted-foreground">Use local-inference-server proxy</span>
 
 				<br />
 
 				{#if !mcpStore.isProxyAvailable}
 					<span class="inline-flex gap-0.75 text-xs text-muted-foreground/60"
-						>(Run <pre>llama-server</pre>
+						>(Run <pre>local-inference-server</pre>
 						with
 						<pre>{CLI_FLAGS.MCP_PROXY}</pre>
 						flag)</span

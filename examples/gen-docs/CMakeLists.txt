@@ -1,4 +1,4 @@
-set(TARGET llama-gen-docs)
+set(TARGET local-inference-gen-docs)
 add_executable(${TARGET} gen-docs.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_link_libraries(${TARGET} PRIVATE llama-common llama ${CMAKE_THREAD_LIBS_INIT})

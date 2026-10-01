@@ -7,7 +7,7 @@ base_model:
 Recommended way to run this model:
 
 ```sh
-llama-server -hf {namespace}/{model_name}-GGUF --embeddings
+local-inference-server -hf {namespace}/{model_name}-GGUF --embeddings
 ```
 
 Then the endpoint can be accessed at http://localhost:8080/embedding, for
@@ -20,9 +20,9 @@ curl --request POST \
     --silent
 ```
 
-Alternatively, the `llama-embedding` command line tool can be used:
+Alternatively, the `local-inference-embedding` command line tool can be used:
 ```sh
-llama-embedding -hf {namespace}/{model_name}-GGUF --verbose-prompt -p "Hello embeddings"
+local-inference-embedding -hf {namespace}/{model_name}-GGUF --verbose-prompt -p "Hello embeddings"
 ```
 
 #### embd_normalize
@@ -37,12 +37,12 @@ the Euclidean norm (L2). Other options are:
 *  2 Euclidean/L2
 * \>2 P-Norm
 
-This can be passed in the request body to `llama-server`, for example:
+This can be passed in the request body to `local-inference-server`, for example:
 ```sh
     --data '{{"input": "Hello embeddings", "embd_normalize": -1}}' \
 ```
 
-And for `llama-embedding`, by passing `--embd-normalize <value>`, for example:
+And for `local-inference-embedding`, by passing `--embd-normalize <value>`, for example:
 ```sh
-llama-embedding -hf {namespace}/{model_name}-GGUF  --embd-normalize -1 -p "Hello embeddings"
+local-inference-embedding -hf {namespace}/{model_name}-GGUF  --embd-normalize -1 -p "Hello embeddings"
 ```

@@ -6,7 +6,7 @@
 #include <vector>
 
 static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
-    { LLM_ARCH_CLIP,             "clip"             }, // dummy, only used by llama-quantize
+    { LLM_ARCH_CLIP,             "clip"             }, // dummy, only used by local-inference-quantize
     { LLM_ARCH_LLAMA,            "llama"            },
     { LLM_ARCH_LLAMA4,           "llama4"           },
     { LLM_ARCH_DECI,             "deci"             },

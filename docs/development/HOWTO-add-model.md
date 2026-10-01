@@ -121,7 +121,7 @@ This is the funniest part, you have to provide the inference graph implementatio
 
 Some `ggml` backends do not support all operations. Backend implementations can be added in a separate PR.
 
-Note: to debug the inference graph: you can use [llama-eval-callback](/examples/eval-callback/).
+Note: to debug the inference graph: you can use [local-inference-eval-callback](/examples/eval-callback/).
 
 ### 4. Optional: Add multimodal encoder implementation
 
@@ -134,9 +134,9 @@ If the new model supports multimodal inputs, you will need to add a new encoder 
 
 Note:
 - Many multimodal encoders are based on models that are already supported. Make sure to read the existing encoder definitions in `tools/mtmd/models` before adding a new one. In `libmtmd`, it is generally better to extend an existing model than to duplicate code.
-- To debug the multimodal preprocessor and encoder, you can use [llama-mtmd-debug](tools/mtmd/debug/mtmd-debug.cpp).
+- To debug the multimodal preprocessor and encoder, you can use [local-inference-mtmd-debug](tools/mtmd/debug/mtmd-debug.cpp).
 - Adding a model-specific API or CLI is an anti-pattern in `libmtmd`. The goal of `libmtmd` is to provide an easy-to-use, model-agnostic library for multimodal pipeline.
-- In most cases, `llama-mtmd-cli` should not be modified. If a model requires a specific prompt, either let the user provide it or bake it into the Jinja chat template.
+- In most cases, `local-inference-mtmd-cli` should not be modified. If a model requires a specific prompt, either let the user provide it or bake it into the Jinja chat template.
 - For audio generation models, see `tools/mtmd/README-dev.md`
 
 ## Tips and tricks

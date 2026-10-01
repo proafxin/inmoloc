@@ -1,17 +1,17 @@
-set(TARGET llama-app)
+set(TARGET local-inference-app)
 
 add_executable(${TARGET} llama.cpp download.cpp)
-set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME llama)
+set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME local-inference)
 
 target_link_libraries(${TARGET} PRIVATE
-    llama-server-impl
-    llama-cli-impl
-    llama-completion-impl
-    llama-bench-impl
-    llama-batched-bench-impl
-    llama-fit-params-impl
-    llama-quantize-impl
-    llama-perplexity-impl
+    local-inference-server-impl
+    local-inference-cli-impl
+    local-inference-completion-impl
+    local-inference-bench-impl
+    local-inference-batched-bench-impl
+    local-inference-fit-params-impl
+    local-inference-quantize-impl
+    local-inference-perplexity-impl
 )
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 

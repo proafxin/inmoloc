@@ -144,7 +144,7 @@ static best_fattn_kernel ggml_sycl_get_best_fattn_kernel(const int device, const
     // and n_kv >= 1024. Falls through to TILE/VEC for ALiBi, logit softcap,
     // and mismatched batch dimensions (unsupported by the MKL kernel).
     // Set GGML_SYCL_ENABLE_MKL_FA=0 to force TILE/VEC path for A/B testing.
-    // Example: GGML_SYCL_ENABLE_MKL_FA=0 llama-cli -m model.gguf -fa -ngl 99 ...
+    // Example: GGML_SYCL_ENABLE_MKL_FA=0 local-inference-cli -m model.gguf -fa -ngl 99 ...
     // Note: MKL GEMM calls are incompatible with SYCL graph capture replay.
     // MKL is validated for the mainstream GQA envelope: grouped-query
     // (gqa_ratio >= 2), head_dim a multiple of 64 in [64,512] with matching

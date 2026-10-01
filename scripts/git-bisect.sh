@@ -2,7 +2,7 @@
 
 if [ $# -lt 2 ]; then
     echo "usage: ./scripts/git-bisect.sh <commit_bad> <commit_good> [additional arguments]"
-    echo "  additional arguments: passed to CMake if they start with \"-D\", to llama-results otherwise"
+    echo "  additional arguments: passed to CMake if they start with \"-D\", to local-inference-results otherwise"
     exit 1
 fi
 

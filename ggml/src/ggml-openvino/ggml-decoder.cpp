@@ -754,7 +754,7 @@ std::pair<ModelParams, ComputeParams> GgmlOvDecoder::compute_llm_params(ggml_cgr
     }
     auto * output_tensor = cgraph->nodes[cgraph->n_nodes - 1];
     compute_params.output_len = output_tensor->ne[1];
-    // for NPU, output_len is always 1 except for llama-perplexity
+    // for NPU, output_len is always 1 except for local-inference-perplexity
     if (is_static && compute_params.output_len == 0) {
         compute_params.output_len = 1;
     }
@@ -808,7 +808,7 @@ ov::PartialShape GgmlOvDecoder::get_graph_input_shape(const ggml_tensor * op,
         // skip dynamic dim and stateful reshape for this layout.
         const bool is_flat_kv = (input->ne[1] == 1 && input->ne[2] == 1 && input->ne[3] == 1);
         if (!m_is_static && !is_flat_kv) {
-            // do not fix ctx size to make llama-bench work across test params
+            // do not fix ctx size to make local-inference-bench work across test params
             input_shape[2] = -1;
         }
         if (is_stateful() && !is_flat_kv) {

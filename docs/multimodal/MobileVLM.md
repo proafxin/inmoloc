@@ -10,12 +10,12 @@ Notice: The overall process of model inference for both **MobileVLM** and **Mobi
 
 ## Usage
 
-Build the `llama-mtmd-cli` binary.
+Build the `local-inference-mtmd-cli` binary.
 
-After building, run: `./llama-mtmd-cli` to see the usage. For example:
+After building, run: `./local-inference-mtmd-cli` to see the usage. For example:
 
 ```sh
-./llama-mtmd-cli -m MobileVLM-1.7B/ggml-model-q4_k.gguf \
+./local-inference-mtmd-cli -m MobileVLM-1.7B/ggml-model-q4_k.gguf \
     --mmproj MobileVLM-1.7B/mmproj-model-f16.gguf \
     --chat-template deepseek
 ```
@@ -62,7 +62,7 @@ python ./examples/convert_legacy_llama.py path/to/MobileVLM-1.7B --skip-unknown
 
 5. Use `quantize` to convert LLaMA part's DataType from `fp32` to `q4_k`
 ```sh
-./llama-quantize path/to/MobileVLM-1.7B/ggml-model-F32.gguf path/to/MobileVLM-1.7B/ggml-model-q4_k.gguf q4_k_s
+./local-inference-quantize path/to/MobileVLM-1.7B/ggml-model-F32.gguf path/to/MobileVLM-1.7B/ggml-model-q4_k.gguf q4_k_s
 ```
 
 Now both the LLaMA part and the image encoder is in the `MobileVLM-1.7B` directory.
@@ -82,7 +82,7 @@ refer to `android/adb_run.sh`, modify resources' `name` and `path`
 ### case 1
 **input**
 ```sh
-/data/local/tmp/llama-mtmd-cli \
+/data/local/tmp/local-inference-mtmd-cli \
     -m /data/local/tmp/ggml-model-q4_k.gguf \
     --mmproj /data/local/tmp/mmproj-model-f16.gguf \
     -t 4 \
@@ -102,7 +102,7 @@ llama_print_timings:       total time =   34731.93 ms
 ### case 2
 **input**
 ```sh
-/data/local/tmp/llama-mtmd-cli \
+/data/local/tmp/local-inference-mtmd-cli \
     -m /data/local/tmp/ggml-model-q4_k.gguf \
     --mmproj /data/local/tmp/mmproj-model-f16.gguf \
     -t 4 \
@@ -126,7 +126,7 @@ llama_print_timings:       total time =   34570.79 ms
 #### mtmd-cli release-b2005
 **input**
 ```sh
-/data/local/tmp/llama-mtmd-cli \
+/data/local/tmp/local-inference-mtmd-cli \
     -m /data/local/tmp/ggml-model-q4_k.gguf \
     --mmproj /data/local/tmp/mmproj-model-f16.gguf \
     -t 4 \
@@ -200,7 +200,7 @@ make GGML_CUDA=1 CUDA_DOCKER_ARCH=sm_87 -j 32
 ### case 1
 **input**
 ```sh
-./llama-mtmd-cli \
+./local-inference-mtmd-cli \
     -m /data/local/tmp/ggml-model-q4_k.gguf \
     --mmproj /data/local/tmp/mmproj-model-f16.gguf \
     --image /data/local/tmp/demo.jpeg \
@@ -224,7 +224,7 @@ llama_print_timings:       total time =    1352.63 ms /   252 tokens
 ### case 2
 **input**
 ```sh
-./llama-mtmd-cli \
+./local-inference-mtmd-cli \
     -m /data/local/tmp/ggml-model-q4_k.gguf \
     --mmproj /data/local/tmp/mmproj-model-f16.gguf \
     -p "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. USER: <image>\nWhat is in the image? ASSISTANT:" \

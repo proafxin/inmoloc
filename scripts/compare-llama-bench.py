@@ -22,7 +22,7 @@ except ImportError as e:
 
 logger = logging.getLogger("compare-llama-bench")
 
-# All llama-bench SQL fields
+# All local-inference-bench SQL fields
 LLAMA_BENCH_DB_FIELDS = [
     "build_commit", "build_number", "cpu_info",       "gpu_info",   "backends",     "model_filename",
     "model_type",   "model_size",   "model_n_params", "n_batch",    "n_ubatch",     "n_threads",
@@ -59,7 +59,7 @@ TEST_BACKEND_OPS_DB_TYPES = [
 assert len(LLAMA_BENCH_DB_FIELDS) == len(LLAMA_BENCH_DB_TYPES)
 assert len(TEST_BACKEND_OPS_DB_FIELDS) == len(TEST_BACKEND_OPS_DB_TYPES)
 
-# Properties by which to differentiate results per commit for llama-bench:
+# Properties by which to differentiate results per commit for local-inference-bench:
 LLAMA_BENCH_KEY_PROPERTIES = [
     "cpu_info", "gpu_info", "backends", "n_gpu_layers", "n_cpu_moe", "tensor_buft_overrides", "model_filename", "model_type",
     "n_batch", "n_ubatch", "embeddings", "cpu_mask", "cpu_strict", "poll", "n_threads", "type_k", "type_v",
@@ -76,7 +76,7 @@ TEST_BACKEND_OPS_KEY_PROPERTIES = [
 LLAMA_BENCH_BOOL_PROPERTIES = ["embeddings", "cpu_strict", "no_kv_offload", "flash_attn"]
 TEST_BACKEND_OPS_BOOL_PROPERTIES = ["supported", "passed"]
 
-# Header names for the table (llama-bench):
+# Header names for the table (local-inference-bench):
 LLAMA_BENCH_PRETTY_NAMES = {
     "cpu_info": "CPU", "gpu_info": "GPU", "backends": "Backends", "n_gpu_layers": "GPU layers",
     "tensor_buft_overrides": "Tensor overrides", "model_filename": "File", "model_type": "Model", "model_size": "Model size [GiB]",
@@ -102,15 +102,15 @@ DEFAULT_HIDE_TEST_BACKEND_OPS = ["error_message"]  # Always hide these propertie
 GPU_NAME_STRIP = ["NVIDIA GeForce ", "Tesla ", "AMD Radeon ", "AMD Instinct "]  # Strip prefixes for smaller tables.
 MODEL_SUFFIX_REPLACE = {" - Small": "_S", " - Medium": "_M", " - Large": "_L"}
 
-DESCRIPTION = """Creates tables from llama-bench or test-backend-ops data written to multiple JSON/CSV files, a single JSONL file or SQLite database. Example usage (Linux):
+DESCRIPTION = """Creates tables from local-inference-bench or test-backend-ops data written to multiple JSON/CSV files, a single JSONL file or SQLite database. Example usage (Linux):
 
-For llama-bench:
+For local-inference-bench:
 $ git checkout master
-$ cmake -B ${BUILD_DIR} ${CMAKE_OPTS} && cmake --build ${BUILD_DIR} -t llama-bench -j $(nproc)
-$ ./llama-bench -o sql | sqlite3 llama-bench.sqlite
+$ cmake -B ${BUILD_DIR} ${CMAKE_OPTS} && cmake --build ${BUILD_DIR} -t local-inference-bench -j $(nproc)
+$ ./local-inference-bench -o sql | sqlite3 local-inference-bench.sqlite
 $ git checkout some_branch
-$ cmake -B ${BUILD_DIR} ${CMAKE_OPTS} && cmake --build ${BUILD_DIR} -t llama-bench -j $(nproc)
-$ ./llama-bench -o sql | sqlite3 llama-bench.sqlite
+$ cmake -B ${BUILD_DIR} ${CMAKE_OPTS} && cmake --build ${BUILD_DIR} -t local-inference-bench -j $(nproc)
+$ ./local-inference-bench -o sql | sqlite3 local-inference-bench.sqlite
 $ ./scripts/compare-llama-bench.py
 
 For test-backend-ops:
@@ -122,7 +122,7 @@ $ cmake -B ${BUILD_DIR} ${CMAKE_OPTS} && cmake --build ${BUILD_DIR} -t test-back
 $ ./test-backend-ops perf --output sql | sqlite3 test-backend-ops.sqlite
 $ ./scripts/compare-llama-bench.py --tool test-backend-ops -i test-backend-ops.sqlite
 
-Performance numbers from multiple runs per commit are averaged WITHOUT being weighted by the --repetitions parameter of llama-bench.
+Performance numbers from multiple runs per commit are averaged WITHOUT being weighted by the --repetitions parameter of local-inference-bench.
 """
 
 parser = argparse.ArgumentParser(
@@ -136,20 +136,20 @@ parser.add_argument("-b", "--baseline", help=help_b)
 help_c = (
     "The commit whose performance is to be compared to the baseline. "
     "Accepts either a branch name, tag name, or commit hash. "
-    "Defaults to the non-master commit for which llama-bench was run most recently."
+    "Defaults to the non-master commit for which local-inference-bench was run most recently."
 )
 parser.add_argument("-c", "--compare", help=help_c)
 help_t = (
     "The tool whose data is being compared. "
-    "Either 'llama-bench' or 'test-backend-ops'. "
+    "Either 'local-inference-bench' or 'test-backend-ops'. "
     "This determines the database schema and comparison logic used. "
     "If left unspecified, try to determine from the input file."
 )
-parser.add_argument("-t", "--tool", help=help_t, default=None, choices=[None, "llama-bench", "test-backend-ops"])
+parser.add_argument("-t", "--tool", help=help_t, default=None, choices=[None, "local-inference-bench", "test-backend-ops"])
 help_i = (
     "JSON/JSONL/SQLite/CSV files for comparing commits. "
     "Specify multiple times to use multiple input files (JSON/CSV only). "
-    "Defaults to 'llama-bench.sqlite' in the current working directory. "
+    "Defaults to 'local-inference-bench.sqlite' in the current working directory. "
     "If no such file is found and there is exactly one .sqlite file in the current directory, "
     "that file is instead used as input."
 )
@@ -165,11 +165,11 @@ help_s = (
     "Columns to add to the table. "
     "Accepts a comma-separated list of values. "
     f"Legal values for test-backend-ops: {', '.join(TEST_BACKEND_OPS_KEY_PROPERTIES)}. "
-    f"Legal values for llama-bench: {', '.join(LLAMA_BENCH_KEY_PROPERTIES[:-3])}. "
+    f"Legal values for local-inference-bench: {', '.join(LLAMA_BENCH_KEY_PROPERTIES[:-3])}. "
     "Defaults to model name (model_type) and CPU and/or GPU name (cpu_info, gpu_info) "
     "plus any column where not all data points are the same. "
     "If the columns are manually specified, then the results for each unique combination of the "
-    "specified values are averaged WITHOUT weighing by the --repetitions parameter of llama-bench."
+    "specified values are averaged WITHOUT weighing by the --repetitions parameter of local-inference-bench."
 )
 parser.add_argument("--check", action="store_true", help="check if all required Python libraries are installed")
 parser.add_argument("-s", "--show", help=help_s)
@@ -196,8 +196,8 @@ input_file = known_args.input
 tool = known_args.tool
 
 if not input_file:
-    if tool == "llama-bench" and os.path.exists("./llama-bench.sqlite"):
-        input_file = ["llama-bench.sqlite"]
+    if tool == "local-inference-bench" and os.path.exists("./local-inference-bench.sqlite"):
+        input_file = ["local-inference-bench.sqlite"]
     elif tool == "test-backend-ops" and os.path.exists("./test-backend-ops.sqlite"):
         input_file = ["test-backend-ops.sqlite"]
 
@@ -218,9 +218,9 @@ class LlamaBenchData:
     build_len_max: int
     build_len: int = 8
     builds: list[str] = []
-    tool: str = "llama-bench"  # Tool type: "llama-bench" or "test-backend-ops"
+    tool: str = "local-inference-bench"  # Tool type: "local-inference-bench" or "test-backend-ops"
 
-    def __init__(self, tool: str = "llama-bench"):
+    def __init__(self, tool: str = "local-inference-bench"):
         self.tool = tool
         try:
             self.repo = git.Repo(".", search_parent_directories=True)
@@ -228,7 +228,7 @@ class LlamaBenchData:
             self.repo = None
 
         # Set schema-specific properties based on tool
-        if self.tool == "llama-bench":
+        if self.tool == "local-inference-bench":
             self.check_keys = set(LLAMA_BENCH_KEY_PROPERTIES + ["build_commit", "test_time", "avg_ts"])
         elif self.tool == "test-backend-ops":
             self.check_keys = set(TEST_BACKEND_OPS_KEY_PROPERTIES + ["build_commit", "test_time"])
@@ -324,14 +324,14 @@ class LlamaBenchDataSQLite3(LlamaBenchData):
     cursor: sqlite3.Cursor
     table_name: str
 
-    def __init__(self, tool: str = "llama-bench"):
+    def __init__(self, tool: str = "local-inference-bench"):
         super().__init__(tool)
         if self.connection is None:
             self.connection = sqlite3.connect(":memory:")
             self.cursor = self.connection.cursor()
 
             # Set table name and schema based on tool
-            if self.tool == "llama-bench":
+            if self.tool == "local-inference-bench":
                 self.table_name = "llama_bench"
                 db_fields = LLAMA_BENCH_DB_FIELDS
                 db_types = LLAMA_BENCH_DB_TYPES
@@ -364,7 +364,7 @@ class LlamaBenchDataSQLite3(LlamaBenchData):
         return reversed(data) if reverse else data
 
     def get_rows(self, properties: list[str], hexsha8_baseline: str, hexsha8_compare: str) -> Sequence[tuple]:
-        if self.tool == "llama-bench":
+        if self.tool == "local-inference-bench":
             return self._get_rows_llama_bench(properties, hexsha8_baseline, hexsha8_compare)
         elif self.tool == "test-backend-ops":
             return self._get_rows_test_backend_ops(properties, hexsha8_baseline, hexsha8_compare)
@@ -414,18 +414,18 @@ class LlamaBenchDataSQLite3File(LlamaBenchDataSQLite3):
         if tool is None:
             if "llama_bench" in table_names:
                 self.table_name = "llama_bench"
-                tool = "llama-bench"
+                tool = "local-inference-bench"
             elif "test_backend_ops" in table_names:
                 self.table_name = "test_backend_ops"
                 tool = "test-backend-ops"
             else:
                 raise RuntimeError(f"No suitable table found in database. Available tables: {table_names}")
-        elif tool == "llama-bench":
+        elif tool == "local-inference-bench":
             if "llama_bench" in table_names:
                 self.table_name = "llama_bench"
-                tool = "llama-bench"
+                tool = "local-inference-bench"
             else:
-                raise RuntimeError(f"Table 'test' not found for tool 'llama-bench'. Available tables: {table_names}")
+                raise RuntimeError(f"Table 'test' not found for tool 'local-inference-bench'. Available tables: {table_names}")
         elif tool == "test-backend-ops":
             if "test_backend_ops" in table_names:
                 self.table_name = "test_backend_ops"
@@ -455,11 +455,11 @@ class LlamaBenchDataSQLite3File(LlamaBenchDataSQLite3):
 
 
 class LlamaBenchDataJSONL(LlamaBenchDataSQLite3):
-    def __init__(self, data_file: str, tool: str = "llama-bench"):
+    def __init__(self, data_file: str, tool: str = "local-inference-bench"):
         super().__init__(tool)
 
         # Get the appropriate field list based on tool
-        db_fields = LLAMA_BENCH_DB_FIELDS if tool == "llama-bench" else TEST_BACKEND_OPS_DB_FIELDS
+        db_fields = LLAMA_BENCH_DB_FIELDS if tool == "local-inference-bench" else TEST_BACKEND_OPS_DB_FIELDS
 
         with open(data_file, "r", encoding="utf-8") as fp:
             for i, line in enumerate(fp):
@@ -490,11 +490,11 @@ class LlamaBenchDataJSONL(LlamaBenchDataSQLite3):
 
 
 class LlamaBenchDataJSON(LlamaBenchDataSQLite3):
-    def __init__(self, data_files: list[str], tool: str = "llama-bench"):
+    def __init__(self, data_files: list[str], tool: str = "local-inference-bench"):
         super().__init__(tool)
 
         # Get the appropriate field list based on tool
-        db_fields = LLAMA_BENCH_DB_FIELDS if tool == "llama-bench" else TEST_BACKEND_OPS_DB_FIELDS
+        db_fields = LLAMA_BENCH_DB_FIELDS if tool == "local-inference-bench" else TEST_BACKEND_OPS_DB_FIELDS
 
         for data_file in data_files:
             with open(data_file, "r", encoding="utf-8") as fp:
@@ -528,11 +528,11 @@ class LlamaBenchDataJSON(LlamaBenchDataSQLite3):
 
 
 class LlamaBenchDataCSV(LlamaBenchDataSQLite3):
-    def __init__(self, data_files: list[str], tool: str = "llama-bench"):
+    def __init__(self, data_files: list[str], tool: str = "local-inference-bench"):
         super().__init__(tool)
 
         # Get the appropriate field list based on tool
-        db_fields = LLAMA_BENCH_DB_FIELDS if tool == "llama-bench" else TEST_BACKEND_OPS_DB_FIELDS
+        db_fields = LLAMA_BENCH_DB_FIELDS if tool == "local-inference-bench" else TEST_BACKEND_OPS_DB_FIELDS
 
         for data_file in data_files:
             with open(data_file, "r", encoding="utf-8") as fp:
@@ -702,7 +702,7 @@ if known_args.compare is not None:
     if hexsha8_compare is None:
         logger.error(f"cannot find data for compare={known_args.compare}.")
         sys.exit(1)
-# Otherwise, search for the commit for llama-bench was most recently run
+# Otherwise, search for the commit for local-inference-bench was most recently run
 # and that is not a parent of master:
 elif bench_data.repo is not None:
     hexsha8s_master = bench_data.get_all_parent_hexsha8s(bench_data.repo.heads.master.commit)
@@ -725,7 +725,7 @@ assert isinstance(hexsha8_compare, str)
 name_compare = bench_data.get_commit_name(hexsha8_compare)
 
 # Get tool-specific configuration
-if tool == "llama-bench":
+if tool == "local-inference-bench":
     key_properties = LLAMA_BENCH_KEY_PROPERTIES
     bool_properties = LLAMA_BENCH_BOOL_PROPERTIES
     pretty_names = LLAMA_BENCH_PRETTY_NAMES
@@ -745,7 +745,7 @@ if known_args.show is not None:
     show = known_args.show.split(",")
     unknown_cols = []
     for prop in show:
-        valid_props = key_properties if tool == "test-backend-ops" else key_properties[:-3]  # Exclude n_prompt, n_gen, n_depth for llama-bench
+        valid_props = key_properties if tool == "test-backend-ops" else key_properties[:-3]  # Exclude n_prompt, n_gen, n_depth for local-inference-bench
         if prop not in valid_props:
             unknown_cols.append(prop)
     if unknown_cols:
@@ -758,8 +758,8 @@ else:
     rows_full = bench_data.get_rows(key_properties, hexsha8_baseline, hexsha8_compare)
     properties_different = []
 
-    if tool == "llama-bench":
-        # For llama-bench, skip n_prompt, n_gen, n_depth from differentiation logic
+    if tool == "local-inference-bench":
+        # For local-inference-bench, skip n_prompt, n_gen, n_depth from differentiation logic
         check_properties = [kp for kp in key_properties if kp not in ["n_prompt", "n_gen", "n_depth"]]
         for i, kp_i in enumerate(key_properties):
             if kp_i in default_show or kp_i in ["n_prompt", "n_gen", "n_depth"]:
@@ -782,7 +782,7 @@ else:
 
     show = []
 
-    if tool == "llama-bench":
+    if tool == "local-inference-bench":
         # Show CPU and/or GPU by default even if the hardware for all results is the same:
         if rows_full and "n_gpu_layers" not in properties_different:
             ngl = int(rows_full[0][key_properties.index("n_gpu_layers")])
@@ -824,8 +824,8 @@ if not rows_show:
 table = []
 primary_metric = "FLOPS"  # Default to FLOPS for test-backend-ops
 
-if tool == "llama-bench":
-    # For llama-bench, create test names and compare avg_ts values
+if tool == "local-inference-bench":
+    # For local-inference-bench, create test names and compare avg_ts values
     for row in rows_show:
         n_prompt = int(row[-5])
         n_gen    = int(row[-4])
@@ -899,7 +899,7 @@ for bool_property in bool_properties:
         for row_table in table:
             row_table[ip] = "Yes" if int(row_table[ip]) == 1 else "No"
 
-if tool == "llama-bench":
+if tool == "local-inference-bench":
     if "model_type" in show:
         ip = show.index("model_type")
         for (old, new) in MODEL_SUFFIX_REPLACE.items():
@@ -924,7 +924,7 @@ if tool == "llama-bench":
                 row_table[ip] = f"{num_gpus}x {gpu_names[0]}"
 
 headers  = [pretty_names.get(p, p) for p in show]
-if tool == "llama-bench":
+if tool == "local-inference-bench":
     headers += ["Test", f"t/s {name_baseline}", f"t/s {name_compare}", "Speedup"]
 elif tool == "test-backend-ops":
     headers += [f"{primary_metric} {name_baseline}", f"{primary_metric} {name_compare}", "Speedup"]
@@ -932,7 +932,7 @@ else:
     assert False
 
 if known_args.plot:
-    def create_performance_plot(table_data: list[list[str]], headers: list[str], baseline_name: str, compare_name: str, output_file: str, plot_x_param: str, log_scale: bool = False, tool_type: str = "llama-bench", metric_name: str = "t/s"):
+    def create_performance_plot(table_data: list[list[str]], headers: list[str], baseline_name: str, compare_name: str, output_file: str, plot_x_param: str, log_scale: bool = False, tool_type: str = "local-inference-bench", metric_name: str = "t/s"):
         try:
             import matplotlib
             import matplotlib.pyplot as plt
@@ -1066,7 +1066,7 @@ if known_args.plot:
             title = ', '.join(title_parts) if title_parts else "Performance comparison"
 
             # Determine y-axis label based on tool type
-            if tool_type == "llama-bench":
+            if tool_type == "local-inference-bench":
                 y_label = "Tokens per second (t/s)"
             elif tool_type == "test-backend-ops":
                 y_label = metric_name

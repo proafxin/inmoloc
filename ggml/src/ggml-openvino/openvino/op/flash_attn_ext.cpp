@@ -134,7 +134,7 @@ OutputVector translate_flash_attn_ext(const NodeContext & context) {
 
     if (use_manual_gqa_attention) {
         // Q, K, V arrive as [B, n_heads(_kv), S, head_size], where B is the active
-        // batch (n_seq_active) and may be > 1 (llama-perplexity, llama-server -np > 1)
+        // batch (n_seq_active) and may be > 1 (local-inference-perplexity, local-inference-server -np > 1)
         // or dynamic. Reshape to
         //   K_r: [B, num_heads_kv, 1, S, head_size]
         //   Q_r: [B, num_heads_kv, factor, S_q, head_size]

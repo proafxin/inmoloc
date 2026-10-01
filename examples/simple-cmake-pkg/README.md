@@ -31,5 +31,5 @@ cmake --build build
 ### Run simple-cmake-pkg
 
 ```sh
-./build/llama-simple-cmake-pkg -m ./models/llama-7b-v2/ggml-model-f16.gguf "Hello my name is"
+./build/local-inference-simple-cmake-pkg -m ./models/llama-7b-v2/ggml-model-f16.gguf "Hello my name is"
 ```

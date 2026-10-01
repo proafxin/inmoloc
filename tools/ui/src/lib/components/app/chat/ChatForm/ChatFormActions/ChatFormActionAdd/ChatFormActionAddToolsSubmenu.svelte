@@ -34,7 +34,7 @@
 						<Info class="mt-0.5 {ICON_CLASS_DEFAULT} shrink-0" />
 
 						<span>
-							Run llama-server with <code>{CLI_FLAGS.TOOLS}</code> flag to enable
+							Run local-inference-server with <code>{CLI_FLAGS.TOOLS}</code> flag to enable
 
 							<strong>Server Tools</strong>.
 						</span>

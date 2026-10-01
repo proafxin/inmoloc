@@ -33,7 +33,7 @@ The server must answer OAI Chat completion requests on `http://localhost:8080/v1
 
 Example:
 ```shell
-llama-server --host localhost --port 8080 \
+local-inference-server --host localhost --port 8080 \
   --model ggml-model-q4_0.gguf \
   --cont-batching \
   --metrics \
@@ -72,15 +72,15 @@ To [debug http request](https://k6.io/docs/using-k6/http-debugging/) use `--http
 #### Metrics
 
 Following metrics are available computed from the OAI chat completions response `usage`:
-- `llamacpp_tokens_second` Trend of `usage.total_tokens / request duration`
-- `llamacpp_prompt_tokens` Trend of `usage.prompt_tokens`
-- `llamacpp_prompt_tokens_total_counter` Counter of `usage.prompt_tokens`
-- `llamacpp_completion_tokens` Trend of `usage.completion_tokens`
-- `llamacpp_completion_tokens_total_counter` Counter of `usage.completion_tokens`
-- `llamacpp_completions_truncated_rate` Rate of completions truncated, i.e. if `finish_reason === 'length'`
-- `llamacpp_completions_stop_rate` Rate of completions stopped by the model, i.e. if `finish_reason === 'stop'`
+- `local_inference_tokens_second` Trend of `usage.total_tokens / request duration`
+- `local_inference_prompt_tokens` Trend of `usage.prompt_tokens`
+- `local_inference_prompt_tokens_total_counter` Counter of `usage.prompt_tokens`
+- `local_inference_completion_tokens` Trend of `usage.completion_tokens`
+- `local_inference_completion_tokens_total_counter` Counter of `usage.completion_tokens`
+- `local_inference_completions_truncated_rate` Rate of completions truncated, i.e. if `finish_reason === 'length'`
+- `local_inference_completions_stop_rate` Rate of completions stopped by the model, i.e. if `finish_reason === 'stop'`
 
-The script will fail if too many completions are truncated, see `llamacpp_completions_truncated_rate`.
+The script will fail if too many completions are truncated, see `local_inference_completions_truncated_rate`.
 
 K6 metrics might be compared against [server metrics](../README.md), with:
 
@@ -98,7 +98,7 @@ The `bench.py` script does several steps:
 It aims to be used in the CI, but you can run it manually:
 
 ```shell
-LLAMA_SERVER_BIN_PATH=../../../cmake-build-release/bin/llama-server python bench.py \
+LOCAL_INFERENCE_SERVER_BIN_PATH=../../../cmake-build-release/bin/local-inference-server python bench.py \
               --runner-label local \
               --name local \
               --branch `git rev-parse --abbrev-ref HEAD` \

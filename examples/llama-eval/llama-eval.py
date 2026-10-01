@@ -1350,7 +1350,7 @@ def main():
         "--server",
         type=str,
         default="http://localhost:8033",
-        help="Comma-separated llama-server URLs (default: http://localhost:8033)"
+        help="Comma-separated local-inference-server URLs (default: http://localhost:8033)"
     )
     parser.add_argument(
         "--server-name",

@@ -26,8 +26,8 @@ fi
 echo "Model: $QUANTIZED_MODEL"
 echo "Data file: $LOGITS_FILE"
 
-cmake --build $BUILD_DIR --target llama-perplexity -j8
+cmake --build $BUILD_DIR --target local-inference-perplexity -j8
 
-${BUILD_DIR}/bin/llama-perplexity -m $QUANTIZED_MODEL \
+${BUILD_DIR}/bin/local-inference-perplexity -m $QUANTIZED_MODEL \
     --kl-divergence-base $LOGITS_FILE \
     --kl-divergence

@@ -1,4 +1,4 @@
-# llama.cpp/tools/llama-bench
+# local-inference-bench
 
 Performance testing tool for llama.cpp.
 
@@ -20,7 +20,7 @@ Performance testing tool for llama.cpp.
 ## Syntax
 
 ```
-usage: llama-bench [options]
+usage: local-inference-bench [options]
 
 options:
   -h, --help
@@ -82,7 +82,7 @@ or by specifying the parameter multiple times. Ranges can be given as
 'first-last' or 'first-last+step' or 'first-last*mult'.
 ```
 
-llama-bench can perform three types of tests:
+local-inference-bench can perform three types of tests:
 
 - Prompt processing (pp): processing a prompt in batches (`-p`)
 - Text generation (tg): generating a sequence of tokens (`-n`)
@@ -97,14 +97,14 @@ Using the `-d <n>` option, each test can be run at a specified context depth, pr
 For a description of the other options, see the [completion example](../completion/README.md).
 
 > [!NOTE]
-> The measurements with `llama-bench` do not include the times for tokenization and for sampling.
+> The measurements with `local-inference-bench` do not include the times for tokenization and for sampling.
 
 ## Examples
 
 ### Text generation with different models
 
 ```sh
-$ ./llama-bench -m models/7B/ggml-model-q4_0.gguf -m models/13B/ggml-model-q4_0.gguf -p 0 -n 128,256,512
+$ ./local-inference-bench -m models/7B/ggml-model-q4_0.gguf -m models/13B/ggml-model-q4_0.gguf -p 0 -n 128,256,512
 ```
 
 | model                          |       size |     params | backend    | ngl | test       |              t/s |
@@ -119,7 +119,7 @@ $ ./llama-bench -m models/7B/ggml-model-q4_0.gguf -m models/13B/ggml-model-q4_0.
 ### Prompt processing with different batch sizes
 
 ```sh
-$ ./llama-bench -n 0 -p 1024 -b 128,256,512,1024
+$ ./local-inference-bench -n 0 -p 1024 -b 128,256,512,1024
 ```
 
 | model                          |       size |     params | backend    | ngl |    n_batch | test       |              t/s |
@@ -132,7 +132,7 @@ $ ./llama-bench -n 0 -p 1024 -b 128,256,512,1024
 ### Different numbers of threads
 
 ```sh
-$ ./llama-bench -n 0 -n 16 -p 64 -t 1,2,4,8,16,32
+$ ./local-inference-bench -n 0 -n 16 -p 64 -t 1,2,4,8,16,32
 ```
 
 | model                          |       size |     params | backend    |    threads | test       |              t/s |
@@ -153,7 +153,7 @@ $ ./llama-bench -n 0 -n 16 -p 64 -t 1,2,4,8,16,32
 ### Different numbers of layers offloaded to the GPU
 
 ```sh
-$ ./llama-bench -ngl 10,20,30,31,32,33,34,35
+$ ./local-inference-bench -ngl 10,20,30,31,32,33,34,35
 ```
 
 | model                          |       size |     params | backend    | ngl | test       |              t/s |
@@ -178,7 +178,7 @@ $ ./llama-bench -ngl 10,20,30,31,32,33,34,35
 ### Different prefilled context
 
 ```
-$ ./llama-bench -d 0,512
+$ ./local-inference-bench -d 0,512
 ```
 
 | model                          |       size |     params | backend    | ngl |            test |                  t/s |
@@ -190,12 +190,12 @@ $ ./llama-bench -d 0,512
 
 ## Output formats
 
-By default, llama-bench outputs the results in markdown format. The results can be output in other formats by using the `-o` option.
+By default, local-inference-bench outputs the results in markdown format. The results can be output in other formats by using the `-o` option.
 
 ### Markdown
 
 ```sh
-$ ./llama-bench -o md
+$ ./local-inference-bench -o md
 ```
 
 | model                          |       size |     params | backend    | ngl | test       |              t/s |
@@ -206,7 +206,7 @@ $ ./llama-bench -o md
 ### CSV
 
 ```sh
-$ ./llama-bench -o csv
+$ ./local-inference-bench -o csv
 ```
 
 ```csv
@@ -218,7 +218,7 @@ build_commit,build_number,cpu_info,gpu_info,backends,model_filename,model_type,m
 ### JSON
 
 ```sh
-$ ./llama-bench -o json
+$ ./local-inference-bench -o json
 ```
 
 ```json
@@ -320,7 +320,7 @@ $ ./llama-bench -o json
 ### JSONL
 
 ```sh
-$ ./llama-bench -o jsonl
+$ ./local-inference-bench -o jsonl
 ```
 
 ```json lines
@@ -334,7 +334,7 @@ $ ./llama-bench -o jsonl
 SQL output is suitable for importing into a SQLite database. The output can be piped into the `sqlite3` command line tool to add the results to a database.
 
 ```sh
-$ ./llama-bench -o sql
+$ ./local-inference-bench -o sql
 ```
 
 ```sql

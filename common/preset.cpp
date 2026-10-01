@@ -354,7 +354,7 @@ common_presets common_preset_context::load_from_cache() const {
     for (const auto & model : cached_models) {
         common_preset preset;
         preset.name = model.to_string();
-        preset.set_option(*this, "LLAMA_ARG_HF_REPO", model.to_string());
+        preset.set_option(*this, "LOCAL_INFERENCE_ARG_HF_REPO", model.to_string());
         out[preset.name] = preset;
     }
 
@@ -449,12 +449,12 @@ common_presets common_preset_context::load_from_models_dir(const std::string & m
     for (const auto & model : models) {
         common_preset preset;
         preset.name = model.name;
-        preset.set_option(*this, "LLAMA_ARG_MODEL", model.path);
+        preset.set_option(*this, "LOCAL_INFERENCE_ARG_MODEL", model.path);
         if (!model.path_mmproj.empty()) {
-            preset.set_option(*this, "LLAMA_ARG_MMPROJ", model.path_mmproj);
+            preset.set_option(*this, "LOCAL_INFERENCE_ARG_MMPROJ", model.path_mmproj);
         }
         if (!model.path_draft.empty()) {
-            preset.set_option(*this, "LLAMA_ARG_SPEC_DRAFT_MODEL", model.path_draft);
+            preset.set_option(*this, "LOCAL_INFERENCE_ARG_SPEC_DRAFT_MODEL", model.path_draft);
         }
         out[preset.name] = preset;
     }

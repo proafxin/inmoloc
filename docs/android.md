@@ -1,26 +1,6 @@
 
 # Android
 
-## Build GUI binding using Android Studio
-
-Import the `examples/llama.android` directory into Android Studio, then perform a Gradle sync and build the project.
-![Project imported into Android Studio](./android/imported-into-android-studio.jpg)
-
-This Android binding supports hardware acceleration up to `SME2` for **Arm** and `AMX` for **x86-64** CPUs on Android and ChromeOS devices.
-It automatically detects the host's hardware to load compatible kernels. As a result, it runs seamlessly on both the latest premium devices and older devices that may lack modern CPU features or have limited RAM, without requiring any manual configuration.
-
-A minimal Android app frontend is included to showcase the binding’s core functionalities:
-1.	**Parse GGUF metadata** via `GgufMetadataReader` from either a `ContentResolver` provided `Uri` from shared storage, or a local `File` from your app's private storage.
-2.	**Obtain a `InferenceEngine`** instance through the `AiChat` facade and load your selected model via its app-private file path.
-3.	**Send a raw user prompt** for automatic template formatting, prefill, and batch decoding. Then collect the generated tokens in a Kotlin `Flow`.
-
-For a production-ready experience that leverages advanced features such as system prompts and benchmarks, plus friendly UI features such as model management and Arm feature visualizer, check out [Arm AI Chat](https://play.google.com/store/apps/details?id=com.arm.aichat) on Google Play.
-This project is made possible through a collaborative effort by Arm's **CT-ML**, **CE-ML** and **STE** groups:
-
-| ![Home screen](https://naco-siren.github.io/ai-chat/policy/index/1-llm-starter-pack.png)  | ![System prompt](https://naco-siren.github.io/ai-chat/policy/index/5-system-prompt.png)  | !["Haiku"](https://naco-siren.github.io/ai-chat/policy/index/4-metrics.png)  |
-|:------------------------------------------------------:|:----------------------------------------------------:|:--------------------------------------------------------:|
-|                      Home screen                       |                    System prompt                     |                         "Haiku"                          |
-
 ## Build CLI on Android using Termux
 
 [Termux](https://termux.dev/en/) is an Android terminal emulator and Linux environment app (no root required). As of writing, Termux is available experimentally in the Google Play Store; otherwise, it may be obtained directly from the project repo or on F-Droid.
@@ -43,10 +23,10 @@ $ curl -L {model-url} -o ~/{model}.gguf
 Then, if you are not already in the repo directory, `cd` into `llama.cpp` and:
 
 ```
-$ ./build/bin/llama-cli -m ~/{model}.gguf -c {context-size} -p "{your-prompt}"
+$ ./build/bin/local-inference-cli -m ~/{model}.gguf -c {context-size} -p "{your-prompt}"
 ```
 
-Here, we show `llama-cli`, but any of the executables under `examples` should work, in theory. Be sure to set `context-size` to a reasonable number (say, 4096) to start with; otherwise, memory could spike and kill your terminal.
+Here, we show `local-inference-cli`, but any of the executables under `examples` should work, in theory. Be sure to set `context-size` to a reasonable number (say, 4096) to start with; otherwise, memory could spike and kill your terminal.
 
 To see what it might look like visually, here's an old demo of an interactive session running on a Pixel 5 phone:
 
@@ -99,7 +79,7 @@ In the `adb shell`:
 
 ```
 $ cd /data/local/tmp/llama.cpp
-$ LD_LIBRARY_PATH=lib ./bin/llama-simple -m {model}.gguf -c {context-size} -p "{your-prompt}"
+$ LD_LIBRARY_PATH=lib ./bin/local-inference-simple -m {model}.gguf -c {context-size} -p "{your-prompt}"
 ```
 
 That's it!

@@ -50,14 +50,14 @@ def get_prompts_rng(prompt_lengths: list[int]) -> list[list[int]]:
 def get_server(path_server: str, path_log: Optional[str]) -> dict:
     if path_server.startswith("http://") or path_server.startswith("https://"):
         return {"process": None, "address": path_server, "fout": None}
-    if os.environ.get("LLAMA_ARG_HOST") is None:
-        logger.info("LLAMA_ARG_HOST not explicitly set, using 127.0.0.1")
-        os.environ["LLAMA_ARG_HOST"] = "127.0.0.1"
-    if os.environ.get("LLAMA_ARG_PORT") is None:
-        logger.info("LLAMA_ARG_PORT not explicitly set, using 8080")
-        os.environ["LLAMA_ARG_PORT"] = "8080"
-    hostname: Optional[str] = os.environ.get("LLAMA_ARG_HOST")
-    port: Optional[str] = os.environ.get("LLAMA_ARG_PORT")
+    if os.environ.get("LOCAL_INFERENCE_ARG_HOST") is None:
+        logger.info("LOCAL_INFERENCE_ARG_HOST not explicitly set, using 127.0.0.1")
+        os.environ["LOCAL_INFERENCE_ARG_HOST"] = "127.0.0.1"
+    if os.environ.get("LOCAL_INFERENCE_ARG_PORT") is None:
+        logger.info("LOCAL_INFERENCE_ARG_PORT not explicitly set, using 8080")
+        os.environ["LOCAL_INFERENCE_ARG_PORT"] = "8080"
+    hostname: Optional[str] = os.environ.get("LOCAL_INFERENCE_ARG_HOST")
+    port: Optional[str] = os.environ.get("LOCAL_INFERENCE_ARG_PORT")
     assert hostname is not None
     assert port is not None
     address: str = f"http://{hostname}:{port}"
@@ -148,11 +148,11 @@ def benchmark(
         path_server: str, path_log: Optional[str], path_db: Optional[str], name: Optional[str], prompt_source: str, n_prompts: int,
         n_predict: int, n_predict_min: int, seed_offset: int):
     external_server: bool = path_server.startswith("http://") or path_server.startswith("https://")
-    if os.environ.get("LLAMA_ARG_N_PARALLEL") is None:
-        logger.info("LLAMA_ARG_N_PARALLEL not explicitly set, using 32")
-        os.environ["LLAMA_ARG_N_PARALLEL"] = "32"
+    if os.environ.get("LOCAL_INFERENCE_ARG_N_PARALLEL") is None:
+        logger.info("LOCAL_INFERENCE_ARG_N_PARALLEL not explicitly set, using 32")
+        os.environ["LOCAL_INFERENCE_ARG_N_PARALLEL"] = "32"
 
-    parallel: int = int(os.environ.get("LLAMA_ARG_N_PARALLEL")) # type: ignore
+    parallel: int = int(os.environ.get("LOCAL_INFERENCE_ARG_N_PARALLEL")) # type: ignore
     prompts: Union[None, list[str], list[list[int]]] = get_prompts_text(prompt_source, n_prompts)
     synthetic_prompts: bool = prompts is None
     prompt_n = []
@@ -169,11 +169,11 @@ def benchmark(
     else:
         n_predict_min = n_predict
 
-    if not external_server and os.environ.get("LLAMA_ARG_CTX_SIZE") is None:
+    if not external_server and os.environ.get("LOCAL_INFERENCE_ARG_CTX_SIZE") is None:
         context_per_slot: int = int(1.05 * (n_predict + (np.max(prompt_n) if synthetic_prompts else 2048)))
         context_total: int = context_per_slot * parallel
-        os.environ["LLAMA_ARG_CTX_SIZE"] = str(context_total)
-        logger.info(f"LLAMA_ARG_CTX_SIZE not explicitly set, using {context_total} ({context_per_slot} per slot).")
+        os.environ["LOCAL_INFERENCE_ARG_CTX_SIZE"] = str(context_total)
+        logger.info(f"LOCAL_INFERENCE_ARG_CTX_SIZE not explicitly set, using {context_total} ({context_per_slot} per slot).")
 
     server: Optional[dict] = None
     session = None
@@ -276,10 +276,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Tool for benchmarking the throughput of the llama.cpp HTTP server. "
         "Results are printed to console and visualized as plots (saved to current working directory). "
-        "To pass arguments such as the model path to the server, set the corresponding environment variables (see llama-server --help). "
+        "To pass arguments such as the model path to the server, set the corresponding environment variables (see local-inference-server --help). "
         "The reported numbers are the speeds as observed by the Python script and may differ from the performance reported by the server, "
         "particularly when the server is fast vs. the network or Python script (e.g. when serving a very small model).")
-    parser.add_argument("--path_server", type=str, default="llama-server", help="Path to the llama.cpp server binary")
+    parser.add_argument("--path_server", type=str, default="local-inference-server", help="Path to the llama.cpp server binary")
     parser.add_argument("--path_log", type=str, default="server-bench-{port}.log", help="Path to the model to use for the benchmark")
     parser.add_argument("--path_db", type=str, default=None, help="Path to an sqlite database to store the benchmark results in")
     parser.add_argument("--name", type=str, default=None, help="Name to label plots and database entries with")

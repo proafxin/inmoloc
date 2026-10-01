@@ -1,9 +1,9 @@
 # Multimodal
 
 llama.cpp supports multimodal input via `libmtmd`. Currently, there are 2 tools support this feature:
-- [llama-cli](../tools/cli/README.md)
-- [llama-server](../tools/server/README.md) via OpenAI-compatible `/chat/completions` API
-- [llama-mtmd-cli](../tools/mtmd/README.md), for testing and development
+- [local-inference-cli](../tools/cli/README.md)
+- [local-inference-server](../tools/server/README.md) via OpenAI-compatible `/chat/completions` API
+- [local-inference-mtmd-cli](../tools/mtmd/README.md), for testing and development
 
 Currently, we support **image**, **audio** and **video** input.
 
@@ -20,16 +20,16 @@ For example:
 
 ```sh
 # simple usage with CLI
-llama-mtmd-cli -hf ggml-org/gemma-3-4b-it-GGUF
+local-inference-mtmd-cli -hf ggml-org/gemma-3-4b-it-GGUF
 
 # simple usage with server
-llama-server -hf ggml-org/gemma-3-4b-it-GGUF
+local-inference-server -hf ggml-org/gemma-3-4b-it-GGUF
 
 # using local file
-llama-server -m gemma-3-4b-it-Q4_K_M.gguf --mmproj mmproj-gemma-3-4b-it-Q4_K_M.gguf
+local-inference-server -m gemma-3-4b-it-Q4_K_M.gguf --mmproj mmproj-gemma-3-4b-it-Q4_K_M.gguf
 
 # no GPU offload
-llama-server -hf ggml-org/gemma-3-4b-it-GGUF --no-mmproj-offload
+local-inference-server -hf ggml-org/gemma-3-4b-it-GGUF --no-mmproj-offload
 ```
 
 > [!IMPORTANT]
@@ -45,7 +45,7 @@ llama-server -hf ggml-org/gemma-3-4b-it-GGUF --no-mmproj-offload
 
 These are ready-to-use models, most of them come with `Q4_K_M` quantization by default. They can be found at the Hugging Face page of the ggml-org: https://huggingface.co/collections/ggml-org/multimodal-ggufs-68244e01ff1f39e5bebeeedc
 
-Replaces the `(tool_name)` with the name of binary you want to use. For example, `llama-mtmd-cli` or `llama-server`
+Replaces the `(tool_name)` with the name of binary you want to use. For example, `local-inference-mtmd-cli` or `local-inference-server`
 
 NOTE: some models may require large context window, for example: `-c 8192`
 

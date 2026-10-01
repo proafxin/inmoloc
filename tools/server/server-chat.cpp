@@ -90,7 +90,7 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
                             {"type", "image_url"},
                         });
                     } else if (type == "input_file") {
-                        throw std::invalid_argument("'input_file' is not supported by llamacpp at this moment");
+                        throw std::invalid_argument("'input_file' is not supported at this moment");
                     } else {
                         throw std::invalid_argument("'type' must be one of 'input_text', 'input_image', or 'input_file'");
                     }

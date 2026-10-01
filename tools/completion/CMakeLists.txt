@@ -1,6 +1,6 @@
-# llama-completion-impl: completion logic, reusable by app
+# local-inference-completion-impl: completion logic, reusable by app
 
-set(TARGET llama-completion-impl)
+set(TARGET local-inference-completion-impl)
 
 add_library(${TARGET} completion.cpp)
 set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
@@ -12,12 +12,12 @@ if(LLAMA_TOOLS_INSTALL)
     install(TARGETS ${TARGET} LIBRARY)
 endif()
 
-# llama-completion executable
+# local-inference-completion executable
 
-set(TARGET llama-completion)
+set(TARGET local-inference-completion)
 
 add_executable(${TARGET} main.cpp)
-target_link_libraries(${TARGET} PRIVATE llama-completion-impl)
+target_link_libraries(${TARGET} PRIVATE local-inference-completion-impl)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 if(LLAMA_TOOLS_INSTALL)

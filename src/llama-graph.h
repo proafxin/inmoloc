@@ -122,8 +122,8 @@ struct llm_graph_params;
 class llm_graph_input_i {
 public:
     llm_graph_input_i() {
-        const char * LLAMA_GRAPH_INPUT_DEBUG = getenv("LLAMA_GRAPH_INPUT_DEBUG");
-        debug = LLAMA_GRAPH_INPUT_DEBUG ? atoi(LLAMA_GRAPH_INPUT_DEBUG) : 0;
+        const char * LOCAL_INFERENCE_GRAPH_INPUT_DEBUG = getenv("LOCAL_INFERENCE_GRAPH_INPUT_DEBUG");
+        debug = LOCAL_INFERENCE_GRAPH_INPUT_DEBUG ? atoi(LOCAL_INFERENCE_GRAPH_INPUT_DEBUG) : 0;
     }
 
     virtual ~llm_graph_input_i() = default;
@@ -139,7 +139,7 @@ public:
         return false;
     }
 protected:
-    // env: LLAMA_GRAPH_INPUT_DEBUG
+    // env: LOCAL_INFERENCE_GRAPH_INPUT_DEBUG
     int debug = 0;
 };
 
@@ -1017,7 +1017,7 @@ private:
     // note: these are updated after constructing the new graph
     llm_graph_params params;
 
-    // env: LLAMA_GRAPH_RESULT_DEBUG
+    // env: LOCAL_INFERENCE_GRAPH_RESULT_DEBUG
     int debug = 0;
 };
 

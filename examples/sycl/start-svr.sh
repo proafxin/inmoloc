@@ -34,7 +34,7 @@ Options:
 EOF
 }
 
-BIN_FILE=./build/bin/llama-server
+BIN_FILE=./build/bin/local-inference-server
 SEED=0
 GPUS_SETTING=""
 

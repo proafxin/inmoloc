@@ -885,7 +885,7 @@ struct mtmd_context {
             case PROJECTOR_TYPE_DEEPSEEKOCR:
             case PROJECTOR_TYPE_DEEPSEEKOCR2:
                 {
-                    img_end = "\n"; // prevent empty batch on llama-server
+                    img_end = "\n"; // prevent empty batch on local-inference-server
                     image_preproc = std::make_unique<mtmd_image_preprocessor_deepseekocr>(ctx_v);
                     ov_img_first = false;
                 } break;

@@ -38,10 +38,10 @@ make -j
 
 %install
 mkdir -p %{buildroot}%{_bindir}/
-cp -p llama-cli %{buildroot}%{_bindir}/llama-cli
-cp -p llama-completion %{buildroot}%{_bindir}/llama-completion
-cp -p llama-server %{buildroot}%{_bindir}/llama-server
-cp -p llama-simple %{buildroot}%{_bindir}/llama-simple
+cp -p local-inference-cli %{buildroot}%{_bindir}/local-inference-cli
+cp -p local-inference-completion %{buildroot}%{_bindir}/local-inference-completion
+cp -p local-inference-server %{buildroot}%{_bindir}/local-inference-server
+cp -p local-inference-simple %{buildroot}%{_bindir}/local-inference-simple
 
 mkdir -p %{buildroot}/usr/lib/systemd/system
 %{__cat} <<EOF  > %{buildroot}/usr/lib/systemd/system/llama.service
@@ -52,7 +52,7 @@ After=syslog.target network.target local-fs.target remote-fs.target nss-lookup.t
 [Service]
 Type=simple
 EnvironmentFile=/etc/sysconfig/llama
-ExecStart=/usr/bin/llama-server $LLAMA_ARGS
+ExecStart=/usr/bin/local-inference-server $LLAMA_ARGS
 ExecReload=/bin/kill -s HUP $MAINPID
 Restart=never
 
@@ -70,10 +70,10 @@ rm -rf %{buildroot}
 rm -rf %{_builddir}/*
 
 %files
-%{_bindir}/llama-cli
-%{_bindir}/llama-completion
-%{_bindir}/llama-server
-%{_bindir}/llama-simple
+%{_bindir}/local-inference-cli
+%{_bindir}/local-inference-completion
+%{_bindir}/local-inference-server
+%{_bindir}/local-inference-simple
 /usr/lib/systemd/system/llama.service
 %config /etc/sysconfig/llama
 

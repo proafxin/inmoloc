@@ -161,7 +161,7 @@ static void usage(const char * executable) {
     printf("                                      WARNING: this is an advanced option, use with care.\n");
     printf("  --dry-run\n");
     printf("                                      calculate and show the final quantization size without performing quantization\n");
-    printf("                                      example: llama-quantize --dry-run model-f32.gguf Q4_K\n");
+    printf("                                      example: local-inference-quantize --dry-run model-f32.gguf Q4_K\n");
     printf("  --max-buffer-size MiB\n");
     printf("                                      max amount of tensor rows kept in memory while quantizing one tensor (default: 8192)\n");
     printf("                                      lower it to quantize models with very large tensors on a machine with little RAM\n\n");
@@ -214,7 +214,7 @@ static int load_imatrix(const std::string & imatrix_file, std::vector<std::strin
                 }
             }
 
-            if (getenv("LLAMA_TRACE")) {
+            if (getenv("LOCAL_INFERENCE_TRACE")) {
                 float max_count = 0.0f;
                 for (int64_t j = 0; j < ncounts; ++j) {
                     const float count = (float) entry.counts[j];
@@ -238,7 +238,7 @@ static int load_imatrix(const std::string & imatrix_file, std::vector<std::strin
                 }
             }
 
-            if (getenv("LLAMA_TRACE")) {
+            if (getenv("LOCAL_INFERENCE_TRACE")) {
                 printf("%s: loaded data (size = %6d, ncall = %6d) for '%s'\n",
                        __func__, int(e.size()), int(ncall), name.c_str());
             }

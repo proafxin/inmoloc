@@ -5,7 +5,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
-set "BIN_FILE=.\build\bin\llama-server.exe"
+set "BIN_FILE=.\build\bin\local-inference-server.exe"
 set "SEED=0"
 set "GPUS_SETTING="
 

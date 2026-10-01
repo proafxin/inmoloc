@@ -1,4 +1,4 @@
-set(TARGET llama-export-lora)
+set(TARGET local-inference-export-lora)
 add_executable(${TARGET} export-lora.cpp)
 target_link_libraries(${TARGET} PRIVATE llama-common llama ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)

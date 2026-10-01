@@ -1,18 +1,18 @@
 #!/usr/bin/env uv run
 '''
-    Simplistic tool call benchmarks for llama-server and ollama.
+    Simplistic tool call benchmarks for local-inference-server and ollama.
 
-    Essentially runs the tests at server/tools/server/tests/unit/test_tool_call.py N times, at different temperatures and on different backends (current llama-server, baseline llama-server and ollama),
+    Essentially runs the tests at server/tools/server/tests/unit/test_tool_call.py N times, at different temperatures and on different backends (current local-inference-server, baseline local-inference-server and ollama),
     and plots the results of multiple runs (from same .jsonl file or multiple ones) as a success rate heatmap.
 
     Simple usage example:
 
-        cmake -B build && cmake --build build --config Release -j -t llama-server
+        cmake -B build && cmake --build build --config Release -j -t local-inference-server
 
-        export LLAMA_SERVER_BIN_PATH=$PWD/build/bin/llama-server
-        export LLAMA_CACHE=${LLAMA_CACHE:-$HOME/Library/Caches/llama.cpp}
+        export LOCAL_INFERENCE_SERVER_BIN_PATH=$PWD/build/bin/local-inference-server
+        export LOCAL_INFERENCE_CACHE=${LOCAL_INFERENCE_CACHE:-$HOME/Library/Caches/llama.cpp}
 
-        ./scripts/tool_bench.py run --n 10 --temp -1 --temp 0 --temp 1 --temp 2 --temp 5 --llama-baseline $PWD/buildMaster/bin/llama-server --output qwen14b.jsonl --hf bartowski/Qwen2.5-14B-Instruct-GGUF:Q4_K_L
+        ./scripts/tool_bench.py run --n 10 --temp -1 --temp 0 --temp 1 --temp 2 --temp 5 --llama-baseline $PWD/buildMaster/bin/local-inference-server --output qwen14b.jsonl --hf bartowski/Qwen2.5-14B-Instruct-GGUF:Q4_K_L
         ./scripts/tool_bench.py run --n 30 --temp -1 --temp 0 --temp 1 --model "Qwen 2.5 1.5B Q4_K_M"      --output qwen1.5b.jsonl  --hf bartowski/Qwen2.5-1.5B-Instruct-GGUF      --ollama qwen2.5:1.5b-instruct-q4_K_M
         ./scripts/tool_bench.py run --n 30 --temp -1 --temp 0 --temp 1 --model "Qwen 2.5 Coder 7B Q4_K_M"  --output qwenc7b.jsonl   --hf bartowski/Qwen2.5-Coder-7B-Instruct-GGUF  --ollama qwen2.5-coder:7b
 
@@ -204,11 +204,11 @@ def plot(files: List[Path], output: Optional[Path] = None, test_regex: Optional[
 def run(
     output: Annotated[Path, typer.Option(help="Output JSON file")],
     model: Annotated[Optional[str], typer.Option(help="Name of the model to test (server agnostic)")] = None,
-    hf: Annotated[Optional[str], typer.Option(help="GGUF huggingface model repo id (+ optional quant) to test w/ llama-server")] = None,
-    chat_template: Annotated[Optional[str], typer.Option(help="Chat template override for llama-server")] = None,
-    chat_template_file: Annotated[Optional[str], typer.Option(help="Chat template file override for llama-server")] = None,
+    hf: Annotated[Optional[str], typer.Option(help="GGUF huggingface model repo id (+ optional quant) to test w/ local-inference-server")] = None,
+    chat_template: Annotated[Optional[str], typer.Option(help="Chat template override for local-inference-server")] = None,
+    chat_template_file: Annotated[Optional[str], typer.Option(help="Chat template file override for local-inference-server")] = None,
     ollama: Annotated[Optional[str], typer.Option(help="Ollama model tag to test")] = None,
-    llama_baseline: Annotated[Optional[str], typer.Option(help="llama-server baseline binary path to use as baseline")] = None,
+    llama_baseline: Annotated[Optional[str], typer.Option(help="local-inference-server baseline binary path to use as baseline")] = None,
     n: Annotated[int, typer.Option(help="Number of times to run each test")] = 10,
     temp: Annotated[Optional[List[float]], typer.Option(help="Set of temperatures to test")] = None,
     top_p: Annotated[Optional[float], typer.Option(help="top_p")] = None,
@@ -217,7 +217,7 @@ def run(
     ctv: Annotated[Optional[str], typer.Option(help="ctv")] = None,
     fa: Annotated[Optional[bool], typer.Option(help="fa")] = None,
     seed: Annotated[Optional[int], typer.Option(help="Random seed")] = None,
-    port: Annotated[int, typer.Option(help="llama-server port")] = 8084,
+    port: Annotated[int, typer.Option(help="local-inference-server port")] = 8084,
     force: Annotated[bool, typer.Option(help="Force overwrite of output file")] = False,
     append: Annotated[bool, typer.Option(help="Append to output file")] = False,
 
@@ -312,9 +312,9 @@ def run(
         for t in [None] if temp is None else [t if t >= 0 else None for t in temp]:
             if hf is not None:
 
-                servers: list[Tuple[str, Optional[str]]] = [('llama-server', None)]
+                servers: list[Tuple[str, Optional[str]]] = [('local-inference-server', None)]
                 if llama_baseline is not None:
-                    servers.append(('llama-server (baseline)', llama_baseline))
+                    servers.append(('local-inference-server (baseline)', llama_baseline))
 
                 for server_name, server_path in servers:
                     server = ServerProcess()

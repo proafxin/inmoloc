@@ -1,4 +1,4 @@
-set(TARGET llama-passkey)
+set(TARGET local-inference-passkey)
 add_executable(${TARGET} passkey.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_link_libraries(${TARGET} PRIVATE llama-common llama ${CMAKE_THREAD_LIBS_INIT})

@@ -11,15 +11,15 @@ You can use pre-quantized model from [ggml-org](https://huggingface.co/ggml-org)
 ```bash
 # build
 cmake -B build
-cmake --build build --target llama-mtmd-cli
+cmake --build build --target local-inference-mtmd-cli
 
 # alternatively, install from brew (MacOS)
 brew install llama.cpp
 
 # run it
-llama-mtmd-cli -hf ggml-org/gemma-3-4b-it-GGUF
-llama-mtmd-cli -hf ggml-org/gemma-3-12b-it-GGUF
-llama-mtmd-cli -hf ggml-org/gemma-3-27b-it-GGUF
+local-inference-mtmd-cli -hf ggml-org/gemma-3-4b-it-GGUF
+local-inference-mtmd-cli -hf ggml-org/gemma-3-12b-it-GGUF
+local-inference-mtmd-cli -hf ggml-org/gemma-3-27b-it-GGUF
 
 # note: 1B model does not support vision
 ```
@@ -44,8 +44,8 @@ What you need:
 ```bash
 # build
 cmake -B build
-cmake --build build --target llama-mtmd-cli
+cmake --build build --target local-inference-mtmd-cli
 
 # run it
-./build/bin/llama-mtmd-cli -m {text_model}.gguf --mmproj mmproj.gguf --image your_image.jpg
+./build/bin/local-inference-mtmd-cli -m {text_model}.gguf --mmproj mmproj.gguf --image your_image.jpg
 ```

@@ -315,8 +315,8 @@ llama_context::llama_context(
     cparams.pipeline_parallel = false;
 
     {
-        const char * LLAMA_GRAPH_REUSE_DISABLE = getenv("LLAMA_GRAPH_REUSE_DISABLE");
-        graph_reuse_disable = LLAMA_GRAPH_REUSE_DISABLE ? (atoi(LLAMA_GRAPH_REUSE_DISABLE) != 0) : graph_reuse_disable;
+        const char * LOCAL_INFERENCE_GRAPH_REUSE_DISABLE = getenv("LOCAL_INFERENCE_GRAPH_REUSE_DISABLE");
+        graph_reuse_disable = LOCAL_INFERENCE_GRAPH_REUSE_DISABLE ? (atoi(LOCAL_INFERENCE_GRAPH_REUSE_DISABLE) != 0) : graph_reuse_disable;
 
         if (graph_reuse_disable) {
             LLAMA_LOG_WARN("%s: graph reuse disabled\n", __func__);
@@ -559,6 +559,14 @@ llama_context::~llama_context() {
     ggml_opt_free(opt_ctx);
 }
 
+// the attention that reads the cells of each sequence alone (indexed lists, cells read in place) is built for
+// llama_kv_cache, alone or as the attention of a hybrid memory; other memories (e.g. the caches of DeepSeek 4) build
+// their own attention
+static bool memory_attends_per_seq(const llama_memory_context_i * mctx) {
+    return dynamic_cast<const llama_kv_cache_context *>(mctx) != nullptr ||
+           dynamic_cast<const llama_memory_hybrid_context *>(mctx) != nullptr;
+}
+
 void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs) {
     const char * func = __func__;
     auto resolve = [&](const llm_fused_op_probe & probe, bool & enabled) {
@@ -617,7 +625,7 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
     // indexed flash attention reads only the cells of each sequence of a unified KV cache, see
     // ggml_flash_attn_ext_set_kv_idx(); it is used when every device that runs attention supports it
     if (cparams.auto_kv_idx) {
-        cparams.kv_idx = cparams.flash_attn && cparams.kv_unified && !model.hparams.use_alibi;
+        cparams.kv_idx = cparams.flash_attn && cparams.kv_unified && !model.hparams.use_alibi && memory_attends_per_seq(mctx);
         if (cparams.kv_idx) {
             resolve(llm_fused_op_flash_attn_kv_idx_probe, cparams.kv_idx);
         }
@@ -633,7 +641,7 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
         const bool kv_idx = cparams.kv_idx;
         cparams.kv_idx = false; // the gather runs are built without it
 
-        cparams.kv_rows = cparams.flash_attn && cparams.kv_unified && !model.hparams.use_alibi;
+        cparams.kv_rows = cparams.flash_attn && cparams.kv_unified && !model.hparams.use_alibi && memory_attends_per_seq(mctx);
         if (cparams.kv_rows) {
             resolve(llm_fused_op_flash_attn_kv_rows_probe, cparams.kv_rows);
         }

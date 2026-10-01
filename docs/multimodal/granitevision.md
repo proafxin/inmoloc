@@ -166,9 +166,9 @@ $ python convert_hf_to_gguf.py --outfile $LLM_GGUF_PATH $LLM_EXPORT_PATH
 
 
 ### 4. Quantization
-If you want to quantize the LLM, you can do so with `llama-quantize` as you would any other LLM. For example:
+If you want to quantize the LLM, you can do so with `local-inference-quantize` as you would any other LLM. For example:
 ```bash
-$ ./build/bin/llama-quantize $LLM_EXPORT_PATH/granite_llm.gguf $LLM_EXPORT_PATH/granite_llm_q4_k_m.gguf Q4_K_M
+$ ./build/bin/local-inference-quantize $LLM_EXPORT_PATH/granite_llm.gguf $LLM_EXPORT_PATH/granite_llm_q4_k_m.gguf Q4_K_M
 $ LLM_GGUF_PATH=$LLM_EXPORT_PATH/granite_llm_q4_k_m.gguf
 ```
 
@@ -176,10 +176,10 @@ Note that currently you cannot quantize the visual encoder because granite visio
 
 
 ### 5. Running the Model in Llama cpp
-Build llama cpp normally; you should have a target binary named `llama-mtmd-cli`, which you can pass two binaries to. As an example, we pass the llama.cpp banner.
+Build llama cpp normally; you should have a target binary named `local-inference-mtmd-cli`, which you can pass two binaries to. As an example, we pass the llama.cpp banner.
 
 ```bash
-$ ./build/bin/llama-mtmd-cli -m $LLM_GGUF_PATH \
+$ ./build/bin/local-inference-mtmd-cli -m $LLM_GGUF_PATH \
     --mmproj $VISUAL_GGUF_PATH \
     -c 16384 \
     --temp 0

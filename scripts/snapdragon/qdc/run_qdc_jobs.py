@@ -2,7 +2,7 @@
 
 Bundles test scripts into one artifact and submits a single QDC job:
 
-  1. run_bench_tests_posix.py — llama-cli and llama-bench on CPU / GPU / NPU
+  1. run_bench_tests_posix.py — local-inference-cli and local-inference-bench on CPU / GPU / NPU
                                 (from scripts/snapdragon/qdc/)
 
 Results are written to $GITHUB_STEP_SUMMARY when set (GitHub Actions).

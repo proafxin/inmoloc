@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Generation throughput and inter-token latency of llama-server at several concurrency levels.
+# Generation throughput and inter-token latency of local-inference-server at several concurrency levels.
 #
 # For each level, that many streaming chat requests with different prompts run at once. Reported per level:
 #   agg tok/s  - generated tokens of all requests / wall time of the level (what the server delivers in total)

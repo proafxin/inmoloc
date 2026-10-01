@@ -457,7 +457,7 @@ class MCPStore implements McpHealthHost {
 	/**
 	 * Resolve which configured MCP server owns a given tool name. Looks at
 	 * active connections first (fast path), then falls back to per-server
-	 * health-check data so server-side MCP proxies (where llama-server
+	 * health-check data so server-side MCP proxies (where local-inference-server
 	 * executes MCP tools but the browser does not hold a direct connection)
 	 * still resolve tool names to their owning server.
 	 */

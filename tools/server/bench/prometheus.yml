@@ -1,9 +1,9 @@
 global:
   scrape_interval:     10s
   external_labels:
-    llamacpp: 'server'
+    local_inference: 'server'
 
 scrape_configs:
-  - job_name: 'llama.cpp server'
+  - job_name: 'local-inference-server'
     static_configs:
       - targets: ['localhost:8080']

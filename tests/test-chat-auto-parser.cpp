@@ -530,7 +530,7 @@ int main(int argc, char * argv[]) {
                 return 1;
             }
 
-            if (opts.debug_jinja || std::getenv("LLAMA_DEBUG_JINJA") != nullptr) {
+            if (opts.debug_jinja || std::getenv("LOCAL_INFERENCE_DEBUG_JINJA") != nullptr) {
                 jinja::enable_debug(true);
             }
 

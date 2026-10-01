@@ -71,27 +71,27 @@ run_conversion_and_inference_lora() {
         --outtype f32
 
     echo -e "\n\n---------------------------\n\n"
-    echo "Running llama-export-lora with lora for $model_name with hidden_size $hidden_size..."
-    ./llama-export-lora \
+    echo "Running local-inference-export-lora with lora for $model_name with hidden_size $hidden_size..."
+    ./local-inference-export-lora \
         -m $MODELS_REPO/$model_name/hidden_size=$hidden_size/base/Base-F32.gguf \
         -o $MODELS_REPO/$model_name/hidden_size=$hidden_size/base/Base-F32-lora-merged.gguf \
         --lora $MODELS_REPO/$model_name/hidden_size=$hidden_size/lora/Lora-F32-LoRA.gguf
 
     # Run inference
     echo -e "\n\n---------------------------\n\n"
-    echo "Running llama-completion without lora for $model_name with hidden_size $hidden_size..."
-    OUTPUT_BASE=$(./llama-completion -no-cnv -m $MODELS_REPO/$model_name/hidden_size=$hidden_size/base/Base-F32.gguf \
+    echo "Running local-inference-completion without lora for $model_name with hidden_size $hidden_size..."
+    OUTPUT_BASE=$(./local-inference-completion -no-cnv -m $MODELS_REPO/$model_name/hidden_size=$hidden_size/base/Base-F32.gguf \
         -p "$EXPECTED_BASE_FIRST_WORD" -n 50 --seed 42 --temp 0)
 
     echo -e "\n\n---------------------------\n\n"
-    echo "Running llama-completion with hot lora for $model_name with hidden_size $hidden_size..."
-    OUTPUT_LORA_HOT=$(./llama-completion -no-cnv -m $MODELS_REPO/$model_name/hidden_size=$hidden_size/base/Base-F32.gguf \
+    echo "Running local-inference-completion with hot lora for $model_name with hidden_size $hidden_size..."
+    OUTPUT_LORA_HOT=$(./local-inference-completion -no-cnv -m $MODELS_REPO/$model_name/hidden_size=$hidden_size/base/Base-F32.gguf \
         --lora $MODELS_REPO/$model_name/hidden_size=$hidden_size/lora/Lora-F32-LoRA.gguf \
         -p "$EXPECTED_LORA_FIRST_WORD" -n 50 --seed 42 --temp 0)
 
     echo -e "\n\n---------------------------\n\n"
-    echo "Running llama-completion with merged lora for $model_name with hidden_size $hidden_size..."
-    OUTPUT_LORA_MERGED=$(./llama-completion -no-cnv -m $MODELS_REPO/$model_name/hidden_size=$hidden_size/base/Base-F32-lora-merged.gguf \
+    echo "Running local-inference-completion with merged lora for $model_name with hidden_size $hidden_size..."
+    OUTPUT_LORA_MERGED=$(./local-inference-completion -no-cnv -m $MODELS_REPO/$model_name/hidden_size=$hidden_size/base/Base-F32-lora-merged.gguf \
         -p "$EXPECTED_LORA_FIRST_WORD" -n 50 --seed 42 --temp 0)
 
     # Remove any initial white space

@@ -125,9 +125,9 @@ bool common_arg::is_exclude(enum llama_example ex) {
 bool common_arg::get_value_from_env(std::string & output) const {
     if (env == nullptr) return false;
     if (!args_neg.empty()) {
-        // for compatibility, we need to check LLAMA_ARG_NO_ env as well
+        // for compatibility, we need to check LOCAL_INFERENCE_ARG_NO_ env as well
         std::string neg_env = env;
-        string_replace_all(neg_env, "LLAMA_ARG_", "LLAMA_ARG_NO_");
+        string_replace_all(neg_env, "LOCAL_INFERENCE_ARG_", "LOCAL_INFERENCE_ARG_NO_");
         char * neg_value = std::getenv(neg_env.c_str());
         if (neg_value) {
             output = "0"; // falsey
@@ -144,9 +144,9 @@ bool common_arg::get_value_from_env(std::string & output) const {
 
 bool common_arg::has_value_from_env() const {
     if (env != nullptr && !args_neg.empty()) {
-        // for compatibility, we need to check LLAMA_ARG_NO_ env as well
+        // for compatibility, we need to check LOCAL_INFERENCE_ARG_NO_ env as well
         std::string neg_env = env;
-        string_replace_all(neg_env, "LLAMA_ARG_", "LLAMA_ARG_NO_");
+        string_replace_all(neg_env, "LOCAL_INFERENCE_ARG_", "LOCAL_INFERENCE_ARG_NO_");
         if (std::getenv(neg_env.c_str())) {
             return true;
         }
@@ -236,9 +236,9 @@ std::vector<std::string> common_arg::get_env() const {
         result.push_back(std::string(env));
     }
     if (!args_neg.empty() && env) {
-        // for compatibility, we need to add LLAMA_ARG_NO_ variant
+        // for compatibility, we need to add LOCAL_INFERENCE_ARG_NO_ variant
         std::string neg_env = env;
-        string_replace_all(neg_env, "LLAMA_ARG_", "LLAMA_ARG_NO_");
+        string_replace_all(neg_env, "LOCAL_INFERENCE_ARG_", "LOCAL_INFERENCE_ARG_NO_");
         result.push_back(neg_env);
     }
     return result;
@@ -1061,51 +1061,44 @@ static void common_params_print_completion(common_params_context & ctx_arg) {
     printf("}\n\n");
 
     std::set<std::string> executables = {
-        "llama-batched",
-        "llama-batched-bench",
-        "llama-bench",
-        "llama-cli",
-        "llama-completion",
-        "llama-convert-llama2c-to-ggml",
-        "llama-cvector-generator",
-        "llama-debug",
-        "llama-diffusion-cli",
-        "llama-embedding",
-        "llama-eval-callback",
-        "llama-export-lora",
-        "llama-finetune",
-        "llama-fit-params",
-        "llama-gemma3-cli",
-        "llama-gen-docs",
-        "llama-gguf",
-        "llama-gguf-hash",
-        "llama-gguf-split",
-        "llama-idle",
-        "llama-imatrix",
-        "llama-llava-cli",
-        "llama-lookahead",
-        "llama-lookup",
-        "llama-lookup-create",
-        "llama-lookup-merge",
-        "llama-lookup-stats",
-        "llama-minicpmv-cli",
-        "llama-mtmd-cli",
-        "llama-parallel",
-        "llama-passkey",
-        "llama-perplexity",
-        "llama-q8dot",
-        "llama-quantize",
-        "llama-qwen2vl-cli",
-        "llama-retrieval",
-        "llama-save-load-state",
-        "llama-server",
-        "llama-simple",
-        "llama-simple-chat",
-        "llama-speculative",
-        "llama-speculative-simple",
-        "llama-tokenize",
-        "llama-tts",
-        "llama-vdot"
+        "local-inference-batched",
+        "local-inference-batched-bench",
+        "local-inference-bench",
+        "local-inference-cli",
+        "local-inference-completion",
+        "local-inference-convert-llama2c-to-ggml",
+        "local-inference-cvector-generator",
+        "local-inference-debug",
+        "local-inference-diffusion-cli",
+        "local-inference-embedding",
+        "local-inference-eval-callback",
+        "local-inference-export-lora",
+        "local-inference-finetune",
+        "local-inference-fit-params",
+        "local-inference-gen-docs",
+        "local-inference-gguf",
+        "local-inference-gguf-hash",
+        "local-inference-gguf-split",
+        "local-inference-idle",
+        "local-inference-imatrix",
+        "local-inference-lookahead",
+        "local-inference-lookup",
+        "local-inference-lookup-create",
+        "local-inference-lookup-merge",
+        "local-inference-lookup-stats",
+        "local-inference-mtmd-cli",
+        "local-inference-parallel",
+        "local-inference-passkey",
+        "local-inference-perplexity",
+        "local-inference-quantize",
+        "local-inference-retrieval",
+        "local-inference-server",
+        "local-inference-simple",
+        "local-inference-simple-chat",
+        "local-inference-speculative",
+        "local-inference-speculative-simple",
+        "local-inference-tokenize",
+        "local-inference-tts"
     };
 
     for (const auto& exe : executables) {
@@ -1390,7 +1383,7 @@ static std::vector<std::string> parse_csv_row(const std::string& input) {
 
 common_params_context common_params_parser_init(common_params & params, llama_example ex, void(*print_usage)(int, char **)) {
     // per-example default params
-    // we define here to make sure it's included in llama-gen-docs
+    // we define here to make sure it's included in local-inference-gen-docs
     if (ex == LLAMA_EXAMPLE_COMPLETION) {
         params.use_jinja = false;   // disable jinja by default
     } else if (ex == LLAMA_EXAMPLE_MTMD) {
@@ -1519,7 +1512,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 params.cpuparams.n_threads = std::thread::hardware_concurrency();
             }
         }
-    ).set_env("LLAMA_ARG_THREADS"));
+    ).set_env("LOCAL_INFERENCE_ARG_THREADS"));
     add_opt(common_arg(
         {"-tb", "--threads-batch"}, "N",
         "number of threads to use during batch and prompt processing (default: same as --threads)",
@@ -1642,7 +1635,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 params.fit_params_min_ctx = UINT32_MAX;
             }
         }
-    ).set_env("LLAMA_ARG_CTX_SIZE"));
+    ).set_env("LOCAL_INFERENCE_ARG_CTX_SIZE"));
     add_opt(common_arg(
         {"-n", "--predict", "--n-predict"}, "N",
         string_format(
@@ -1653,21 +1646,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, int value) {
             params.n_predict = value;
         }
-    ).set_env("LLAMA_ARG_N_PREDICT"));
+    ).set_env("LOCAL_INFERENCE_ARG_N_PREDICT"));
     add_opt(common_arg(
         {"-b", "--batch-size"}, "N",
         string_format("logical maximum batch size (default: %d)", params.n_batch),
         [](common_params & params, int value) {
             params.n_batch = value;
         }
-    ).set_env("LLAMA_ARG_BATCH"));
+    ).set_env("LOCAL_INFERENCE_ARG_BATCH"));
     add_opt(common_arg(
         {"-ub", "--ubatch-size"}, "N",
         string_format("physical maximum batch size (default: %d)", params.n_ubatch),
         [](common_params & params, int value) {
             params.n_ubatch = value;
         }
-    ).set_env("LLAMA_ARG_UBATCH"));
+    ).set_env("LOCAL_INFERENCE_ARG_UBATCH"));
     add_opt(common_arg(
         {"--keep"}, "N",
         string_format("number of tokens to keep from the initial prompt (default: %d, -1 = all)", params.n_keep),
@@ -1682,7 +1675,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params) {
             params.swa_full = true;
         }
-    ).set_env("LLAMA_ARG_SWA_FULL"));
+    ).set_env("LOCAL_INFERENCE_ARG_SWA_FULL"));
     add_opt(common_arg(
         {"-ctxcp", "--ctx-checkpoints", "--swa-checkpoints"}, "N",
         string_format("max number of context checkpoints to create per slot (default: %d)"
@@ -1690,7 +1683,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, int value) {
             params.n_ctx_checkpoints = value;
         }
-    ).set_env("LLAMA_ARG_CTX_CHECKPOINTS").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    ).set_env("LOCAL_INFERENCE_ARG_CTX_CHECKPOINTS").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
         {"-cms", "--checkpoint-min-step"}, "N",
         string_format("minimum spacing between context checkpoints in tokens (default: %d, 0 = no minimum)", params.checkpoint_min_step),
@@ -1700,7 +1693,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
             params.checkpoint_min_step = value;
         }
-    ).set_env("LLAMA_ARG_CHECKPOINT_MIN_SPACING_NT").set_examples({LLAMA_EXAMPLE_SERVER}));
+    ).set_env("LOCAL_INFERENCE_ARG_CHECKPOINT_MIN_SPACING_NT").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-cram", "--cache-ram"}, "N",
         string_format("set the maximum cache size in MiB (default: %d, -1 - no limit, 0 - disable)"
@@ -1708,7 +1701,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, int value) {
             params.cache_ram_mib = value;
         }
-    ).set_env("LLAMA_ARG_CACHE_RAM").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+    ).set_env("LOCAL_INFERENCE_ARG_CACHE_RAM").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
         {"-kvu", "--kv-unified"},
         {"-no-kvu", "--no-kv-unified"},
@@ -1716,7 +1709,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.kv_unified = value;
         }
-    ).set_env("LLAMA_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_BATCHED, LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_PARALLEL}));
+    ).set_env("LOCAL_INFERENCE_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_BATCHED, LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_PARALLEL}));
     add_opt(common_arg(
         {"-kvu", "--kv-unified"},
         {"-no-kvu", "--no-kv-unified"},
@@ -1727,7 +1720,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
             params.kv_unified = true;
         }
-    ).set_env("LLAMA_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_SERVER}));
+    ).set_env("LOCAL_INFERENCE_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--prefix-share"},
         {"--no-prefix-share"},
@@ -1773,7 +1766,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.cache_idle_slots = value;
         }
-    ).set_env("LLAMA_ARG_CACHE_IDLE_SLOTS").set_examples({LLAMA_EXAMPLE_SERVER}));
+    ).set_env("LOCAL_INFERENCE_ARG_CACHE_IDLE_SLOTS").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--context-shift"},
         {"--no-context-shift"},
@@ -1781,7 +1774,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.ctx_shift = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY}).set_env("LLAMA_ARG_CONTEXT_SHIFT"));
+    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY}).set_env("LOCAL_INFERENCE_ARG_CONTEXT_SHIFT"));
     add_opt(common_arg(
         {"--chunks"}, "N",
         string_format("max number of chunks to process (default: %d, -1 = all)", params.n_chunks),
@@ -1803,7 +1796,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                                throw std::runtime_error(
                                    string_format("error: unknown value for --flash-attn: '%s'\n", value.c_str()));
                            }
-                       }).set_env("LLAMA_ARG_FLASH_ATTN"));
+                       }).set_env("LOCAL_INFERENCE_ARG_FLASH_ATTN"));
     add_opt(common_arg(
         {"-p", "--prompt"}, "PROMPT",
         "prompt to start generation with; for system message, use -sys",
@@ -1826,7 +1819,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.no_perf = !value;
             params.sampling.no_perf = !value;
         }
-    ).set_env("LLAMA_ARG_PERF"));
+    ).set_env("LOCAL_INFERENCE_ARG_PERF"));
     add_opt(common_arg(
         {"--show-timings"},
         {"--no-show-timings"},
@@ -1834,7 +1827,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.show_timings = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SHOW_TIMINGS"));
+    ).set_examples({LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SHOW_TIMINGS"));
     add_opt(common_arg(
         {"-f", "--file"}, "FNAME",
         "a file containing the prompt (default: none)",
@@ -2065,7 +2058,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.sampling.top_k = value;
             params.sampling.user_sampling_config |= common_params_sampling_config::COMMON_PARAMS_SAMPLING_CONFIG_TOP_K;
         }
-    ).set_sampling().set_env("LLAMA_ARG_TOP_K"));
+    ).set_sampling().set_env("LOCAL_INFERENCE_ARG_TOP_K"));
     add_opt(common_arg(
         {"--top-p"}, "N",
         string_format("top-p sampling (default: %.2f, 1.0 = disabled)", (double)params.sampling.top_p),
@@ -2346,7 +2339,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params) {
             params.sampling.backend_sampling = true;
         }
-    ).set_sampling().set_env("LLAMA_ARG_BACKEND_SAMPLING"));
+    ).set_sampling().set_env("LOCAL_INFERENCE_ARG_BACKEND_SAMPLING"));
     add_opt(common_arg(
         {"--pooling"}, "{none,mean,cls,last,rank}",
         "pooling type for embeddings, use model default if unspecified",
@@ -2358,7 +2351,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             else if (value == "rank") { params.pooling_type = LLAMA_POOLING_TYPE_RANK; }
             else { throw std::invalid_argument("invalid value"); }
         }
-    ).set_examples({LLAMA_EXAMPLE_EMBEDDING, LLAMA_EXAMPLE_RETRIEVAL, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_DEBUG}).set_env("LLAMA_ARG_POOLING"));
+    ).set_examples({LLAMA_EXAMPLE_EMBEDDING, LLAMA_EXAMPLE_RETRIEVAL, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_DEBUG}).set_env("LOCAL_INFERENCE_ARG_POOLING"));
     add_opt(common_arg(
         {"--attention"}, "{causal,non-causal}",
         "attention type for embeddings, use model default if unspecified",
@@ -2377,77 +2370,77 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             else if (value == "yarn") { params.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_YARN; }
             else { throw std::invalid_argument("invalid value"); }
         }
-    ).set_env("LLAMA_ARG_ROPE_SCALING_TYPE"));
+    ).set_env("LOCAL_INFERENCE_ARG_ROPE_SCALING_TYPE"));
     add_opt(common_arg(
         {"--rope-scale"}, "N",
         "RoPE context scaling factor, expands context by a factor of N",
         [](common_params & params, const std::string & value) {
             params.rope_freq_scale = 1.0f / std::stof(value);
         }
-    ).set_env("LLAMA_ARG_ROPE_SCALE"));
+    ).set_env("LOCAL_INFERENCE_ARG_ROPE_SCALE"));
     add_opt(common_arg(
         {"--rope-freq-base"}, "N",
         "RoPE base frequency, used by NTK-aware scaling (default: loaded from model)",
         [](common_params & params, const std::string & value) {
             params.rope_freq_base = std::stof(value);
         }
-    ).set_env("LLAMA_ARG_ROPE_FREQ_BASE"));
+    ).set_env("LOCAL_INFERENCE_ARG_ROPE_FREQ_BASE"));
     add_opt(common_arg(
         {"--rope-freq-scale"}, "N",
         "RoPE frequency scaling factor, expands context by a factor of 1/N",
         [](common_params & params, const std::string & value) {
             params.rope_freq_scale = std::stof(value);
         }
-    ).set_env("LLAMA_ARG_ROPE_FREQ_SCALE"));
+    ).set_env("LOCAL_INFERENCE_ARG_ROPE_FREQ_SCALE"));
     add_opt(common_arg(
         {"--yarn-orig-ctx"}, "N",
         string_format("YaRN: original context size of model (default: %d = model training context size)", params.yarn_orig_ctx),
         [](common_params & params, int value) {
             params.yarn_orig_ctx = value;
         }
-    ).set_env("LLAMA_ARG_YARN_ORIG_CTX"));
+    ).set_env("LOCAL_INFERENCE_ARG_YARN_ORIG_CTX"));
     add_opt(common_arg(
         {"--yarn-ext-factor"}, "N",
         string_format("YaRN: extrapolation mix factor (default: %.2f, 0.0 = full interpolation)", (double)params.yarn_ext_factor),
         [](common_params & params, const std::string & value) {
             params.yarn_ext_factor = std::stof(value);
         }
-    ).set_env("LLAMA_ARG_YARN_EXT_FACTOR"));
+    ).set_env("LOCAL_INFERENCE_ARG_YARN_EXT_FACTOR"));
     add_opt(common_arg(
         {"--yarn-attn-factor"}, "N",
         string_format("YaRN: scale sqrt(t) or attention magnitude (default: %.2f)", (double)params.yarn_attn_factor),
         [](common_params & params, const std::string & value) {
             params.yarn_attn_factor = std::stof(value);
         }
-    ).set_env("LLAMA_ARG_YARN_ATTN_FACTOR"));
+    ).set_env("LOCAL_INFERENCE_ARG_YARN_ATTN_FACTOR"));
     add_opt(common_arg(
         {"--yarn-beta-slow"}, "N",
         string_format("YaRN: high correction dim or alpha (default: %.2f)", (double)params.yarn_beta_slow),
         [](common_params & params, const std::string & value) {
             params.yarn_beta_slow = std::stof(value);
         }
-    ).set_env("LLAMA_ARG_YARN_BETA_SLOW"));
+    ).set_env("LOCAL_INFERENCE_ARG_YARN_BETA_SLOW"));
     add_opt(common_arg(
         {"--yarn-beta-fast"}, "N",
         string_format("YaRN: low correction dim or beta (default: %.2f)", (double)params.yarn_beta_fast),
         [](common_params & params, const std::string & value) {
             params.yarn_beta_fast = std::stof(value);
         }
-    ).set_env("LLAMA_ARG_YARN_BETA_FAST"));
+    ).set_env("LOCAL_INFERENCE_ARG_YARN_BETA_FAST"));
     add_opt(common_arg(
         {"-gan", "--grp-attn-n"}, "N",
         string_format("group-attention factor (default: %d)", params.grp_attn_n),
         [](common_params & params, int value) {
             params.grp_attn_n = value;
         }
-    ).set_env("LLAMA_ARG_GRP_ATTN_N").set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_PASSKEY}));
+    ).set_env("LOCAL_INFERENCE_ARG_GRP_ATTN_N").set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_PASSKEY}));
     add_opt(common_arg(
         {"-gaw", "--grp-attn-w"}, "N",
         string_format("group-attention width (default: %d)", params.grp_attn_w),
         [](common_params & params, int value) {
             params.grp_attn_w = value;
         }
-    ).set_env("LLAMA_ARG_GRP_ATTN_W").set_examples({LLAMA_EXAMPLE_COMPLETION}));
+    ).set_env("LOCAL_INFERENCE_ARG_GRP_ATTN_W").set_examples({LLAMA_EXAMPLE_COMPLETION}));
     add_opt(common_arg(
         {"-kvo", "--kv-offload"},
         {"-nkvo", "--no-kv-offload"},
@@ -2455,7 +2448,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.no_kv_offload = !value;
         }
-    ).set_env("LLAMA_ARG_KV_OFFLOAD"));
+    ).set_env("LOCAL_INFERENCE_ARG_KV_OFFLOAD"));
     add_opt(common_arg(
         {"--repack"},
         {"-nr", "--no-repack"},
@@ -2463,14 +2456,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.no_extra_bufts = !value;
         }
-    ).set_env("LLAMA_ARG_REPACK"));
+    ).set_env("LOCAL_INFERENCE_ARG_REPACK"));
     add_opt(common_arg(
         {"--no-host"},
         "bypass host buffer allowing extra buffers to be used",
         [](common_params & params) {
             params.no_host = true;
         }
-    ).set_env("LLAMA_ARG_NO_HOST"));
+    ).set_env("LOCAL_INFERENCE_ARG_NO_HOST"));
     add_opt(common_arg(
         {"-ctk", "--cache-type-k"}, "TYPE",
         string_format(
@@ -2483,7 +2476,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.cache_type_k = kv_cache_type_from_str(value);
         }
-    ).set_env("LLAMA_ARG_CACHE_TYPE_K"));
+    ).set_env("LOCAL_INFERENCE_ARG_CACHE_TYPE_K"));
     add_opt(common_arg(
         {"-ctv", "--cache-type-v"}, "TYPE",
         string_format(
@@ -2496,7 +2489,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.cache_type_v = kv_cache_type_from_str(value);
         }
-    ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
+    ).set_env("LOCAL_INFERENCE_ARG_CACHE_TYPE_V"));
     add_opt(common_arg(
         {"--hellaswag"},
         "compute HellaSwag score over random tasks from datafile supplied with -f",
@@ -2575,7 +2568,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             GGML_UNUSED(value);
             LOG_WRN("DEPRECATED: --defrag-thold is deprecated and no longer necessary to specify\n");
         }
-    ).set_env("LLAMA_ARG_DEFRAG_THOLD"));
+    ).set_env("LOCAL_INFERENCE_ARG_DEFRAG_THOLD"));
     if (ex == LLAMA_EXAMPLE_SERVER) {
         // this is to make sure this option appears in the server-specific section of the help message
         add_opt(common_arg(
@@ -2587,7 +2580,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 }
                 params.n_parallel = value;
             }
-        ).set_env("LLAMA_ARG_N_PARALLEL").set_examples({LLAMA_EXAMPLE_SERVER}));
+        ).set_env("LOCAL_INFERENCE_ARG_N_PARALLEL").set_examples({LLAMA_EXAMPLE_SERVER}));
     } else {
         add_opt(common_arg(
             {"-np", "--parallel"}, "N",
@@ -2595,7 +2588,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             [](common_params & params, int value) {
                 params.n_parallel = value;
             }
-        ).set_env("LLAMA_ARG_N_PARALLEL"));
+        ).set_env("LOCAL_INFERENCE_ARG_N_PARALLEL"));
     }
     add_opt(common_arg(
         {"--vram-budget"}, "SIZE",
@@ -2654,7 +2647,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.cont_batching = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CONT_BATCHING"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_CONT_BATCHING"));
     add_opt(common_arg(
         {"-mm", "--mmproj"}, "FILE",
         "path to a multimodal projector file. see tools/mtmd/README.md\n"
@@ -2662,14 +2655,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.mmproj.path = value;
         }
-    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_MMPROJ"));
+    ).set_examples(mmproj_examples).set_env("LOCAL_INFERENCE_ARG_MMPROJ"));
     add_opt(common_arg(
         {"-mmu", "--mmproj-url"}, "URL",
         "URL to a multimodal projector file. see tools/mtmd/README.md",
         [](common_params & params, const std::string & value) {
             params.mmproj.url = value;
         }
-    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_MMPROJ_URL"));
+    ).set_examples(mmproj_examples).set_env("LOCAL_INFERENCE_ARG_MMPROJ_URL"));
     add_opt(common_arg(
         {"--mmproj-auto"},
         {"--no-mmproj", "--no-mmproj-auto"},
@@ -2677,7 +2670,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.no_mmproj = !value;
         }
-    ).set_examples({LLAMA_EXAMPLE_MTMD, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_DOWNLOAD}).set_env("LLAMA_ARG_MMPROJ_AUTO"));
+    ).set_examples({LLAMA_EXAMPLE_MTMD, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_DOWNLOAD}).set_env("LOCAL_INFERENCE_ARG_MMPROJ_AUTO"));
     add_opt(common_arg(
         {"--mmproj-offload"},
         {"--no-mmproj-offload"},
@@ -2685,7 +2678,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.mmproj_use_gpu = value;
         }
-    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_MMPROJ_OFFLOAD"));
+    ).set_examples(mmproj_examples).set_env("LOCAL_INFERENCE_ARG_MMPROJ_OFFLOAD"));
     add_opt(common_arg(
         // note: "-mmdev" must sort after "--rpc" in the preset map, else RPC devices are not registered yet
         {"-mmdev", "--mmproj-device"}, "DEVICE",
@@ -2721,42 +2714,42 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, int value) {
             params.image_min_tokens = value;
         }
-    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_IMAGE_MIN_TOKENS"));
+    ).set_examples(mmproj_examples).set_env("LOCAL_INFERENCE_ARG_IMAGE_MIN_TOKENS"));
     add_opt(common_arg(
         {"--image-max-tokens"}, "N",
         "maximum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model)",
         [](common_params & params, int value) {
             params.image_max_tokens = value;
         }
-    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_IMAGE_MAX_TOKENS"));
+    ).set_examples(mmproj_examples).set_env("LOCAL_INFERENCE_ARG_IMAGE_MAX_TOKENS"));
     add_opt(common_arg(
         {"--mtmd-batch-max-tokens"}, "N",
         string_format("maximum number of image tokens per batch when encoding images (default: %d)", params.mtmd_batch_max_tokens),
         [](common_params & params, int value) {
             params.mtmd_batch_max_tokens = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MTMD_BATCH_MAX_TOKENS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_MTMD_BATCH_MAX_TOKENS"));
     add_opt(common_arg(
         {"--video-fps"}, "N",
         string_format("target video frame rate (default: %.1f)", params.video_fps),
         [](common_params & params, const std::string & value) {
             params.video_fps = std::stof(value);
         }
-    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_VIDEO_FPS"));
+    ).set_examples(mmproj_examples).set_env("LOCAL_INFERENCE_ARG_VIDEO_FPS"));
     add_opt(common_arg(
         {"--video-timestamp-interval"}, "N",
         string_format("interval in milliseconds between text timestamps (default: %" PRId64 ")", params.video_timestamp_interval_ms),
         [](common_params & params, int value) {
             params.video_timestamp_interval_ms = value;
         }
-    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_VIDEO_TIMESTAMP_INTERVAL"));
+    ).set_examples(mmproj_examples).set_env("LOCAL_INFERENCE_ARG_VIDEO_TIMESTAMP_INTERVAL"));
     add_opt(common_arg(
         {"--video-ffmpeg-dir"}, "DIR",
         "path to the directory containing ffmpeg and ffprobe (default: search in PATH)",
         [](common_params & params, const std::string & value) {
             params.video_ffmpeg_bin_dir = value;
         }
-    ).set_examples(mmproj_examples).set_env("LLAMA_ARG_VIDEO_FFMPEG_DIR"));
+    ).set_examples(mmproj_examples).set_env("LOCAL_INFERENCE_ARG_VIDEO_FFMPEG_DIR"));
     if (params.is_gen_docs || llama_supports_rpc()) {
         add_opt(common_arg(
             {"--rpc"}, "SERVERS",
@@ -2765,7 +2758,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 add_rpc_devices(value);
                 GGML_UNUSED(params);
             }
-        ).set_env("LLAMA_ARG_RPC"));
+        ).set_env("LOCAL_INFERENCE_ARG_RPC"));
     }
     add_opt(common_arg(
         {"-lm", "--load-mode"}, "MODE",
@@ -2785,7 +2778,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             else if (value == "dio")        { params.load_mode = LLAMA_LOAD_MODE_DIRECT_IO;  }
             else { throw std::invalid_argument("invalid value"); }
         }
-    ).set_env("LLAMA_ARG_LOAD_MODE"));
+    ).set_env("LOCAL_INFERENCE_ARG_LOAD_MODE"));
     add_opt(common_arg(
         {"-lzm", "--lazy-mode"}, "MODE",
         "on-demand reading of certain tensors, for example per-layer embeddings (default: auto)\n"
@@ -2798,7 +2791,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             else if (value == "off")  { params.lazy_mode = LLAMA_LAZY_MODE_OFF;  }
             else { throw std::invalid_argument("invalid value"); }
         }
-    ).set_env("LLAMA_ARG_LAZY_MODE"));
+    ).set_env("LOCAL_INFERENCE_ARG_LAZY_MODE"));
     add_opt(common_arg(
         {"--numa"}, "TYPE",
         "attempt optimizations that help on some NUMA systems\n"
@@ -2813,7 +2806,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             else if (value == "numactl") { params.numa = GGML_NUMA_STRATEGY_NUMACTL; }
             else { throw std::invalid_argument("invalid value"); }
         }
-    ).set_env("LLAMA_ARG_NUMA"));
+    ).set_env("LOCAL_INFERENCE_ARG_NUMA"));
     add_opt(common_arg(
         {"-dev", "--device"}, "<dev1,dev2,..>",
         "comma-separated list of devices to use for offloading (none = don't offload)\n"
@@ -2821,7 +2814,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.devices = parse_device_list(value);
         }
-    ).set_env("LLAMA_ARG_DEVICE"));
+    ).set_env("LOCAL_INFERENCE_ARG_DEVICE"));
     add_opt(common_arg(
         {"--list-devices"},
         "print list of available devices and exit",
@@ -2835,14 +2828,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "override tensor buffer type", [](common_params & params, const std::string & value) {
             parse_tensor_buffer_overrides(value, params.tensor_buft_overrides);
         }
-    ).set_env("LLAMA_ARG_OVERRIDE_TENSOR"));
+    ).set_env("LOCAL_INFERENCE_ARG_OVERRIDE_TENSOR"));
     add_opt(common_arg(
         {"-cmoe", "--cpu-moe"},
         "keep all Mixture of Experts (MoE) weights in the CPU",
         [](common_params & params) {
             params.tensor_buft_overrides.push_back(llm_ffn_exps_cpu_override());
         }
-    ).set_env("LLAMA_ARG_CPU_MOE"));
+    ).set_env("LOCAL_INFERENCE_ARG_CPU_MOE"));
     add_opt(common_arg(
         {"-ncmoe", "--n-cpu-moe"}, "N",
         "keep the Mixture of Experts (MoE) weights of the first N layers in the CPU",
@@ -2852,7 +2845,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
             llm_add_n_cpu_ffn_overrides(value, LLM_FFN_EXPS_REGEX, params.tensor_buft_overrides);
         }
-    ).set_env("LLAMA_ARG_N_CPU_MOE"));
+    ).set_env("LOCAL_INFERENCE_ARG_N_CPU_MOE"));
     add_opt(common_arg(
         {"-ncffn", "--n-cpu-ffn"}, "N",
         "keep the dense FFN weights of the first N layers in the CPU\n"
@@ -2863,7 +2856,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
             llm_add_n_cpu_ffn_overrides(value, LLM_FFN_DENSE_REGEX, params.tensor_buft_overrides);
         }
-    ).set_env("LLAMA_ARG_N_CPU_FFN"));
+    ).set_env("LOCAL_INFERENCE_ARG_N_CPU_FFN"));
     GGML_ASSERT(params.n_gpu_layers < 0); // string_format would need to be extended for a default >= 0
     add_opt(common_arg(
         {"-ngl", "--gpu-layers", "--n-gpu-layers"}, "N",
@@ -2882,7 +2875,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 fprintf(stderr, "warning: consult docs/build.md for compilation instructions\n");
             }
         }
-    ).set_env("LLAMA_ARG_N_GPU_LAYERS"));
+    ).set_env("LOCAL_INFERENCE_ARG_N_GPU_LAYERS"));
     add_opt(common_arg(
         {"-sm", "--split-mode"}, "{none,layer,row,tensor}",
         "how to split the model across multiple GPUs, one of:\n"
@@ -2906,7 +2899,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 fprintf(stderr, "warning: llama.cpp was compiled without support for GPU offload. Setting the split mode has no effect.\n");
             }
         }
-    ).set_env("LLAMA_ARG_SPLIT_MODE"));
+    ).set_env("LOCAL_INFERENCE_ARG_SPLIT_MODE"));
     add_opt(common_arg(
         {"-ts", "--tensor-split"}, "N0,N1,N2,...",
         "fraction of the model to offload to each GPU, comma-separated list of proportions, e.g. 3,1",
@@ -2933,7 +2926,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 fprintf(stderr, "warning: llama.cpp was compiled without support for GPU offload. Setting a tensor split has no effect.\n");
             }
         }
-    ).set_env("LLAMA_ARG_TENSOR_SPLIT"));
+    ).set_env("LOCAL_INFERENCE_ARG_TENSOR_SPLIT"));
     add_opt(common_arg(
         {"-mg", "--main-gpu"}, "INDEX",
         string_format("the GPU to use for the model (with split-mode = none), or for intermediate results and KV (with split-mode = row) (default: %d)", params.main_gpu),
@@ -2943,7 +2936,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 fprintf(stderr, "warning: llama.cpp was compiled without support for GPU offload. Setting the main GPU has no effect.\n");
             }
         }
-    ).set_env("LLAMA_ARG_MAIN_GPU"));
+    ).set_env("LOCAL_INFERENCE_ARG_MAIN_GPU"));
     add_opt(common_arg(
         { "-fit", "--fit" }, "[on|off]",
         string_format("whether to adjust unset arguments to fit in device memory ('on' or 'off', default: '%s')", params.fit_params ? "on" : "off"),
@@ -2957,7 +2950,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     string_format("error: unknown value for --fit: '%s'\n", value.c_str()));
             }
         }
-    ).set_env("LLAMA_ARG_FIT"));
+    ).set_env("LOCAL_INFERENCE_ARG_FIT"));
     add_opt(common_arg(
         { "-fitp", "--fit-print" }, "[on|off]",
         string_format("print the estimated required memory ('on' or 'off', default: '%s')", params.fit_params_print ? "on" : "off"),
@@ -2971,7 +2964,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     string_format("error: unknown value for --fit-print: '%s'\n", value.c_str()));
             }
         }
-    ).set_examples({LLAMA_EXAMPLE_FIT_PARAMS}).set_env("LLAMA_ARG_FIT_ESTIMATE"));
+    ).set_examples({LLAMA_EXAMPLE_FIT_PARAMS}).set_env("LOCAL_INFERENCE_ARG_FIT_ESTIMATE"));
     add_opt(common_arg(
         { "-fitt", "--fit-target" }, "MiB0,MiB1,MiB2,...",
         string_format("target margin per device for --fit, comma-separated list of values, "
@@ -2996,14 +2989,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 params.fit_params_target[i] = std::stoull(split_arg[i]) * 1024*1024;
             }
         }
-    ).set_env("LLAMA_ARG_FIT_TARGET"));
+    ).set_env("LOCAL_INFERENCE_ARG_FIT_TARGET"));
     add_opt(common_arg(
         { "-fitc", "--fit-ctx" }, "N",
         string_format("minimum ctx size that can be set by --fit option, default: %" PRIu32, params.fit_params_min_ctx),
         [](common_params & params, int value) {
             params.fit_params_min_ctx = value;
         }
-    ).set_env("LLAMA_ARG_FIT_CTX"));
+    ).set_env("LOCAL_INFERENCE_ARG_FIT_CTX"));
     add_opt(common_arg(
         {"--check-tensors"},
         string_format("check model tensor data for invalid values (default: %s)", params.check_tensors ? "true" : "false"),
@@ -3098,7 +3091,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 }
             }
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_ALIAS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_ALIAS"));
     add_opt(common_arg(
         {"--tags"}, "STRING",
         "set model tags, comma-separated (informational, not used for routing)",
@@ -3110,7 +3103,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 }
             }
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TAGS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_TAGS"));
     add_opt(common_arg(
         {"-m", "--model"}, "FNAME",
         ex == LLAMA_EXAMPLE_EXPORT_LORA
@@ -3119,14 +3112,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.model.path = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_EXPORT_LORA, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LLAMA_ARG_MODEL"));
+    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_EXPORT_LORA, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LOCAL_INFERENCE_ARG_MODEL"));
     add_opt(common_arg(
         {"-mu", "--model-url"}, "MODEL_URL",
         "model download url (default: unused)",
         [](common_params & params, const std::string & value) {
             params.model.url = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LLAMA_ARG_MODEL_URL"));
+    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LOCAL_INFERENCE_ARG_MODEL_URL"));
     add_opt(common_arg(
         { "-dr", "--docker-repo" }, "[<repo>/]<model>[:quant]",
         "Docker Hub model repository. repo is optional, default to ai/. quant is optional, default to :latest.\n"
@@ -3135,7 +3128,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.model.docker_repo = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LLAMA_ARG_DOCKER_REPO"));
+    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LOCAL_INFERENCE_ARG_DOCKER_REPO"));
     add_opt(common_arg(
         {"-hf", "-hfr", "--hf-repo"}, "<user>/<model>[:quant]",
         "Hugging Face model repository; quant is optional, case-insensitive, default to Q4_K_M, or falls back to the first file in the repo if Q4_K_M doesn't exist.\n"
@@ -3145,14 +3138,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.model.hf_repo = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LLAMA_ARG_HF_REPO"));
+    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LOCAL_INFERENCE_ARG_HF_REPO"));
     add_opt(common_arg(
         {"-hff", "--hf-file"}, "FILE",
         "Hugging Face model file. If specified, it will override the quant in --hf-repo (default: unused)",
         [](common_params & params, const std::string & value) {
             params.model.hf_file = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LLAMA_ARG_HF_FILE"));
+    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LOCAL_INFERENCE_ARG_HF_FILE"));
     add_opt(common_arg(
         {"-hft", "--hf-token"}, "TOKEN",
         "Hugging Face access token (default: value from HF_TOKEN environment variable)",
@@ -3396,28 +3389,28 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.hostname = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_HOST"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_HOST"));
     add_opt(common_arg(
         {"--port"}, "PORT",
         string_format("port to listen (default: %d)", params.port),
         [](common_params & params, int value) {
             params.port = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_PORT"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_PORT"));
     add_opt(common_arg(
         {"--reuse-port"},
         string_format("allow multiple sockets to bind to the same port (default: %s)", params.reuse_port ? "enabled" : "disabled"),
         [](common_params & params) {
             params.reuse_port = true;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_REUSE_PORT"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_REUSE_PORT"));
     add_opt(common_arg(
         {"--path"}, "PATH",
         string_format("path to serve static files from (default: %s)", params.public_path.c_str()),
         [](common_params & params, const std::string & value) {
             params.public_path = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_STATIC_PATH"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_STATIC_PATH"));
     add_opt(common_arg(
         {"--cors-origins"}, "ORIGINS",
         string_format(
@@ -3428,21 +3421,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.cors_origins = value;
             params.cors_origins_explicit = true;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CORS_ORIGINS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_CORS_ORIGINS"));
     add_opt(common_arg(
         {"--cors-methods"}, "METHODS",
         string_format("comma-separated list of allowed methods for CORS (default: %s)", params.cors_methods.c_str()),
         [](common_params & params, const std::string & value) {
             params.cors_methods = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CORS_METHODS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_CORS_METHODS"));
     add_opt(common_arg(
         {"--cors-headers"}, "HEADERS",
         string_format("comma-separated list of allowed headers for CORS (default: %s)", params.cors_headers.c_str()),
         [](common_params & params, const std::string & value) {
             params.cors_headers = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CORS_HEADERS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_CORS_HEADERS"));
     add_opt(common_arg(
         {"--cors-credentials"},
         {"--no-cors-credentials"},
@@ -3453,28 +3446,28 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.cors_credentials = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CORS_CREDENTIALS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_CORS_CREDENTIALS"));
     add_opt(common_arg(
         {"--api-prefix"}, "PREFIX",
         string_format("prefix path the server serves from, without the trailing slash (default: %s)", params.api_prefix.c_str()),
         [](common_params & params, const std::string & value) {
             params.api_prefix = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_API_PREFIX"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_API_PREFIX"));
     add_opt(common_arg(
         {"--ui-config", "--webui-config"}, "JSON",
         "JSON that provides default UI settings (overrides UI defaults)",
         [](common_params & params, const std::string & value) {
             params.ui_config_json = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_UI_CONFIG"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_UI_CONFIG"));
     add_opt(common_arg(
         {"--ui-config-file", "--webui-config-file"}, "PATH",
         "JSON file that provides default UI settings (overrides UI defaults)",
         [](common_params & params, const std::string & value) {
             params.ui_config_json = read_file(value);
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_UI_CONFIG_FILE"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_UI_CONFIG_FILE"));
     add_opt(common_arg(
         {"--ui-mcp-proxy", "--webui-mcp-proxy"},
         {"--no-ui-mcp-proxy", "--no-webui-mcp-proxy"},
@@ -3482,7 +3475,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.ui_mcp_proxy = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_UI_MCP_PROXY"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_UI_MCP_PROXY"));
     add_opt(common_arg(
         {"--tools"}, "TOOL1,TOOL2,...",
         "experimental: whether to enable built-in tools for AI agents - do not enable in untrusted environments (default: no tools)\n"
@@ -3492,7 +3485,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.server_tools = parse_csv_row(value);
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOOLS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_TOOLS"));
     add_opt(common_arg(
         {"--tools-runtime"}, "OPTION",
         "experimental: run tools in a separate runtime environment (default: none, use host environment)\n"
@@ -3503,7 +3496,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.server_tools_runtime = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TOOLS_RUNTIME"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_TOOLS_RUNTIME"));
     add_opt(common_arg(
         {"--mcp-servers-config"}, "PATH",
         "experimental: path to JSON file with MCP server definitions (Cursor-compatible format) - do not enable in untrusted environments (default: none)\n"
@@ -3511,7 +3504,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.mcp_servers_config = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MCP_SERVERS_CONFIG"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_MCP_SERVERS_CONFIG"));
     add_opt(common_arg(
         {"--mcp-servers-json"}, "JSON",
         "experimental: inline JSON with MCP server definitions (Cursor-compatible format) - do not enable in untrusted environments (default: none)\n"
@@ -3519,7 +3512,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.mcp_servers_json = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MCP_SERVERS_JSON"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_MCP_SERVERS_JSON"));
     add_opt(common_arg(
         {"-ag", "--agent"},
         {"-no-ag", "--no-agent"},
@@ -3535,7 +3528,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
             // note: do not modify cors_origins here, as the options are not evaluated in order (user may explicitly set --cors-origins before --agent)
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_AGENT"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_AGENT"));
     add_opt(common_arg(
         {"--ui", "--webui"},
         {"--no-ui", "--no-webui"},
@@ -3543,14 +3536,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.ui = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_UI"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_UI"));
     add_opt(common_arg(
         {"--embedding", "--embeddings"},
         string_format("restrict to only support embedding use case; use only with dedicated embedding models (default: %s)", params.embedding ? "enabled" : "disabled"),
         [](common_params & params) {
             params.embedding = true;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_DEBUG}).set_env("LLAMA_ARG_EMBEDDINGS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_DEBUG}).set_env("LOCAL_INFERENCE_ARG_EMBEDDINGS"));
     add_opt(common_arg(
         {"--rerank", "--reranking"},
         string_format("enable reranking endpoint on server (default: %s)", "disabled"),
@@ -3558,7 +3551,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.embedding = true;
             params.pooling_type = LLAMA_POOLING_TYPE_RANK;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_RERANKING"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_RERANKING"));
     add_opt(common_arg(
         {"--api-key"}, "KEY",
         "API key to use for authentication, multiple keys can be provided as a comma-separated list (default: none)",
@@ -3586,21 +3579,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
             key_file.close();
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_API_KEY_FILE"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_API_KEY_FILE"));
     add_opt(common_arg(
         {"--ssl-key-file"}, "FNAME",
         "path to file a PEM-encoded SSL private key",
         [](common_params & params, const std::string & value) {
             params.ssl_file_key = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SSL_KEY_FILE"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_SSL_KEY_FILE"));
     add_opt(common_arg(
         {"--ssl-cert-file"}, "FNAME",
         "path to file a PEM-encoded SSL certificate",
         [](common_params & params, const std::string & value) {
             params.ssl_file_cert = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SSL_CERT_FILE"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_SSL_CERT_FILE"));
     add_opt(common_arg(
         {"--chat-template-kwargs"}, "STRING",
         "sets additional params for the json template parser, must be a valid json object string, e.g. '{\"key1\":\"value1\",\"key2\":\"value2\"}'",
@@ -3618,7 +3611,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 params.default_template_kwargs[item.key()] = item.value().dump();
             }
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_CHAT_TEMPLATE_KWARGS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_CHAT_TEMPLATE_KWARGS"));
     add_opt(common_arg(
         {"-to", "--timeout"}, "N",
         string_format("server read/write timeout in seconds (default: %d)", params.timeout_read),
@@ -3626,21 +3619,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.timeout_read  = value;
             params.timeout_write = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_TIMEOUT"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_TIMEOUT"));
     add_opt(common_arg(
         {"--sse-ping-interval"}, "N",
         string_format("server SSE ping interval in seconds (-1 = disabled, default: %d)", params.sse_ping_interval),
         [](common_params & params, int value) {
             params.sse_ping_interval = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SSE_PING_INTERVAL"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_SSE_PING_INTERVAL"));
     add_opt(common_arg(
         {"--threads-http"}, "N",
         string_format("number of threads used to process HTTP requests (default: %d)", params.n_threads_http),
         [](common_params & params, int value) {
             params.n_threads_http = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_THREADS_HTTP"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_THREADS_HTTP"));
     add_opt(common_arg(
         {"--cache-prompt"},
         {"--no-cache-prompt"},
@@ -3648,7 +3641,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.cache_prompt = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CACHE_PROMPT"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_CACHE_PROMPT"));
     add_opt(common_arg(
         {"--cache-reuse"}, "N",
         string_format(
@@ -3658,21 +3651,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, int value) {
             params.n_cache_reuse = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CACHE_REUSE"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_CACHE_REUSE"));
     add_opt(common_arg(
         {"--metrics"},
         string_format("enable prometheus compatible metrics endpoint (default: %s)", params.endpoint_metrics ? "enabled" : "disabled"),
         [](common_params & params) {
             params.endpoint_metrics = true;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_ENDPOINT_METRICS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_ENDPOINT_METRICS"));
     add_opt(common_arg(
         {"--props"},
         string_format("enable changing global properties via POST /props (default: %s)", params.endpoint_props ? "enabled" : "disabled"),
         [](common_params & params) {
             params.endpoint_props = true;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_ENDPOINT_PROPS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_ENDPOINT_PROPS"));
     add_opt(common_arg(
         {"--slots"},
         {"--no-slots"},
@@ -3680,7 +3673,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.endpoint_slots = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_ENDPOINT_SLOTS"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_ENDPOINT_SLOTS"));
     add_opt(common_arg(
         {"--slot-save-path"}, "PATH",
         "path to save slot kv cache (default: disabled)",
@@ -3715,21 +3708,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.models_dir = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MODELS_DIR"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_MODELS_DIR"));
     add_opt(common_arg(
         {"--models-preset"}, "PATH",
         "path to INI file containing model presets for the router server (default: disabled)",
         [](common_params & params, const std::string & value) {
             params.models_preset = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MODELS_PRESET"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_MODELS_PRESET"));
     add_opt(common_arg(
         {"--models-max"}, "N",
         string_format("for router server, maximum number of models to load simultaneously (default: %d, 0 = unlimited)", params.models_max),
         [](common_params & params, int value) {
             params.models_max = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MODELS_MAX"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_MODELS_MAX"));
     add_opt(common_arg(
         {"--models-autoload"},
         {"--no-models-autoload"},
@@ -3737,7 +3730,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.models_autoload = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_MODELS_AUTOLOAD"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_MODELS_AUTOLOAD"));
     add_opt(common_arg(
         {"--jinja"},
         {"--no-jinja"},
@@ -3745,7 +3738,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.use_jinja = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_MTMD}).set_env("LLAMA_ARG_JINJA"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_MTMD}).set_env("LOCAL_INFERENCE_ARG_JINJA"));
     add_opt(common_arg(
         {"--reasoning-format"}, "FORMAT",
         "controls whether thought tags are allowed and/or extracted from the response, and in which format they're returned; one of:\n"
@@ -3756,7 +3749,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.reasoning_format = common_reasoning_format_from_name(value);
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_THINK"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_THINK"));
     add_opt(common_arg(
         {"-rea", "--reasoning"}, "[on|off|auto]",
         "Use reasoning/thinking in the chat ('on', 'off', or 'auto', default: 'auto' (detect from template))",
@@ -3774,7 +3767,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     string_format("error: unknown value for --reasoning: '%s'\n", value.c_str()));
             }
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_REASONING"));
     add_opt(common_arg(
         {"--reasoning-effort"}, "LEVEL",
         "reasoning effort level given to the chat template: 'default' to keep the template default,\n"
@@ -3786,7 +3779,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 params.default_template_kwargs["reasoning_effort"] = json(value).dump();
             }
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_EFFORT"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_REASONING_EFFORT"));
     add_opt(common_arg(
         {"--reasoning-budget"}, "N",
         "token budget for thinking: -1 for unrestricted, 0 for immediate end, N>0 for token budget (default: -1)",
@@ -3794,14 +3787,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             if (value < -1) { throw std::invalid_argument("invalid value"); }
             params.sampling.reasoning_budget_tokens = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_THINK_BUDGET"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_THINK_BUDGET"));
     add_opt(common_arg(
         {"--reasoning-budget-message"}, "MESSAGE",
         "message injected before the end-of-thinking tag when reasoning budget is exhausted (default: none)",
         [](common_params & params, const std::string & value) {
             params.sampling.reasoning_budget_message = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_THINK_BUDGET_MESSAGE"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_THINK_BUDGET_MESSAGE"));
     add_opt(common_arg(
         {"--reasoning-preserve"},
         {"--no-reasoning-preserve"},
@@ -3816,7 +3809,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
             params.preserve_reasoning_specified = true;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_REASONING_PRESERVE"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_REASONING_PRESERVE"));
     add_opt(common_arg(
         {"--chat-template"}, "JINJA_TEMPLATE",
         string_format(
@@ -3828,7 +3821,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.chat_template = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_MTMD}).set_env("LLAMA_ARG_CHAT_TEMPLATE"));
+    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_MTMD}).set_env("LOCAL_INFERENCE_ARG_CHAT_TEMPLATE"));
     add_opt(common_arg(
         {"--chat-template-file"}, "JINJA_TEMPLATE_FILE",
         string_format(
@@ -3840,7 +3833,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.chat_template = read_file(value);
         }
-    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CHAT_TEMPLATE_FILE"));
+    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_CHAT_TEMPLATE_FILE"));
     add_opt(common_arg(
         {"--skip-chat-parsing"},
         {"--no-skip-chat-parsing"},
@@ -3851,7 +3844,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.force_pure_content_parser = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SKIP_CHAT_PARSING"));
+    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_SKIP_CHAT_PARSING"));
     add_opt(common_arg(
         {"--prefill-assistant"},
         {"--no-prefill-assistant"},
@@ -3862,7 +3855,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.prefill_assistant = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_PREFILL_ASSISTANT"));
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LOCAL_INFERENCE_ARG_PREFILL_ASSISTANT"));
     add_opt(common_arg(
         {"-sps", "--slot-prompt-similarity"}, "SIMILARITY",
         string_format("how much the prompt of a request must match the prompt of a slot in order to use that slot (default: %.2f, 0.0 = disabled)\n", params.slot_prompt_similarity),
@@ -3953,7 +3946,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params &, const std::string & value) {
             common_log_set_file(common_log_main(), value.c_str());
         }
-    ).set_env("LLAMA_ARG_LOG_FILE"));
+    ).set_env("LOCAL_INFERENCE_ARG_LOG_FILE"));
     add_opt(common_arg(
         {"--log-jsonl"},
         {"--no-log-jsonl"},
@@ -3961,7 +3954,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params &, bool value) {
             common_log_set_jsonl(common_log_main(), value);
         }
-    ).set_env("LLAMA_ARG_LOG_JSONL"));
+    ).set_env("LOCAL_INFERENCE_ARG_LOG_JSONL"));
     add_opt(common_arg(
         {"--log-prompts-dir"}, "PATH",
         "Log prompts to directory (auto-created if not present; only used for debugging, default: disabled)",
@@ -3990,7 +3983,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     string_format("error: unknown value for --log-colors: '%s'\n", value.c_str()));
             }
         }
-    ).set_env("LLAMA_ARG_LOG_COLORS"));
+    ).set_env("LOCAL_INFERENCE_ARG_LOG_COLORS"));
     add_opt(common_arg(
         {"-v", "--verbose", "--log-verbose"},
         "Set verbosity level to infinity (i.e. log all messages, useful for debugging)",
@@ -4005,7 +3998,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params) {
             params.offline = true;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LLAMA_ARG_OFFLINE"));
+    ).set_examples({LLAMA_EXAMPLE_COMMON, LLAMA_EXAMPLE_DOWNLOAD, LLAMA_EXAMPLE_TOKENIZE}).set_env("LOCAL_INFERENCE_ARG_OFFLINE"));
     add_opt(common_arg(
         {"-lv", "--verbosity", "--log-verbosity"}, "N",
         string_format("Set the verbosity threshold. Messages with a higher verbosity will be ignored. Values:\n"
@@ -4020,7 +4013,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.verbosity = value;
             common_log_set_verbosity_thold(value);
         }
-    ).set_env("LLAMA_ARG_LOG_VERBOSITY"));
+    ).set_env("LOCAL_INFERENCE_ARG_LOG_VERBOSITY"));
     add_opt(common_arg(
         {"--log-prefix"},
         {"--no-log-prefix"},
@@ -4028,7 +4021,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params &, bool value) {
             common_log_set_prefix(common_log_main(), value);
         }
-    ).set_env("LLAMA_ARG_LOG_PREFIX"));
+    ).set_env("LOCAL_INFERENCE_ARG_LOG_PREFIX"));
     add_opt(common_arg(
         {"--log-timestamps"},
         {"--no-log-timestamps"},
@@ -4036,7 +4029,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params &, bool value) {
             common_log_set_timestamps(common_log_main(), value);
         }
-    ).set_env("LLAMA_ARG_LOG_TIMESTAMPS"));
+    ).set_env("LOCAL_INFERENCE_ARG_LOG_TIMESTAMPS"));
 
     //
     // speculative parameters
@@ -4048,7 +4041,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.speculative.draft.mparams.hf_repo = value;
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_HF_REPO"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_HF_REPO"));
     add_opt(common_arg(
         {"--spec-draft-threads", "-td", "--threads-draft"}, "N",
         "number of threads to use during generation (default: same as --threads)",
@@ -4169,7 +4162,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.speculative.draft.cache_type_k = kv_cache_type_from_str(value);
         }
-    ).set_env("LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K"));
+    ).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_CACHE_TYPE_K"));
     add_opt(common_arg(
         {"--spec-draft-type-v", "-ctvd", "--cache-type-v-draft"}, "TYPE",
         string_format(
@@ -4182,7 +4175,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.speculative.draft.cache_type_v = kv_cache_type_from_str(value);
         }
-    ).set_env("LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V"));
+    ).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_CACHE_TYPE_V"));
     add_opt(common_arg(
         {"--spec-draft-override-tensor", "-otd", "--override-tensor-draft"}, "<tensor name pattern>=<buffer type>,...",
         "override tensor buffer type for draft model", [](common_params & params, const std::string & value) {
@@ -4195,7 +4188,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params) {
             params.speculative.draft.tensor_buft_overrides.push_back(llm_ffn_exps_cpu_override());
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_CPU_MOE"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_CPU_MOE"));
     add_opt(common_arg(
         {"--spec-draft-n-cpu-moe", "--spec-draft-ncmoe", "-ncmoed", "--n-cpu-moe-draft"}, "N",
         "keep the Mixture of Experts (MoE) weights of the first N layers in the CPU for the draft model",
@@ -4205,7 +4198,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
             llm_add_n_cpu_ffn_overrides(value, LLM_FFN_EXPS_REGEX, params.speculative.draft.tensor_buft_overrides);
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_N_CPU_MOE"));
 
     add_opt(common_arg(
         {"--spec-draft-n-max"}, "N",
@@ -4216,14 +4209,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
             params.speculative.draft.n_max = value;
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MAX"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_N_MAX"));
     add_opt(common_arg(
         {"--spec-draft-n-min"}, "N",
         string_format("minimum number of draft tokens to use for speculative decoding (default: %d)", params.speculative.draft.n_min),
         [](common_params & params, int value) {
             params.speculative.draft.n_min = value;
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_N_MIN"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_N_MIN"));
     add_opt(common_arg(
         {"--spec-synth-len"}, "L",
         "target mean synthetic acceptance length, including the target token (benchmarking only)",
@@ -4236,7 +4229,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
             params.speculative.synth_len = length;
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_SYNTH_LEN"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_SYNTH_LEN"));
     add_opt(common_arg(
         {"--spec-synth-rates"}, "P0,P1,...",
         "comma-separated unconditional per-position synthetic acceptance probabilities (benchmarking only)",
@@ -4255,7 +4248,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             }
             params.speculative.synth_rates = std::move(rates);
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_SYNTH_RATES"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_SYNTH_RATES"));
 
     add_opt(common_arg(
         {"--spec-draft-p-split", "--draft-p-split"}, "P",
@@ -4263,14 +4256,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.speculative.draft.p_split = std::stof(value);
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_P_SPLIT"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_P_SPLIT"));
     add_opt(common_arg(
         {"--spec-draft-p-min", "--draft-p-min"}, "P",
         string_format("minimum speculative decoding probability (greedy) (default: %.2f)", (double)params.speculative.draft.p_min),
         [](common_params & params, const std::string & value) {
             params.speculative.draft.p_min = std::stof(value);
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_P_MIN"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_P_MIN"));
     add_opt(common_arg(
         {"--spec-draft-backend-sampling"},
         {"--no-spec-draft-backend-sampling"},
@@ -4279,7 +4272,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.speculative.draft.backend_sampling = value;
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_BACKEND_SAMPLING"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_BACKEND_SAMPLING"));
     add_opt(common_arg(
         {"--spec-draft-device", "-devd", "--device-draft"}, "<dev1,dev2,..>",
         "comma-separated list of devices to use for offloading the draft model (none = don't offload, default: follows --device)\n"
@@ -4307,7 +4300,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 fprintf(stderr, "warning: consult docs/build.md for compilation instructions\n");
             }
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_N_GPU_LAYERS_DRAFT"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_N_GPU_LAYERS_DRAFT"));
     add_opt(common_arg(
         {"--spec-draft-model", "-md", "--model-draft"}, "FNAME",
         "draft model for speculative decoding (default: unused)",
@@ -4315,7 +4308,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.draft.mparams.path = value;
             params.speculative.draft.mparams.hf_file = value; // will be used if --spec-draft-hf is set
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_DRAFT_MODEL"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_MODEL"));
     add_opt(common_arg(
         {"--spec-type"}, common_speculative_all_types_str(),
         string_format("comma-separated list of types of speculative decoding to use (default: %s)\n",
@@ -4325,7 +4318,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             auto types = common_speculative_types_from_names(types_str);
             params.speculative.types.insert(params.speculative.types.end(), types.begin(), types.end());
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_SPEC_TYPE"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_TYPE"));
     add_opt(common_arg(
         {"--spec-ngram-mod-n-min"}, "N",
         string_format("minimum number of ngram tokens to use for ngram-based speculative decoding (default: %d)", params.speculative.ngram_mod.n_min),
@@ -4460,14 +4453,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & /*params*/, int /*value*/) {
             arg_removed("use --spec-draft-n-max or --spec-ngram-mod-n-max");
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_DRAFT_MAX"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_DRAFT_MAX"));
     add_opt(common_arg(
         {"--draft-min", "--draft-n-min"}, "N",
         "the argument has been removed. use --spec-draft-n-min or --spec-ngram-mod-n-min",
         [](common_params & /*params*/, int /*value*/) {
             arg_removed("use --spec-draft-n-min or --spec-ngram-mod-n-min");
         }
-    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LLAMA_ARG_DRAFT_MIN"));
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_DRAFT_MIN"));
     add_opt(common_arg(
         {"--spec-ngram-size-n"}, "N",
         "the argument has been removed. use the respective --spec-ngram-*-size-n or --spec-ngram-mod-n-match",

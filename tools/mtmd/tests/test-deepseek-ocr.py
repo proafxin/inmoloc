@@ -227,17 +227,17 @@ def run_mtmd_cli(spec: "ModelSpec", model_path, mmproj_path, image_path, bin_pat
     except subprocess.TimeoutExpired as e:
         if e.stderr:
             logger.error("llama.cpp stderr:\n%s", e.stderr.decode("utf-8", errors="replace"))
-        raise RuntimeError(f"llama-mtmd-cli timed out after {RUN_TIMEOUT}s")
+        raise RuntimeError(f"local-inference-mtmd-cli timed out after {RUN_TIMEOUT}s")
 
     if result.returncode != 0:
         logger.error("llama.cpp stderr:\n%s", result.stderr.decode("utf-8", errors="replace"))
-        raise RuntimeError(f"llama-mtmd-cli failed with code {result.returncode}")
+        raise RuntimeError(f"local-inference-mtmd-cli failed with code {result.returncode}")
 
     output = result.stdout.decode("utf-8", errors="replace").strip()
     if spec.strip_grounding:
         output = strip_grounding(output)
     if not output:
-        raise RuntimeError("llama-mtmd-cli produced no output on stdout")
+        raise RuntimeError("local-inference-mtmd-cli produced no output on stdout")
     logger.info(f"  output: {len(output)} chars")
     return output
 
@@ -279,8 +279,8 @@ def evaluate(case: "TestCase", expected: str, ocr_out: str) -> bool:
 
 def argument_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Compare llama.cpp DeepSeek-OCR output with a ground-truth transcript")
-    ap.add_argument("--llama-bin", default="build/bin/llama-mtmd-cli",
-                    help="Path to llama-mtmd-cli binary (relative to repo root or absolute)")
+    ap.add_argument("--llama-bin", default="build/bin/local-inference-mtmd-cli",
+                    help="Path to local-inference-mtmd-cli binary (relative to repo root or absolute)")
     for spec in MODELS.values():
         ap.add_argument(spec.model_arg, default=spec.model_default,
                         help=f"Path to the {spec.label} GGUF model (relative to repo root or absolute)")

@@ -51,7 +51,7 @@
 			const a = document.createElement('a');
 
 			a.href = url;
-			a.download = `llama_settings_${new Date().toISOString().split('T')[0]}.json`;
+			a.download = `local_inference_settings_${new Date().toISOString().split('T')[0]}.json`;
 			document.body.appendChild(a);
 			a.click();
 			document.body.removeChild(a);

@@ -11,12 +11,12 @@ For llava-1.6 a variety of prepared gguf models are available as well [7b-34b](h
 After API is confirmed, more models will be supported / uploaded.
 
 ## Usage
-Build the `llama-mtmd-cli` binary.
+Build the `local-inference-mtmd-cli` binary.
 
-After building, run: `./llama-mtmd-cli` to see the usage. For example:
+After building, run: `./local-inference-mtmd-cli` to see the usage. For example:
 
 ```sh
-./llama-mtmd-cli -m ../llava-v1.5-7b/ggml-model-f16.gguf \
+./local-inference-mtmd-cli -m ../llava-v1.5-7b/ggml-model-f16.gguf \
     --mmproj ../llava-v1.5-7b/mmproj-model-f16.gguf \
     --chat-template vicuna
 ```
@@ -99,7 +99,7 @@ python ./examples/convert_legacy_llama.py ../llava-v1.6-vicuna-7b/ --skip-unknow
 
 7) And finally we can run the llava cli using the 1.6 model version:
 ```console
-./llama-mtmd-cli -m ../llava-v1.6-vicuna-7b/ggml-model-f16.gguf --mmproj vit/mmproj-model-f16.gguf
+./local-inference-mtmd-cli -m ../llava-v1.6-vicuna-7b/ggml-model-f16.gguf --mmproj vit/mmproj-model-f16.gguf
 ```
 
 **note** llava-1.6 needs more context than llava-1.5, at least 3000 is needed (just run it at -c 4096)

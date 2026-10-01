@@ -20,7 +20,7 @@ from pydantic_models_to_grammar import (add_run_method_to_dynamic_model, convert
 
 
 def create_completion(host, prompt, gbnf_grammar):
-    """Calls the /completion API on llama-server.
+    """Calls the /completion API on local-inference-server.
 
     See
     https://github.com/ggml-org/llama.cpp/tree/HEAD/tools/server#api-endpoints

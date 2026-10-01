@@ -118,7 +118,7 @@ static ggml_sycl_device_info ggml_sycl_init() {
     ggml_sycl_device_info info = {};
 
     // Do not hard crash when there exists no SYCL devices.
-    // We want to allow the user to use non-SYCL tools when SYCL is compiled (such as llama-quantize)
+    // We want to allow the user to use non-SYCL tools when SYCL is compiled (such as local-inference-quantize)
     try {
         info.device_count = dpct::dev_mgr::instance().device_count();
     } catch (sycl::exception const &exc) {

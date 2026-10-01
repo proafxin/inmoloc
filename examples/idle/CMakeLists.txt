@@ -1,4 +1,4 @@
-set(TARGET llama-idle)
+set(TARGET local-inference-idle)
 add_executable(${TARGET} idle.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_link_libraries(${TARGET} PRIVATE llama llama-common ${CMAKE_THREAD_LIBS_INIT})

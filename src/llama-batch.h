@@ -124,7 +124,7 @@ private:
     // return llama_ubatch.n_tokens == 0 if the entire batch was consumed
     llama_ubatch ubatch_add(const std::vector<int32_t> & idxs, uint32_t n_seqs, bool equal_seqs);
 
-    // for debugging, start with LLAMA_BATCH_DEBUG=2
+    // for debugging, start with LOCAL_INFERENCE_BATCH_DEBUG=2
     void ubatch_print(const llama_ubatch & ubatch, int debug);
 
     llama_batch batch;

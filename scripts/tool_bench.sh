@@ -3,20 +3,20 @@ set -euo pipefail
 
 cmake --build build -j
 
-export LLAMA_CACHE=${LLAMA_CACHE:-$HOME/Library/Caches/llama.cpp}
-export LLAMA_SERVER_BIN_PATH=$PWD/build/bin/llama-server
+export LOCAL_INFERENCE_CACHE=${LOCAL_INFERENCE_CACHE:-$HOME/Library/Caches/llama.cpp}
+export LOCAL_INFERENCE_SERVER_BIN_PATH=$PWD/build/bin/local-inference-server
 
-if [ ! -x "$LLAMA_SERVER_BIN_PATH" ]; then
-    echo "Could not find llama-server binary at $LLAMA_SERVER_BIN_PATH"
+if [ ! -x "$LOCAL_INFERENCE_SERVER_BIN_PATH" ]; then
+    echo "Could not find local-inference-server binary at $LOCAL_INFERENCE_SERVER_BIN_PATH"
     exit 1
 fi
-if [ ! -d "$LLAMA_CACHE" ]; then
-    echo "Could not find llama cache at $LLAMA_CACHE, please set LLAMA_CACHE explicitly."
+if [ ! -d "$LOCAL_INFERENCE_CACHE" ]; then
+    echo "Could not find llama cache at $LOCAL_INFERENCE_CACHE, please set LOCAL_INFERENCE_CACHE explicitly."
     exit 1
 fi
 
 export ARGS=(
-    --llama-baseline="$(which llama-server)"
+    --llama-baseline="$(which local-inference-server)"
     --n 30
     --temp -1  # Leaves temperature parameter unset (use the server's default, e.g. 0.6 for ollama)
     --temp 0

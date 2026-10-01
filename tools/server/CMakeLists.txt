@@ -8,7 +8,7 @@ if (BUILD_SHARED_LIBS AND CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     set(LLAMA_SERVER_PCH OFF)
 endif()
 
-# server-context containing the core server logic, used by llama-server and CLI
+# server-context containing the core server logic, used by local-inference-server and CLI
 
 set(TARGET server-context)
 
@@ -45,9 +45,9 @@ if (LLAMA_SERVER_PCH)
     target_precompile_headers(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR}/common/common.h)
 endif()
 
-# llama-server-impl: server logic, reusable by app
+# local-inference-server-impl: server logic, reusable by app
 
-set(TARGET llama-server-impl)
+set(TARGET local-inference-server-impl)
 
 add_library(${TARGET}
     server.cpp
@@ -72,12 +72,12 @@ if(LLAMA_TOOLS_INSTALL)
     install(TARGETS ${TARGET} LIBRARY)
 endif()
 
-# llama-server executable
+# local-inference-server executable
 
-set(TARGET llama-server)
+set(TARGET local-inference-server)
 
 add_executable(${TARGET} main.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 
-target_link_libraries(${TARGET} PRIVATE llama-server-impl)
+target_link_libraries(${TARGET} PRIVATE local-inference-server-impl)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)

@@ -1,8 +1,8 @@
-# llama-bench-impl: benchmark logic, reusable by app
+# local-inference-bench-impl: benchmark logic, reusable by app
 
-set(TARGET llama-bench-impl)
+set(TARGET local-inference-bench-impl)
 
-add_library(${TARGET} llama-bench.cpp)
+add_library(${TARGET} bench.cpp)
 set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 
 target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -12,12 +12,12 @@ if(LLAMA_TOOLS_INSTALL)
     install(TARGETS ${TARGET} LIBRARY)
 endif()
 
-# llama-bench executable
+# local-inference-bench executable
 
-set(TARGET llama-bench)
+set(TARGET local-inference-bench)
 
 add_executable(${TARGET} main.cpp)
-target_link_libraries(${TARGET} PRIVATE llama-bench-impl)
+target_link_libraries(${TARGET} PRIVATE local-inference-bench-impl)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 if(LLAMA_TOOLS_INSTALL)

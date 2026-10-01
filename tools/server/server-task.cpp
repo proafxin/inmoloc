@@ -1693,9 +1693,9 @@ std::string server_task_result_metrics::to_metrics() {
 
     auto add_items = [&prometheus](const char * type, const std::vector<metric_item> & items) {
         for (const auto & item : items) {
-            prometheus << "# HELP llamacpp:" << item.name << " " << item.description << "\n"
-                       << "# TYPE llamacpp:" << item.name << " " << type             << "\n"
-                       << "llamacpp:"        << item.name << " " << item.value       << "\n";
+            prometheus << "# HELP local_inference:" << item.name << " " << item.description << "\n"
+                       << "# TYPE local_inference:" << item.name << " " << type             << "\n"
+                       << "local_inference:"        << item.name << " " << item.value       << "\n";
         }
     };
 
@@ -1703,13 +1703,13 @@ std::string server_task_result_metrics::to_metrics() {
     add_items("gauge",   gauges);
 
     auto add_histogram = [&prometheus](const char * name, const char * description, const server_metrics::histogram & h) {
-        prometheus << "# HELP llamacpp:" << name << " " << description << "\n"
-                   << "# TYPE llamacpp:" << name << " histogram\n";
+        prometheus << "# HELP local_inference:" << name << " " << description << "\n"
+                   << "# TYPE local_inference:" << name << " histogram\n";
 
         uint64_t cumulative = 0;
         for (size_t i = 0; i < h.counts.size(); i++) {
             cumulative += h.counts[i];
-            prometheus << "llamacpp:" << name << "_bucket{le=\"";
+            prometheus << "local_inference:" << name << "_bucket{le=\"";
             if (i < h.bounds.size()) {
                 prometheus << h.bounds[i];
             } else {
@@ -1718,8 +1718,8 @@ std::string server_task_result_metrics::to_metrics() {
             prometheus << "\"} " << cumulative << "\n";
         }
 
-        prometheus << "llamacpp:" << name << "_sum "   << h.sum   << "\n"
-                   << "llamacpp:" << name << "_count " << h.count << "\n";
+        prometheus << "local_inference:" << name << "_sum "   << h.sum   << "\n"
+                   << "local_inference:" << name << "_count " << h.count << "\n";
     };
 
     add_histogram("time_to_first_token_seconds", "Time from request arrival to the first generated token", metrics.time_to_first_token);
@@ -1729,11 +1729,11 @@ std::string server_task_result_metrics::to_metrics() {
 
     // labeled counter: one time series per draft position
     if (!metrics.n_accepted_per_pos.empty()) {
-        prometheus << "# HELP llamacpp:spec_decode_num_accepted_tokens_per_pos_total"
+        prometheus << "# HELP local_inference:spec_decode_num_accepted_tokens_per_pos_total"
                       " Accepted tokens per draft position\n"
-                   << "# TYPE llamacpp:spec_decode_num_accepted_tokens_per_pos_total counter\n";
+                   << "# TYPE local_inference:spec_decode_num_accepted_tokens_per_pos_total counter\n";
         for (size_t i = 0; i < metrics.n_accepted_per_pos.size(); i++) {
-            prometheus << "llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position=\""
+            prometheus << "local_inference:spec_decode_num_accepted_tokens_per_pos_total{position=\""
                        << i << "\"} " << metrics.n_accepted_per_pos[i] << "\n";
         }
     }

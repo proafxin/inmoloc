@@ -14,5 +14,5 @@ done
 dir="build-bisect"
 rm -rf ${dir} > /dev/null
 cmake -B ${dir} -S . ${cmake_args} > /dev/null
-cmake --build ${dir} -t llama-results -j $(nproc) > /dev/null
-${dir}/bin/llama-results "${llama_results_args[@]}"
+cmake --build ${dir} -t local-inference-results -j $(nproc) > /dev/null
+${dir}/bin/local-inference-results "${llama_results_args[@]}"

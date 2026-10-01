@@ -42,10 +42,10 @@ Notes:
 
 ## Quantize the GGUF
 
-After you have created a high-quality GGUF version of the model, you use `llama-quantize` to apply quantization. For example, quantize to `Q4_K_M` using a command like the following:
+After you have created a high-quality GGUF version of the model, you use `local-inference-quantize` to apply quantization. For example, quantize to `Q4_K_M` using a command like the following:
 
 ```bash
-./build/bin/llama-quantize gemma-4-E2B-it-bf16.gguf gemma-4-E2B-it-Q4_K_M.gguf Q4_K_M
+./build/bin/local-inference-quantize gemma-4-E2B-it-bf16.gguf gemma-4-E2B-it-Q4_K_M.gguf Q4_K_M
 ```
 
 Various quantization methods are described [later in this document](#quantize).
@@ -82,44 +82,44 @@ python convert_hf_to_gguf.py --mmproj --outfile mmproj-gemma-4-E2B-it-Q8_0.gguf 
 
 
 ```bash
-./build/bin/llama cli -m ./gemma-4-E2B-it-Q4_K_M.gguf --mmproj ./mmproj-gemma-4-E2B-it-Q8_0.gguf --image <input_image> --prompt "Describe this image"
+./build/bin/local-inference cli -m ./gemma-4-E2B-it-Q4_K_M.gguf --mmproj ./mmproj-gemma-4-E2B-it-Q8_0.gguf --image <input_image> --prompt "Describe this image"
 ```
 
 ## Quantization Examples
 
 ```bash
 # naive Q4_K_M quantization using default settings and 8 CPU threads. Output will be "ggml-model-Q4_K_M.gguf"
-./llama-quantize input-model-f32.gguf q4_k_m 8
+./local-inference-quantize input-model-f32.gguf q4_k_m 8
 ```
 
 ```bash
 #  quantize model enabling re-quantization, leaving the output tensor unquantized and all others quantized at the same level (Q4_K)
-./llama-quantize --allow-requantize --leave-output-tensor --pure input-model-f32.gguf q4_k_m 8
+./local-inference-quantize --allow-requantize --leave-output-tensor --pure input-model-f32.gguf q4_k_m 8
 ```
 
 ```bash
 # quantize model using an importance matrix for specified tensors only (attn_v and ffn_down)
-./llama-quantize --imatrix imatrix.gguf --include-weights attn_v --include-weights ffn_down input-model-f32.gguf q4_k_m 8
+./local-inference-quantize --imatrix imatrix.gguf --include-weights attn_v --include-weights ffn_down input-model-f32.gguf q4_k_m 8
 ```
 
 ```bash
 # quantize model setting output tensor to Q5_K_M, token embeddings to Q3_K_M, and keeping the input file's shards
-./llama-quantize --imatrix imatrix.gguf --output-tensor-type q5_k --token-embedding-type q3_k --keep-split input-model-f32.gguf q4_k_m 8
+./local-inference-quantize --imatrix imatrix.gguf --output-tensor-type q5_k --token-embedding-type q3_k --keep-split input-model-f32.gguf q4_k_m 8
 ```
 
 ```bash
 # quantize model using a regex to quantize attn_k tensors in odd layers to Q5_K_M and attn_q tensors in even layers to Q3_K_M
-./llama-quantize --imatrix imatrix.gguf --tensor-type "\.(\d*[13579])\.attn_k=q5_k" --tensor-type "\.(\d*[02468])\.attn_q=q3_k" input-model-f32.gguf q4_k_m 8
+./local-inference-quantize --imatrix imatrix.gguf --tensor-type "\.(\d*[13579])\.attn_k=q5_k" --tensor-type "\.(\d*[02468])\.attn_q=q3_k" input-model-f32.gguf q4_k_m 8
 ```
 
 ```bash
 # quantize model setting tensors attn_v and ffn_down to Q5_K_M and pruning layers 20, 21, and 22
-./llama-quantize --imatrix imatrix.gguf --tensor-type attn_v=q5_k --tensor-type ffn_down=q5_k --prune-layers 20,21,22 input-model-f32.gguf q4_k_m 8
+./local-inference-quantize --imatrix imatrix.gguf --tensor-type attn_v=q5_k --tensor-type ffn_down=q5_k --prune-layers 20,21,22 input-model-f32.gguf q4_k_m 8
 ```
 
 ```bash
 # override expert used count metadata to 16, prune layers 20, 21, and 22 without quantizing the model (copy tensors) and use specified name for the output file
-./llama-quantize --imatrix imatrix.gguf --override-kv qwen3moe.expert_used_count=int:16 --prune-layers 20,21,22 input-model-f32.gguf pruned-model-f32.gguf copy 8
+./local-inference-quantize --imatrix imatrix.gguf --override-kv qwen3moe.expert_used_count=int:16 --prune-layers 20,21,22 input-model-f32.gguf pruned-model-f32.gguf copy 8
 ```
 
 ## Memory/Disk Requirements
@@ -176,7 +176,7 @@ Several quantization methods are supported. They differ in the resulting model d
 | prompt processing t/s @ 512 | 923.49 ±0.53 |
 | text generation t/s @ 128   |  29.17 ±0.04 |
 
-## Background information on llama-quantize
+## Background information on local-inference-quantize
 
 - [k-quants](https://github.com/ggml-org/llama.cpp/pull/1684)
 - k-quants improvements and i-quants

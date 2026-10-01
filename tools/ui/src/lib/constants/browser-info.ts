@@ -19,7 +19,7 @@ export const BROWSER_INFO_OS_UA_PATTERNS: readonly [RegExp, string][] = [
 export const BROWSER_INFO_OS_UNKNOWN = 'unknown';
 
 /** Sent to the model as the `note` field of the tool result, next to the OS name */
-export const BROWSER_INFO_NOTE = `This environment is browser-only, it cannot read or modify local files, and it cannot run shell commands. To get local file access, tell user to launch llama-server with the ${CLI_FLAGS.AGENT} argument.`;
+export const BROWSER_INFO_NOTE = `This environment is browser-only, it cannot read or modify local files, and it cannot run shell commands. To get local file access, tell user to launch local-inference-server with the ${CLI_FLAGS.AGENT} argument.`;
 
 export function buildBrowserInfoToolDefinition(): OpenAIToolDefinition {
 	return {

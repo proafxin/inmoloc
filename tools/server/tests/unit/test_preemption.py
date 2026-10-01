@@ -25,7 +25,7 @@ def metric(name: str) -> float:
     res = server.make_request("GET", "/metrics")
     assert res.status_code == 200
     for line in res.body.splitlines():
-        if line.startswith(f"llamacpp:{name} "):
+        if line.startswith(f"local_inference:{name} "):
             return float(line.split(" ", 1)[1])
     raise AssertionError(f"metric {name} not found")
 

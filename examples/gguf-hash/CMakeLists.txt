@@ -1,4 +1,4 @@
-set(TARGET llama-gguf-hash)
+set(TARGET local-inference-gguf-hash)
 add_executable(${TARGET} gguf-hash.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 

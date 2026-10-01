@@ -132,8 +132,8 @@ static std::string fs_get_cache_directory() {
         }
         return p;
     };
-    if (getenv("LLAMA_CACHE")) {
-        cache_directory = std::getenv("LLAMA_CACHE");
+    if (getenv("LOCAL_INFERENCE_CACHE")) {
+        cache_directory = std::getenv("LOCAL_INFERENCE_CACHE");
     } else {
 #if defined(__linux__) || defined(__FreeBSD__) || defined(_AIX) || \
     defined(__OpenBSD__) || defined(__NetBSD__)
@@ -164,7 +164,12 @@ static std::string fs_get_cache_directory() {
 #  error Unknown architecture
 #endif
         cache_directory = ensure_trailing_slash(cache_directory);
-        cache_directory += "llama.cpp";
+        // the llama.cpp directory of an earlier install is kept while ours does not exist
+        const std::string legacy = cache_directory + "llama.cpp";
+        cache_directory += "local-inference";
+        if (!std::filesystem::is_directory(cache_directory) && std::filesystem::is_directory(legacy)) {
+            cache_directory = legacy;
+        }
     }
     return ensure_trailing_slash(cache_directory);
 }

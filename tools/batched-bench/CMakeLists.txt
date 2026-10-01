@@ -1,6 +1,6 @@
-# llama-batched-bench-impl: batched-bench logic, reusable by app
+# local-inference-batched-bench-impl: batched-bench logic, reusable by app
 
-set(TARGET llama-batched-bench-impl)
+set(TARGET local-inference-batched-bench-impl)
 
 add_library(${TARGET} batched-bench.cpp)
 set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
@@ -12,12 +12,12 @@ if(LLAMA_TOOLS_INSTALL)
     install(TARGETS ${TARGET} LIBRARY)
 endif()
 
-# llama-batched-bench executable
+# local-inference-batched-bench executable
 
-set(TARGET llama-batched-bench)
+set(TARGET local-inference-batched-bench)
 
 add_executable(${TARGET} main.cpp)
-target_link_libraries(${TARGET} PRIVATE llama-batched-bench-impl)
+target_link_libraries(${TARGET} PRIVATE local-inference-batched-bench-impl)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 if(LLAMA_TOOLS_INSTALL)

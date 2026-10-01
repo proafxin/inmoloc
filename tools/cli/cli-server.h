@@ -30,7 +30,7 @@ struct cli_server {
         }
     }
 
-    // spawn llama-server in a thread and interact with it via a random port
+    // spawn local-inference-server in a thread and interact with it via a random port
     bool start(common_params & params) {
         port = common_http_get_free_port();
         if (port <= 0) {

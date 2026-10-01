@@ -2,7 +2,7 @@
 
 export const EXPORT_CONV = {
 	// Producer marker carried by the session record of a JSONL export
-	HARNESS: 'llama.app',
+	HARNESS: 'local-inference',
 	// Length of the trimmed conversation ID in the filename
 	ID_TRIM_LENGTH: 8,
 	// Replacements to the ISO date for use in the export filename

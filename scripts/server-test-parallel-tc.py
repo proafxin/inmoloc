@@ -932,7 +932,7 @@ ALL_TEST_CASES = [
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Test llama-server parallel tool-calling capability. Run this only "
+            "Test local-inference-server parallel tool-calling capability. Run this only "
             "against models configured for parallel tool calls — this script "
             "does not configure that itself."
         )

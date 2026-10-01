@@ -531,10 +531,8 @@ if(NOT provisioned)
         message(WARNING "UI: provisioning failed; embedding stale assets from ${DIST_DIR}")
     else()
         message(WARNING "UI: no assets available - building without an embedded UI. "
-                        "In a disconnected environment, download the pre-built UI "
-                        "from a llama.cpp release at "
-                        "https://github.com/ggml-org/llama.cpp/releases and "
-                        "extract to tools/ui/dist.")
+                        "Install npm to build it from tools/ui, or build it elsewhere "
+                        "with `npm ci && npm run build` in tools/ui and copy tools/ui/dist.")
     endif()
 endif()
 

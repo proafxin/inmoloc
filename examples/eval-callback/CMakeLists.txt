@@ -1,4 +1,4 @@
-set(TARGET llama-eval-callback)
+set(TARGET local-inference-eval-callback)
 add_executable(${TARGET} eval-callback.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_link_libraries(${TARGET} PRIVATE llama-common llama ${CMAKE_THREAD_LIBS_INIT})
@@ -21,6 +21,6 @@ if(LLAMA_BUILD_TESTS)
         -P ${CMAKE_SOURCE_DIR}/cmake/download-models.cmake
     )
     set_tests_properties(${TEST_TARGET}-download-model PROPERTIES FIXTURES_SETUP ${TEST_TARGET}-download-model)
-    add_test(NAME ${TEST_TARGET} COMMAND llama-eval-callback -m "${MODEL_DEST}" --prompt hello --seed 42 -ngl 0)
+    add_test(NAME ${TEST_TARGET} COMMAND local-inference-eval-callback -m "${MODEL_DEST}" --prompt hello --seed 42 -ngl 0)
     set_tests_properties(${TEST_TARGET} PROPERTIES FIXTURES_REQUIRED ${TEST_TARGET}-download-model)
 endif()

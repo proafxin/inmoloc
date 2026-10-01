@@ -47,7 +47,7 @@ After build your llama.cpp, you can run the executable file via QEMU for simulat
 export QEMU_ROOT_PATH={your QEMU file path}
 export RISCV_ROOT_PATH_IME1={your RISC-V compiler path}
 
-${QEMU_ROOT_PATH}/bin/qemu-riscv64 -L ${RISCV_ROOT_PATH_IME1}/sysroot -cpu max,vlen=256,elen=64,vext_spec=v1.0 ${PWD}/build/bin/llama-cli -m ${PWD}/models/Qwen2.5-0.5B-Instruct-Q4_0.gguf -t 1
+${QEMU_ROOT_PATH}/bin/qemu-riscv64 -L ${RISCV_ROOT_PATH_IME1}/sysroot -cpu max,vlen=256,elen=64,vext_spec=v1.0 ${PWD}/build/bin/local-inference-cli -m ${PWD}/models/Qwen2.5-0.5B-Instruct-Q4_0.gguf -t 1
 ~~~
 
 ## Quantization Support For Matrix

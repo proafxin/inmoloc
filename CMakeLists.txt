@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14...3.28) # for add_link_options and implicit target directories.
-project("llama.cpp" C CXX)
+project("local-inference" C CXX)
 include(CheckIncludeFileCXX)
 
 ### llama.cpp version
@@ -145,8 +145,8 @@ option(LLAMA_BUILD_TOOLS     "llama: build tools"                               
 option(LLAMA_BUILD_EXAMPLES  "llama: build examples"                                                             ${LLAMA_STANDALONE})
 option(LLAMA_BUILD_SERVER    "llama: build server example"                                                       ${LLAMA_STANDALONE})
 option(LLAMA_BUILD_APP       "llama: build the unified binary"                                                   ${LLAMA_STANDALONE})
-option(LLAMA_BUILD_UI        "llama: build the embedded Web UI for server"                                       OFF)
-option(LLAMA_USE_PREBUILT_UI "llama: use prebuilt UI from HF Bucket when available" ON)
+option(LLAMA_BUILD_UI        "llama: build the embedded Web UI for server from tools/ui (needs npm)"            ON)
+option(LLAMA_USE_PREBUILT_UI "llama: without npm, embed llama.cpp's prebuilt UI from its HF Bucket" ON)
 
 option(LLAMA_TOOLS_INSTALL "llama: install tools" ${LLAMA_TOOLS_INSTALL_DEFAULT})
 option(LLAMA_TESTS_INSTALL "llama: install tests" ON)
@@ -249,7 +249,6 @@ endif()
 
 if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_EXAMPLES)
     add_subdirectory(examples)
-    add_subdirectory(pocs)
 endif()
 
 if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TOOLS)

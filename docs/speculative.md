@@ -6,7 +6,7 @@ llama.cpp supports speculative decoding, a technique that can significantly acce
 
 ## Implementations
 
-The `llama-server` application supports several implementations of speculative decoding. An implementation with draft model can be mixed with an implementation without draft model.
+The `local-inference-server` application supports several implementations of speculative decoding. An implementation with draft model can be mixed with an implementation without draft model.
 
 ### Draft Model (`draft`)
 
@@ -29,7 +29,7 @@ for `Qwen/Qwen3-4B`):
 python convert_hf_to_gguf.py AngelSlim/Qwen3-4B_eagle3 \
     --target-model-dir Qwen/Qwen3-4B --outtype bf16 --outfile Qwen3-4B-eagle3.gguf
 
-llama-server -m Qwen3-4B.gguf -md Qwen3-4B-eagle3.gguf --spec-type draft-eagle3
+local-inference-server -m Qwen3-4B.gguf -md Qwen3-4B-eagle3.gguf --spec-type draft-eagle3
 ```
 
 Supported EAGLE-3 draft models include:
@@ -68,7 +68,7 @@ target's tokenizer and token embeddings:
 python convert_hf_to_gguf.py z-lab/Qwen3-4B-DFlash \
     --target-model-dir Qwen/Qwen3-4B --outtype bf16 --outfile Qwen3-4B-DFlash.gguf
 
-llama-server -m Qwen3-4B.gguf -md Qwen3-4B-DFlash.gguf \
+local-inference-server -m Qwen3-4B.gguf -md Qwen3-4B-DFlash.gguf \
     --spec-type draft-dflash --spec-draft-n-max 15 -fa on --jinja
 ```
 
@@ -94,7 +94,7 @@ and token embeddings:
 python convert_hf_to_gguf.py deepseek-ai/dspark_qwen3_4b_block7 \
     --target-model-dir Qwen/Qwen3-4B --outtype bf16 --outfile Qwen3-4B-DSpark.gguf
 
-llama-server -m Qwen3-4B.gguf -md Qwen3-4B-DSpark.gguf \
+local-inference-server -m Qwen3-4B.gguf -md Qwen3-4B-DSpark.gguf \
     --spec-type draft-dspark --spec-draft-n-max 7 -fa on --jinja
 ```
 
@@ -134,7 +134,7 @@ An example to use this approach can be the rewriting of source code by a LLM.
 This implementation looks for the last n-gram in history that matches the current n-gram and creates a draft using the m tokens following the matched n-gram. It is the simplest self-speculative approach with minimal overhead.
 
 ```
-llama-server [...] --spec-type ngram-simple --spec-draft-n-max 64
+local-inference-server [...] --spec-type ngram-simple --spec-draft-n-max 64
 ```
 
 #### n-gram Map Key (`ngram-map-k`)
@@ -145,7 +145,7 @@ The number of accepted tokens is stored for each used n-gram.
 
 **Example:**
 ```
-llama-server [...] --spec-type ngram-map-k --spec-draft-n-max 64
+local-inference-server [...] --spec-type ngram-map-k --spec-draft-n-max 64
 ```
 
 #### n-gram Map Key-4-Values (`ngram-map-k4v`)
@@ -156,7 +156,7 @@ The number of accepted tokens is stored for each used n-gram.
 
 **Example:** Server options to be used if there are a lot of longer repetitions.
 ```
-llama-server [...] --spec-type ngram-map-k4v --spec-ngram-map-k4v-size-n 8 --spec-ngram-map-k4v-size-m 8 --spec-ngram-map-k4v-min-hits 2 --spec-draft-n-max 64
+local-inference-server [...] --spec-type ngram-map-k4v --spec-ngram-map-k4v-size-n 8 --spec-ngram-map-k4v-size-m 8 --spec-ngram-map-k4v-min-hits 2 --spec-draft-n-max 64
 ```
 
 ### n-gram Mod (`ngram-mod`)
@@ -183,7 +183,7 @@ Currently, a single hash pool is shared across all server slots, so different re
 # - MoEs require long drafts
 # - dense models: can reduce `--spec-ngram-mod-n-min` and `--spec-ngram-mod-n-max`
 
-llama-server ... --spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64
+local-inference-server ... --spec-type ngram-mod --spec-ngram-mod-n-match 24 --spec-ngram-mod-n-min 48 --spec-ngram-mod-n-max 64
 ```
 
 Applications:
@@ -214,7 +214,7 @@ Unsupported samplers and device layouts fall back to CPU sampling. Tensor split 
 
 ### Synthetic Acceptance
 
-`llama-server` and `llama-cli` can replace normal speculative verification with synthetic decisions for benchmarking. The generated output is not valid model output because accepted draft tokens do not have to match the target model.
+`local-inference-server` and `local-inference-cli` can replace normal speculative verification with synthetic decisions for benchmarking. The generated output is not valid model output because accepted draft tokens do not have to match the target model.
 
 Use exactly one of these options:
 
@@ -227,7 +227,7 @@ Use exactly one of these options:
 --spec-type [none|draft-simple|draft-eagle3|draft-dflash|draft-dspark|draft-mtp|ngram-cache|ngram-simple|ngram-map-k|ngram-map-k4v|ngram-mod]
                                         comma-separated list of types of speculative decoding to use
                                         (default: none)
-                                        (env: LLAMA_ARG_SPEC_TYPE)
+                                        (env: LOCAL_INFERENCE_ARG_SPEC_TYPE)
 --spec-default                          use default speculative decoding config
                                         (enables ngram-mod)
 ```
@@ -237,25 +237,25 @@ Use exactly one of these options:
 ```
 --spec-draft-model, -md, --model-draft  FNAME
                                         draft model for speculative decoding (default: unused)
-                                        (env: LLAMA_ARG_SPEC_DRAFT_MODEL)
+                                        (env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_MODEL)
 --spec-draft-hf, -hfd, -hfrd, --hf-repo-draft  <user>/<model>[:quant]
                                         HuggingFace repository for the draft model
-                                        (env: LLAMA_ARG_SPEC_DRAFT_HF_REPO)
+                                        (env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_HF_REPO)
 --spec-draft-n-max                      N
                                         number of tokens to draft for speculative decoding (default: 3)
-                                        (env: LLAMA_ARG_SPEC_DRAFT_N_MAX)
+                                        (env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_N_MAX)
 --spec-draft-n-min                      N
                                         minimum number of draft tokens to use for speculative decoding (default: 0)
-                                        (env: LLAMA_ARG_SPEC_DRAFT_N_MIN)
+                                        (env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_N_MIN)
 --spec-draft-p-split, --draft-p-split   P
                                         speculative decoding split probability (default: 0.10)
-                                        (env: LLAMA_ARG_SPEC_DRAFT_P_SPLIT)
+                                        (env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_P_SPLIT)
 --spec-draft-p-min, --draft-p-min       P
                                         minimum speculative decoding probability (greedy) (default: 0.00)
-                                        (env: LLAMA_ARG_SPEC_DRAFT_P_MIN)
+                                        (env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_P_MIN)
 --spec-draft-ngl, -ngld, --gpu-layers-draft, --n-gpu-layers-draft  N
                                         max. number of draft model layers to store in VRAM, either an exact number, 'auto', or 'all' (default: auto)
-                                        (env: LLAMA_ARG_N_GPU_LAYERS_DRAFT)
+                                        (env: LOCAL_INFERENCE_ARG_N_GPU_LAYERS_DRAFT)
 --spec-draft-device, -devd, --device-draft  <dev1,dev2,..>
                                         comma-separated list of devices to use for offloading the draft model
                                         (use --list-devices to see available devices)
@@ -296,19 +296,19 @@ Use exactly one of these options:
 --spec-draft-type-k, -ctkd, --cache-type-k-draft  TYPE
                                         KV cache data type for K for the draft model
                                         allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1
-                                        (env: LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_K)
+                                        (env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_CACHE_TYPE_K)
 --spec-draft-type-v, -ctvd, --cache-type-v-draft  TYPE
                                         KV cache data type for V for the draft model
                                         allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1
-                                        (env: LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V)
+                                        (env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_CACHE_TYPE_V)
 --spec-draft-override-tensor, -otd, --override-tensor-draft  <tensor name pattern>=<buffer type>,...
                                         override tensor buffer type for draft model
 --spec-draft-cpu-moe, -cmoed, --cpu-moe-draft
                                         keep all Mixture of Experts (MoE) weights in the CPU for the draft model
-                                        (env: LLAMA_ARG_SPEC_DRAFT_CPU_MOE)
+                                        (env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_CPU_MOE)
 --spec-draft-n-cpu-moe, --spec-draft-ncmoe, -ncmoed, --n-cpu-moe-draft  N
                                         keep the MoE weights of the first N layers in the CPU for the draft model
-                                        (env: LLAMA_ARG_SPEC_DRAFT_N_CPU_MOE)
+                                        (env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_N_CPU_MOE)
 ```
 
 ### n-gram Mod Parameters
@@ -375,12 +375,12 @@ Specifies a comma-separated list of speculative decoding types to use.
 
 **Example:** Server-instance used to refactor source code.
 ```bash
-./llama-server [...] --spec-type ngram-simple
+./local-inference-server [...] --spec-type ngram-simple
 ```
 
 **Example:** Multiple speculative implementations.
 ```bash
-./llama-server [...] --spec-type ngram-mod,ngram-map-k4v
+./local-inference-server [...] --spec-type ngram-mod,ngram-map-k4v
 ```
 
 ### `--spec-ngram-*-size-n N`
@@ -446,4 +446,4 @@ statistics ngram_map_k: #calls(b,g,a) = 6 1690 26, #gen drafts = 26, #acc drafts
 ## Benchmarking
 
 To measure the end-to-end effect of speculative decoding (throughput, latency, and draft acceptance) across diverse prompts, see the SPEED-Bench client in [tools/server/bench/speed-bench](../tools/server/bench/speed-bench/README.md).
-It runs against a running `llama-server` and can compare a baseline run against a speculative-decoding run.
+It runs against a running `local-inference-server` and can compare a baseline run against a speculative-decoding run.

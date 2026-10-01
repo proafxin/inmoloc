@@ -3,7 +3,7 @@
 # Development script for llama-ui
 #
 # This script starts the llama-ui development servers (Storybook and Vite).
-# Note: You need to start llama-server separately.
+# Note: You need to start local-inference-server separately.
 #
 # Usage:
 #   bash scripts/dev.sh
@@ -51,9 +51,9 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 echo "🚀 Starting development servers..."
-echo "📝 Note: Make sure to start llama-server separately if needed"
+echo "📝 Note: Make sure to start local-inference-server separately if needed"
 cd tools/ui
-# Use --insecure-http-parser to handle malformed HTTP responses from llama-server
+# Use --insecure-http-parser to handle malformed HTTP responses from local-inference-server
 # (some responses have both Content-Length and Transfer-Encoding headers)
 storybook dev -p 6006 --ci & NODE_OPTIONS="--insecure-http-parser" vite dev --host 0.0.0.0 &
 

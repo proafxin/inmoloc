@@ -36,7 +36,7 @@ export enum GlobSearchType {
  * / rename support.
  *
  * The `SERVER_` / `BROWSER_` prefixes mirror the tool's primary source
- * (llama-server vs llama-ui). `get_info` is the exception: it is served by
+ * (local-inference-server vs llama-ui). `get_info` is the exception: it is served by
  * the server, but llama-ui falls back to a browser implementation when the
  * server does not provide it, so it can surface under both categories in
  * the UI while keeping a single wire name.

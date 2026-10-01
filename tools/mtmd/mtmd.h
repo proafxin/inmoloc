@@ -356,7 +356,7 @@ MTMD_API float * mtmd_batch_get_output_embd(mtmd_batch * batch, const mtmd_input
 MTMD_API void mtmd_log_set(ggml_log_callback log_callback, void * user_data);
 
 // EXPERIMENTAL API to get mmproj's capabilities without initializing the full context
-// This is only intended to be used by llama-server, breaking changes is expected
+// This is only intended to be used by local-inference-server, breaking changes is expected
 struct mtmd_caps {
     bool inp_vision;
     bool inp_audio;

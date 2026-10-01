@@ -1,5 +1,5 @@
 # Usage:
-#! ./llama-server -m some-model.gguf &
+#! ./local-inference-server -m some-model.gguf &
 #! pip install pydantic
 #! python json_schema_pydantic_example.py
 

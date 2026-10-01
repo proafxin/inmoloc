@@ -268,7 +268,7 @@ You may set the [cuda environmental variables](https://docs.nvidia.com/cuda/cuda
 
 ```bash
 # Use `CUDA_VISIBLE_DEVICES` to hide the first compute device.
-CUDA_VISIBLE_DEVICES="-0" ./build/bin/llama-server --model /srv/models/llama.gguf
+CUDA_VISIBLE_DEVICES="-0" ./build/bin/local-inference-server --model /srv/models/llama.gguf
 ```
 
 #### CUDA_SCALE_LAUNCH_QUEUES
@@ -346,7 +346,7 @@ You may set the [musa environmental variables](https://docs.mthreads.com/musa-sd
 
 ```bash
 # Use `MUSA_VISIBLE_DEVICES` to hide the first compute device.
-MUSA_VISIBLE_DEVICES="-0" ./build/bin/llama-server --model /srv/models/llama.gguf
+MUSA_VISIBLE_DEVICES="-0" ./build/bin/local-inference-server --model /srv/models/llama.gguf
 ```
 
 ### Unified Memory
@@ -450,7 +450,7 @@ cmake --build build --config Release
 Now you can load the model in conversation mode using `Vulkan`
 
 ```sh
-build/bin/Release/llama-cli -m "[PATH TO MODEL]" -ngl 100 -c 16384 -t 10 -n -2 -cnv
+build/bin/Release/local-inference-cli -m "[PATH TO MODEL]" -ngl 100 -c 16384 -t 10 -n -2 -cnv
 ```
 
 **MSYS2**
@@ -518,7 +518,7 @@ Finally, after finishing your build, you should be able to do something like thi
 ```bash
 # Test the output binary
 # "-ngl 99" should offload all of the layers to GPU for most (if not all) models.
-./build/bin/llama-cli -m "PATH_TO_MODEL" -p "Hi you how are you" -ngl 99
+./build/bin/local-inference-cli -m "PATH_TO_MODEL" -p "Hi you how are you" -ngl 99
 
 # You should see in the output, ggml_vulkan detected your GPU. For example:
 # ggml_vulkan: Using Intel(R) Graphics (ADL GT2) | uma: 1 | fp16: 1 | warp size: 32
@@ -571,7 +571,7 @@ cmake --build build --config release
 You can test with:
 
 ```bash
-./build/bin/llama-cli -m PATH_TO_MODEL -p "Building a website can be done in 10 steps:" -ngl 32
+./build/bin/local-inference-cli -m PATH_TO_MODEL -p "Building a website can be done in 10 steps:" -ngl 32
 ```
 
 If the following info is output on screen, you are using `llama.cpp` with the CANN backend:
@@ -609,7 +609,7 @@ ZenDNN provides optimized deep learning primitives for AMD EPYC™ CPUs. It acce
 You can test with:
 
 ```bash
-./build/bin/llama-cli -m PATH_TO_MODEL -p "Building a website can be done in 10 steps:" -n 50
+./build/bin/local-inference-cli -m PATH_TO_MODEL -p "Building a website can be done in 10 steps:" -n 50
 ```
 
 For detailed information about hardware support, setup instructions, and performance optimization, refer to [llama.cpp for ZenDNN](./backend/ZenDNN.md).
@@ -664,7 +664,7 @@ Important Android options:
 - `GGML_LLAMAFILE=OFF` avoids the llamafile backend, which is not supported on Android.
 - `LLAMA_OPENSSL=OFF` avoids depending on OpenSSL, which is not part of the Android NDK stable native API set.
 
-The Android Studio project under `examples/llama.android` enables KleidiAI automatically for `arm64-v8a`. For Android command-line CMake builds on `arm64-v8a`, pass `-DGGML_CPU_KLEIDIAI=ON` explicitly.
+For Android command-line CMake builds on `arm64-v8a`, pass `-DGGML_CPU_KLEIDIAI=ON` to enable KleidiAI.
 
 Global -march flags such as `-march=armv8.7a` flag are not required for a portable Android `arm64-v8a` build. Global `-march` flags raise the baseline instruction set for generic code. No manual architecture-specific source selection is required; llama.cpp selects compatible KleidiAI kernels at runtime. The KleidiAI libraries internal CMake handles the -march flags for each particular kernel.
 
@@ -673,7 +673,7 @@ Global -march flags such as `-march=armv8.7a` flag are not required for a portab
 Run an installed or in-tree binary:
 
 ```bash
-./build/bin/llama-cli -m PATH_TO_MODEL -p "What is a car?"
+./build/bin/local-inference-cli -m PATH_TO_MODEL -p "What is a car?"
 ```
 
 If KleidiAI is enabled, the output contains a line similar to:

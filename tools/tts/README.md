@@ -9,7 +9,7 @@ Note: this tool used to serve as a demo for OuteTTS, but it was converted to a m
 Simple usage:
 
 ```sh
-llama-tts -hf ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF -p "Hello world" --output out.wav
+local-inference-tts -hf ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF -p "Hello world" --output out.wav
 ```
 
 Common params:
@@ -26,7 +26,7 @@ Available params:
 Example usage:
 
 ```sh
-llama-tts -hf ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF \
+local-inference-tts -hf ggml-org/Qwen3-TTS-12Hz-1.7B-Base-GGUF \
     -p "Hello world" \
     --tts-lang english \
     --tts-speaker-file speaker.mp3 \
@@ -42,7 +42,7 @@ Available params:
 Example usage:
 
 ```sh
-llama-tts -m pocket-tts.gguf \
+local-inference-tts -m pocket-tts.gguf \
     -mm mmproj-pocket-tts.gguf \
     -p "Hello world" \
     --tts-speaker-file speaker.mp3 \

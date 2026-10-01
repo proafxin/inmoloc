@@ -23,8 +23,11 @@ jobs:
       - name: Build
         run: cmake --build build --config Release -j $(nproc)
 
+      # the tokenizer tests clone vocab files stored with Git LFS
       - name: Unit tests
-        run: ctest --test-dir build -L main --output-on-failure -j $(nproc)
+        run: |
+          git lfs install
+          ctest --test-dir build -L main --output-on-failure -j $(nproc)
 
       # the unit tests run the recurrent state rollback in snapshot mode, on the tiny models they generate
       - name: Recurrent state rollback by replay
@@ -47,7 +50,7 @@ jobs:
       - name: Build
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF
-          cmake --build build --config Release -j $(nproc) --target llama-server
+          cmake --build build --config Release -j $(nproc) --target local-inference-server
 
       - name: Install test requirements
         run: pip install -r tools/server/tests/requirements.txt
@@ -71,4 +74,4 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=120a -DLLAMA_BUILD_TESTS=ON
 
       - name: Build
-        run: cmake --build build --config Release -j $(nproc) --target llama-server test-backend-ops
+        run: cmake --build build --config Release -j $(nproc) --target local-inference-server test-backend-ops

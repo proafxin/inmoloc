@@ -1,6 +1,6 @@
-# llama-perplexity-impl: perplexity logic, reusable by app
+# local-inference-perplexity-impl: perplexity logic, reusable by app
 
-set(TARGET llama-perplexity-impl)
+set(TARGET local-inference-perplexity-impl)
 
 add_library(${TARGET} perplexity.cpp)
 set_target_properties(${TARGET} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
@@ -12,12 +12,12 @@ if(LLAMA_TOOLS_INSTALL)
     install(TARGETS ${TARGET} LIBRARY)
 endif()
 
-# llama-perplexity executable
+# local-inference-perplexity executable
 
-set(TARGET llama-perplexity)
+set(TARGET local-inference-perplexity)
 
 add_executable(${TARGET} main.cpp)
-target_link_libraries(${TARGET} PRIVATE llama-perplexity-impl)
+target_link_libraries(${TARGET} PRIVATE local-inference-perplexity-impl)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
 if(LLAMA_TOOLS_INSTALL)

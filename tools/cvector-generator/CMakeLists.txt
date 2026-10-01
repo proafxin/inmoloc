@@ -1,4 +1,4 @@
-set(TARGET llama-cvector-generator)
+set(TARGET local-inference-cvector-generator)
 add_executable(${TARGET} cvector-generator.cpp pca.hpp)
 target_link_libraries(${TARGET} PRIVATE llama-common llama ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)

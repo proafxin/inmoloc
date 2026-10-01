@@ -1,4 +1,4 @@
-set(TARGET llama-parallel)
+set(TARGET local-inference-parallel)
 add_executable(${TARGET} parallel.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_link_libraries(${TARGET} PRIVATE llama-common llama ${CMAKE_THREAD_LIBS_INIT})

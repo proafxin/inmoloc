@@ -1,6 +1,6 @@
 /**
  * Browser fallback for the server's `get_info` tool, offered only when the
- * server does not serve one (llama-server without --agent). It tells the model
+ * server does not serve one (local-inference-server without --agent). It tells the model
  * which OS the browser runs on and that there is no local file or shell access,
  * so it does not plan around tools that are not there.
  *

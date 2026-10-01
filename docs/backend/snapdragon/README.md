@@ -87,8 +87,8 @@ To generate an installable "package" simply use cmake --install:
 -- Installing: /workspace/pkg-android/llama.cpp/lib/libggml-htp-v81.so
 -- Installing: /workspace/pkg-android/llama.cpp/lib/libggml.so
 ...
--- Installing: /workspace/pkg-android/llama.cpp/bin/llama-bench
--- Installing: /workspace/pkg-android/llama.cpp/bin/llama-cli
+-- Installing: /workspace/pkg-android/llama.cpp/bin/local-inference-bench
+-- Installing: /workspace/pkg-android/llama.cpp/bin/local-inference-cli
 ...
 ```
 
@@ -142,7 +142,7 @@ Here are some examples of running various llama.cpp tools.
 Generating a completion with Gemma on Android (relying on default `HTP0:0` device and default thread count `-t 6`):
 
 ```
-~/src/llama.cpp$ ./scripts/snapdragon/run.py --target adb -- llama-completion -m models/gemma-2-2b-it-Q4_0.gguf -f prompts/sample_prompt_1024.txt --jinja -st
+~/src/llama.cpp$ ./scripts/snapdragon/run.py --target adb -- local-inference-completion -m models/gemma-2-2b-it-Q4_0.gguf -f prompts/sample_prompt_1024.txt --jinja -st
 ...
 ggml-hex: Hexagon backend (experimental) : allocating new registry : ndev 1
 ggml-hex: Hexagon Arch version v79
@@ -160,7 +160,7 @@ llama_perf_context_print:        eval time =     2100.00 ms /   100 runs   (   2
 Simple question for Llama-3.2-1B:
 
 ```
-~/src/llama.cpp$ ./scripts/snapdragon/run.py --target android --devices HTP0 -- llama-cli -m Llama-3.2-1B-Instruct-Q4_0.gguf -p "what is the most popular cookie in the world?"
+~/src/llama.cpp$ ./scripts/snapdragon/run.py --target android --devices HTP0 -- local-inference-cli -m Llama-3.2-1B-Instruct-Q4_0.gguf -p "what is the most popular cookie in the world?"
 ...
 ggml-hex: Hexagon backend (experimental) : allocating new registry : ndev 1
 ggml-hex: Hexagon Arch version v79
@@ -201,7 +201,7 @@ MUL_MAT(type_a=q4_0,type_b=f32,m=16,n=3,k=256,bs=[1,1],nr=[1,1],per=[0,1,2,3],v=
 Llama benchmark:
 
 ```
-~/src/llama.cpp$ ./scripts/snapdragon/run.py --target adb --devices HTP0 -- llama-bench -p 128 -n 64 -m Llama-3.2-1B-Instruct-Q4_0.gguf
+~/src/llama.cpp$ ./scripts/snapdragon/run.py --target adb --devices HTP0 -- local-inference-bench -p 128 -n 64 -m Llama-3.2-1B-Instruct-Q4_0.gguf
 ...
 ggml-hex: Hexagon backend (experimental) : allocating new registry : ndev 1
 ggml-hex: Hexagon Arch version v79
@@ -228,7 +228,7 @@ without manual configuration:
 
 ```bash
 ./scripts/snapdragon/run.py --target adb --devices HTP0:0 -- \
-    llama-cli -m models/Llama-3.2-3B-Instruct-Q4_0.gguf -ngl 99 -p "Hello"
+    local-inference-cli -m models/Llama-3.2-3B-Instruct-Q4_0.gguf -ngl 99 -p "Hello"
 ```
 
 ### 2. Layer-Split Mode across Virtual Sessions (`HTP0,HTP1,...` or `HTP0:0,HTP0:1,...`)
@@ -244,7 +244,7 @@ Here is an example of running the GPT-OSS-20B model on a Snapdragon device using
 ```bash
 ./scripts/snapdragon/run.py --target adb \
     --devices HTP0:0,HTP0:1,HTP0:2,HTP0:3 -- \
-    llama-cli --load-mode none -m /data/local/tmp/gguf/gpt-oss-20b-Q4_0.gguf -t 4 \
+    local-inference-cli --load-mode none -m /data/local/tmp/gguf/gpt-oss-20b-Q4_0.gguf -t 4 \
     --ctx-size 8192 --batch-size 128 -ctk q8_0 -ctv q8_0 -fa on -ngl 99 -no-cnv -f surfing.txt
 ```
 
@@ -286,7 +286,7 @@ needing an explicit `--tensor-split` option):
 ```bash
 ./scripts/snapdragon/run.py --target adb \
     --devices HTP0:0,HTP1:0 -- \
-    llama-cli -m models/Llama-3.2-3B-Instruct-Q4_0.gguf --split-mode tensor -ngl 99 -p "Hello"
+    local-inference-cli -m models/Llama-3.2-3B-Instruct-Q4_0.gguf --split-mode tensor -ngl 99 -p "Hello"
 ```
 
 ### 4. Row-Split Multi-Device Mode via Device Grouping (`HTP0[0-1]`)
@@ -298,7 +298,7 @@ Unlike host-level tensor-splitting, row-splitting is executed entirely inside th
 ```bash
 ./scripts/snapdragon/run.py --target adb \
     --devices 'HTP0[0-1]' -- \
-    llama-cli -m models/Llama-3.2-3B-Instruct-Q4_0.gguf -ngl 99 -p "Hello"
+    local-inference-cli -m models/Llama-3.2-3B-Instruct-Q4_0.gguf -ngl 99 -p "Hello"
 ```
 
 You can also combine row-splitting with layer-splitting across multiple grouped devices (e.g. `--devices 'HTP0[0-1],HTP1[2-3]'`
@@ -349,7 +349,7 @@ on 4 physical NPUs, or `--devices 'HTP0[0-1:0],HTP1[0-1:1]'` on 2 physical NPUs 
   The logging output can be saved to a file or piped directly into the post-processing script:
 
   ```bash
-  ./scripts/snapdragon/run.py --target adb --hex-profile 1 -- llama-cli ... |& \
+  ./scripts/snapdragon/run.py --target adb --hex-profile 1 -- local-inference-cli ... |& \
       ./scripts/snapdragon/ggml-hexagon-profile.py -
   ```
 
@@ -358,8 +358,8 @@ on 4 physical NPUs, or `--devices 'HTP0[0-1:0],HTP1[0-1:1]'` on 2 physical NPUs 
 
   ```bash
   # Disable Flash Attention on Hexagon (falls back to CPU or GPU)
-  ./scripts/snapdragon/run.py --target adb --hex-opfilter "FLASH_ATTN_EXT" -- llama-cli ...
+  ./scripts/snapdragon/run.py --target adb --hex-opfilter "FLASH_ATTN_EXT" -- local-inference-cli ...
 
   # Disable ADD and SUB on Hexagon (fall back to CPU or GPU)
-  ./scripts/snapdragon/run.py --target adb --hex-opfilter "ADD|SUB" -- llama-cli ...
+  ./scripts/snapdragon/run.py --target adb --hex-opfilter "ADD|SUB" -- local-inference-cli ...
   ```

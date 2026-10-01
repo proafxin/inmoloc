@@ -1,12 +1,12 @@
 /**
- * CORS Proxy utility for routing requests through llama-server's CORS proxy.
+ * CORS Proxy utility for routing requests through local-inference-server's CORS proxy.
  */
 
 import { base } from '$app/paths';
 import { CORS_PROXY, CORS_PROXY_ENDPOINT } from '$lib/constants';
 
 /**
- * Build a proxied URL that routes through llama-server's CORS proxy.
+ * Build a proxied URL that routes through local-inference-server's CORS proxy.
  * @param targetUrl - The original URL to proxy
  * @returns URL pointing to the CORS proxy with target encoded
  */

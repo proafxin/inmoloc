@@ -3,7 +3,7 @@
 Apply LORA adapters to base model and export the resulting model.
 
 ```
-usage: llama-export-lora [options]
+usage: local-inference-export-lora [options]
 
 options:
   -m,    --model FNAME                  model path from which to load base model
@@ -15,7 +15,7 @@ options:
 For example:
 
 ```bash
-./bin/llama-export-lora \
+./bin/local-inference-export-lora \
     -m open-llama-3b-v2.gguf \
     -o open-llama-3b-v2-english2tokipona-chat.gguf \
     --lora lora-open-llama-3b-v2-english2tokipona-chat-LATEST.gguf
@@ -24,7 +24,7 @@ For example:
 Multiple LORA adapters can be applied by passing comma-separated values to `--lora FNAME` or `--lora-scaled FNAME:SCALE,...`:
 
 ```bash
-./bin/llama-export-lora \
+./bin/local-inference-export-lora \
     -m your_base_model.gguf \
     -o your_merged_model.gguf \
     --lora-scaled lora_task_A.gguf:0.5,lora_task_B.gguf:0.5

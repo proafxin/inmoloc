@@ -11,7 +11,7 @@ const OUTPUT_DIR = process.env.LLAMA_UI_OUT_DIR ?? BUILD_CONFIG.OUTPUT_DIR;
  * Write build.json with the llama.cpp release build number.
  *
  * LLAMA_BUILD_NUMBER is passed from CMake -> npm -> vite via env var.
- * Used for display of the current llama-server release (e.g. "b1234").
+ * Used for display of the current local-inference-server release (e.g. "b1234").
  */
 export function buildInfoPlugin(): Plugin {
 	return {

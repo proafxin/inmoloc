@@ -78,7 +78,7 @@ OutputVector translate_set_rows(const NodeContext & context) {
     auto dst_reshape = std::dynamic_pointer_cast<ov::op::v1::Reshape>(dst.get_node_shared_ptr());
     if (!multidim_indices && dst_reshape) {
         // Fix the case of multiple sequences, reshape back to original shape [1, n_seq, ctx_per_seq, emb]
-        // ctx_per_seq is not fixed due to llama-bench compatibility
+        // ctx_per_seq is not fixed due to local-inference-bench compatibility
         auto dst_shape_partial = dst_reshape->get_input_partial_shape(0);
         std::vector<int64_t> dst_shape = {dst_shape_partial[0].get_length(), dst_shape_partial[1].get_length(),
                                           dst_shape_partial[2].is_static() ? dst_shape_partial[2].get_length() : -1,

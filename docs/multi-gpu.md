@@ -1,6 +1,6 @@
 # Using multiple GPUs with llama.cpp
 
-This guide explains how to run [llama.cpp](https://github.com/ggml-org/llama.cpp) across more than one GPU. It covers the split modes, the command-line flags that control them, the limitations you need to know about, and ready-to-use recipes for `llama-cli` and `llama-server`.
+This guide explains how to run [llama.cpp](https://github.com/ggml-org/llama.cpp) across more than one GPU. It covers the split modes, the command-line flags that control them, the limitations you need to know about, and ready-to-use recipes for `local-inference-cli` and `local-inference-server`.
 
 The CLI arguments listed here are the same for both tools - or most llama.cpp binaries for that matter.
 
@@ -54,8 +54,8 @@ As for any CUDA program, the environment variable `CUDA_VISIBLE_DEVICES` can be 
 ### 1. Default - pipeline parallel across all visible GPUs
 
 ```bash
-llama-cli -m model.gguf
-llama-server -m model.gguf
+local-inference-cli -m model.gguf
+local-inference-server -m model.gguf
 ```
 
 Easiest configuration. KV cache spreads across the GPUs along with the layers. `--fit` (on by default) sizes things automatically.
@@ -63,7 +63,7 @@ Easiest configuration. KV cache spreads across the GPUs along with the layers. `
 ### 2. Pipeline parallel with a custom split ratio
 
 ```bash
-llama-cli -m model.gguf -ts 3,1
+local-inference-cli -m model.gguf -ts 3,1
 ```
 
 Useful when GPUs have different memory: GPU 0 (3 parts) and GPU 1 (1 part). Proportions are normalized so `-ts 3,1` is the same as e.g. `-ts 75,25`.
@@ -71,8 +71,8 @@ Useful when GPUs have different memory: GPU 0 (3 parts) and GPU 1 (1 part). Prop
 ### 3. Single-GPU mode, picking a specific GPU
 
 ```bash
-llama-cli --list-devices
-llama-cli -m model.gguf -dev CUDA1
+local-inference-cli --list-devices
+local-inference-cli -m model.gguf -dev CUDA1
 ```
 
 Use only the device listed as `CUDA1` when calling with `--list-devices`.
@@ -80,7 +80,7 @@ Use only the device listed as `CUDA1` when calling with `--list-devices`.
 ### 4. Tensor parallelism (experimental)
 
 ```bash
-llama-cli -m model.gguf -sm tensor -ctk f16 -ctv f16
+local-inference-cli -m model.gguf -sm tensor -ctk f16 -ctv f16
 ```
 
 - `--flash-attn off` or (`--flash-attn auto` resolving to `off` when it isn't supported) is a hard error.
@@ -106,7 +106,7 @@ When using the "ROCm" backend (which is the ggml CUDA code translated for AMD vi
 CUDA peer-to-peer (P2P) lets GPUs transfer data directly between each other instead of going through system memory, which generally improves multi-GPU performance. It is **opt-in** at runtime - set the environment variable `GGML_CUDA_P2P` to any value to enable it:
 
 ```bash
-GGML_CUDA_P2P=1 llama-cli -m model.gguf -sm tensor
+GGML_CUDA_P2P=1 local-inference-cli -m model.gguf -sm tensor
 ```
 
 P2P requires driver support (usually restricted to workstation/datacenter GPUs) and **may cause crashes or corrupted outputs on some motherboards or BIOS configurations** (e.g. when IOMMU is enabled). If you see instability after enabling it, unset the variable.
@@ -121,7 +121,7 @@ P2P requires driver support (usually restricted to workstation/datacenter GPUs) 
 | Startup error *"simultaneous use of SPLIT_MODE_TENSOR and KV cache quantization not implemented"* | Use `-ctk f16 -ctv f16` (or `bf16`/`f32`) with `--split-mode tensor`. |
 | Startup error *"LLAMA_SPLIT_MODE_TENSOR not implemented for architecture 'X'"* | Architecture not on the TENSOR allow-list. Use `--split-mode layer`. |
 | Warning *"NCCL is unavailable, multi GPU performance will be suboptimal"* | llama.cpp wasn't built with NCCL. Either accept the lower performance or install NCCL and rebuild. |
-| CUDA OOM at startup or during prefill in `--split-mode tensor` | Auto-fit is disabled in this mode, so reduce memory pressure yourself. In order from least to most disruptive: lower `--ctx-size` (`-c`) (KV cache is roughly proportional to `n_ctx`); for `llama-server`, lower `--parallel` (`-np`) (a slot KV cache is allocated per concurrent sequence); as a last resort, reduce `--n-gpu-layers` (`-ngl`) (the remaining layers run on CPU and inference will be much slower). |
+| CUDA OOM at startup or during prefill in `--split-mode tensor` | Auto-fit is disabled in this mode, so reduce memory pressure yourself. In order from least to most disruptive: lower `--ctx-size` (`-c`) (KV cache is roughly proportional to `n_ctx`); for `local-inference-server`, lower `--parallel` (`-np`) (a slot KV cache is allocated per concurrent sequence); as a last resort, reduce `--n-gpu-layers` (`-ngl`) (the remaining layers run on CPU and inference will be much slower). |
 | Performance is worse with multi-GPU than single-GPU | The performance is bottlenecked by GPU interconnect speed. For `--split-mode tensor`, verify that NCCL is being used. Try `--split-mode layer` (less communication than `tensor`). Increase GPU interconnect speed via more PCIe lanes or e.g. NVLink (if available). |
 | GPU not used at all | `--n-gpu-layers` is `0` or too low - try explicitly setting `-ngl all`. Or you are accidentally hiding the GPUs via an environment variable like `CUDA_VISIBLE_DEVICES=-1`. Or your build doesn't include support for the relevant backend. |
 | Crashes or corrupted outputs after setting `GGML_CUDA_P2P=1` | Some motherboards and BIOS settings (e.g. with IOMMU enabled) don't support CUDA peer-to-peer reliably. Unset `GGML_CUDA_P2P`. |

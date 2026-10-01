@@ -10,8 +10,8 @@
 #include <sstream>
 
 llama_batch_allocr::llama_batch_allocr(uint32_t n_pos_per_embd) : n_pos_per_embd(n_pos_per_embd) {
-    const char * LLAMA_BATCH_DEBUG = getenv("LLAMA_BATCH_DEBUG");
-    debug = LLAMA_BATCH_DEBUG ? atoi(LLAMA_BATCH_DEBUG) : 0;
+    const char * LOCAL_INFERENCE_BATCH_DEBUG = getenv("LOCAL_INFERENCE_BATCH_DEBUG");
+    debug = LOCAL_INFERENCE_BATCH_DEBUG ? atoi(LOCAL_INFERENCE_BATCH_DEBUG) : 0;
 
     seq_pos.resize(LLAMA_MAX_SEQ);
     seq_cpl.resize(LLAMA_MAX_SEQ);

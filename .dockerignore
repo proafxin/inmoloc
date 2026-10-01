@@ -14,8 +14,8 @@ tools/ui/node_modules/
 
 models/*
 
-/llama-cli
-/llama-quantize
+/local-inference-cli
+/local-inference-quantize
 
 arm_neon.h
 compile_commands.json

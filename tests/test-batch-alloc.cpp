@@ -653,7 +653,7 @@ static void test_mrope(testing & t) {
 int main(int argc, char ** argv) {
     testing t;
 
-    const char * verbose = getenv("LLAMA_TEST_VERBOSE");
+    const char * verbose = getenv("LOCAL_INFERENCE_TEST_VERBOSE");
     if (verbose) {
         t.verbose = std::string(verbose) == "1";
     }

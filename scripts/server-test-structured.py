@@ -988,7 +988,7 @@ ALL_TEST_CASES = [
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Test llama-server structured-output capability."
+        description="Test local-inference-server structured-output capability."
     )
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", default=8080, type=int)

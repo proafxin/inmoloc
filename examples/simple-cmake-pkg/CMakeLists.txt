@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.12)
-project(llama-simple-cmake-pkg)
+project(local-inference-simple-cmake-pkg)
 
-set(TARGET llama-simple-cmake-pkg)
+set(TARGET local-inference-simple-cmake-pkg)
 
 find_package(Llama REQUIRED)
 

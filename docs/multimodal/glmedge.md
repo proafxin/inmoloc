@@ -3,12 +3,12 @@
 Currently this implementation supports [glm-edge-v-2b](https://huggingface.co/THUDM/glm-edge-v-2b) and [glm-edge-v-5b](https://huggingface.co/THUDM/glm-edge-v-5b).
 
 ## Usage
-Build the `llama-mtmd-cli` binary.
+Build the `local-inference-mtmd-cli` binary.
 
-After building, run: `./llama-mtmd-cli` to see the usage. For example:
+After building, run: `./local-inference-mtmd-cli` to see the usage. For example:
 
 ```sh
-./llama-mtmd-cli -m model_path/ggml-model-f16.gguf --mmproj model_path/mmproj-model-f16.gguf
+./local-inference-mtmd-cli -m model_path/ggml-model-f16.gguf --mmproj model_path/mmproj-model-f16.gguf
 ```
 
 **note**: A lower temperature like 0.1 is recommended for better quality. add `--temp 0.1` to the command to do so.

@@ -51,5 +51,5 @@ fi
 
 echo $CONVERTED_MODEL
 
-cmake --build ${BUILD_DIR} --target llama-debug -j8
-${BUILD_DIR}/bin/llama-debug -m "$CONVERTED_MODEL" --embedding -p "$PROMPT" --save-logits --embd-normalize $EMBD_NORMALIZE
+cmake --build ${BUILD_DIR} --target local-inference-debug -j8
+${BUILD_DIR}/bin/local-inference-debug -m "$CONVERTED_MODEL" --embedding -p "$PROMPT" --save-logits --embd-normalize $EMBD_NORMALIZE

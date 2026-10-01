@@ -140,7 +140,7 @@ On older Intel GPUs, you may try [OpenCL](/docs/backend/OPENCL.md) although the 
 *Notes:*
 
 - **Memory**
-  - The device memory is a limitation when running a large model. The loaded model size, *`llm_load_tensors: buffer_size`*, is displayed in the log when running `./bin/llama-completion`.
+  - The device memory is a limitation when running a large model. The loaded model size, *`llm_load_tensors: buffer_size`*, is displayed in the log when running `./bin/local-inference-completion`.
   - Please make sure the GPU shared memory from the host is large enough to account for the model's size. For e.g. the *llama-2-7b.Q4_0* requires at least 8.0GB for integrated GPU and 4.0GB for discrete GPU.
 
 - **Execution Unit (EU)**
@@ -191,8 +191,6 @@ Please refer to [Linux](#linux) or [Windows](#windows-1) for above installation 
 export ONEAPI_DEVICE_SELECTOR="level_zero:0"
 ./examples/sycl/start-svr.sh -m xxxx.gguf
 
-## update the docs/ops.md for new/update OPs
-./examples/sycl/update-ops-doc.sh
 ```
 
 - Windows
@@ -214,8 +212,6 @@ examples\sycl\win-test.bat -mg 0 -m xxxx.gguf
 set ONEAPI_DEVICE_SELECTOR="level_zero:0"
 examples\sycl\win-start-svr.bat -m xxxx.gguf
 
-## update the docs/ops.md for new/update OPs
-examples\sycl\win-update-ops-doc.bat
 ```
 
 
@@ -354,7 +350,7 @@ source /opt/intel/oneapi/setvars.sh
 Similar to the native `sycl-ls`, available SYCL devices can be queried as follow:
 
 ```sh
-./build/bin/llama-ls-sycl-device
+./build/bin/local-inference-ls-sycl-device
 ```
 
 This command will only display the selected backend that is supported by SYCL. The default backend is level_zero. For example, in a system with 2 *Intel GPU* it would look like the following:
@@ -393,7 +389,7 @@ Choose one of following methods to run.
 ./examples/sycl/test.sh
 ```
 
-- Run llama-server:
+- Run local-inference-server:
 
 ```sh
 ./examples/sycl/start-svr.sh -m PATH/MODEL_FILE
@@ -428,13 +424,13 @@ Examples:
 - Use device 0:
 
 ```sh
-ZES_ENABLE_SYSMAN=1 ./build/bin/llama-completion -no-cnv -m models/llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 99 -sm none -mg 0 --load-mode auto
+ZES_ENABLE_SYSMAN=1 ./build/bin/local-inference-completion -no-cnv -m models/llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 99 -sm none -mg 0 --load-mode auto
 ```
 
 - Use multiple devices:
 
 ```sh
-ZES_ENABLE_SYSMAN=1 ./build/bin/llama-completion -no-cnv -m models/llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 99 -sm layer --load-mode auto
+ZES_ENABLE_SYSMAN=1 ./build/bin/local-inference-completion -no-cnv -m models/llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:" -n 400 -e -ngl 99 -sm layer --load-mode auto
 ```
 
 *Notes:*
@@ -563,13 +559,13 @@ Or, use CMake presets to build:
 
 ```sh
 cmake -DGGML_SYCL_F16=ON --preset x64-windows-sycl-release
-cmake --build build-x64-windows-sycl-release -j --target llama-completion
+cmake --build build-x64-windows-sycl-release -j --target local-inference-completion
 
 cmake --preset x64-windows-sycl-release
-cmake --build build-x64-windows-sycl-release -j --target llama-completion
+cmake --build build-x64-windows-sycl-release -j --target local-inference-completion
 
 cmake --preset x64-windows-sycl-debug
-cmake --build build-x64-windows-sycl-debug -j --target llama-completion
+cmake --build build-x64-windows-sycl-debug -j --target local-inference-completion
 ```
 
 ##### Option 3: Visual Studio
@@ -594,7 +590,7 @@ You can use Visual Studio to open the `llama.cpp` folder directly as a CMake pro
 - For a minimal experimental setup, you can build only the inference executable using:
 
     ```Powershell
-    cmake --build build --config Release -j --target llama-completion
+    cmake --build build --config Release -j --target local-inference-completion
     ```
 
 ###### - Generating a Visual Studio Solution
@@ -671,7 +667,7 @@ On the oneAPI command line window, run the following and step into the llama.cpp
 Similar to the native `sycl-ls`, available SYCL devices can be queried as follow:
 
 ```
-build\bin\llama-ls-sycl-device.exe
+build\bin\local-inference-ls-sycl-device.exe
 ```
 
 This command will only display the selected backend that is supported by SYCL. The default backend is level_zero. For example, in a system with 2 *Intel GPU* it would look like the following:
@@ -705,7 +701,7 @@ Choose one of following methods to run.
 examples\sycl\win-test.bat
 ```
 
-- Run llama-server:
+- Run local-inference-server:
 
 ```
 examples\sycl\win-start-svr.bat -m PATH\MODEL_FILE
@@ -741,13 +737,13 @@ Examples:
 - Use device 0:
 
 ```
-build\bin\llama-completion.exe -no-cnv -m models\llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:\nStep 1:" -n 400 -e -ngl 99 -sm none -mg 0 --load-mode auto
+build\bin\local-inference-completion.exe -no-cnv -m models\llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:\nStep 1:" -n 400 -e -ngl 99 -sm none -mg 0 --load-mode auto
 ```
 
 - Use multiple devices:
 
 ```
-build\bin\llama-completion.exe -no-cnv -m models\llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:\nStep 1:" -n 400 -e -ngl 99 -sm layer --load-mode auto
+build\bin\local-inference-completion.exe -no-cnv -m models\llama-2-7b.Q4_0.gguf -p "Building a website can be done in 10 simple steps:\nStep 1:" -n 400 -e -ngl 99 -sm layer --load-mode auto
 ```
 
 
@@ -803,7 +799,7 @@ User can use the device management in [docs/multi-gpu.md](https://github.com/ggm
 | GGML_SYCL_FA_ONEDNN | 1 (default) or 0 | Enable the oneDNN fused SDPA (flash-attention) path on supported GPUs. Set to 0 to always use the native SYCL flash-attention kernel. |
 | GGML_SYCL_FA_ONEDNN_MAX_KV | 0 (default, disabled) or positive integer | By default (0), all sequences are handled by the oneDNN fused SDPA path, regardless of KV length; a positive value caps that length, past which sequences fall back to the native kernel. If GPU driver watchdog resets (DEVICE_LOST) occur during long-context inference, set this near the context depth where they start, e.g. 24576. |
 | GGML_SYCL_ENABLE_VMM | 0 or 1 (default) | Enable the virtual-memory device pool. |
-| GGML_SYCL_ENABLE_MKL_FA | 1 (default) or 0 | Enable oneMKL GEMM flash attention for XMX-accelerated prompt processing with quantized KV cache. Automatically activates during prefill (prompt processing) when all conditions are met: (1) flash-attn enabled (`-fa` or `--flash-attn on`), (2) KV cache quantized (`--cache-type-k q8_0 --cache-type-v q8_0` or other `*_0/*_1` types), (3) batch size ≥ 1024 (`--batch-size 1024`), (4) prompt length ≥ 1024 tokens. Set to 0 to force the TILE kernel for A/B testing. Example minimum command: `llama-cli -m model.gguf -fa -ngl 99 --cache-type-k q8_0 --cache-type-v q8_0 --batch-size 1024 -p "your prompt"` |
+| GGML_SYCL_ENABLE_MKL_FA | 1 (default) or 0 | Enable oneMKL GEMM flash attention for XMX-accelerated prompt processing with quantized KV cache. Automatically activates during prefill (prompt processing) when all conditions are met: (1) flash-attn enabled (`-fa` or `--flash-attn on`), (2) KV cache quantized (`--cache-type-k q8_0 --cache-type-v q8_0` or other `*_0/*_1` types), (3) batch size ≥ 1024 (`--batch-size 1024`), (4) prompt length ≥ 1024 tokens. Set to 0 to force the TILE kernel for A/B testing. Example minimum command: `local-inference-cli -m model.gguf -fa -ngl 99 --cache-type-k q8_0 --cache-type-v q8_0 --batch-size 1024 -p "your prompt"` |
 | GGML_SYCL_MKL_FA_DEBUG | 0 (default) or 1 | Enable per-call diagnostic logging for MKL flash attention: GEMM/softmax timings, interleaved-head detection, and buffer memory usage. |
 | GGML_SYCL_MEMTRACE | 0 (default), 1, 2 | Enable record and output memory allocation diagnostics. Requires `-lv 4`. <br>0 -  Disable<br>1 - Basic memory info, including current and peak allocations, as well allocations from other sources, around 50 lines per model load.<br>2 - More verbose, logging around 900 specific allocations and deallocations. |
 | GGML_SYCL_MEMTRACE_STEP | 64 (default) or positive integer | With GGML_SYCL_MEMTRACE=1, the minimum growth in memory usage to trigger another log record. |
@@ -923,12 +919,12 @@ Pass these via `CXXFLAGS` or add a one-off `#define` to enable a flag on the spo
   1. Detect the devices in your running time.
   ```
   source /opt/intel/oneapi/setvars.sh
-  ./build/bin/llama-server --list-devices
+  ./build/bin/local-inference-server --list-devices
 
   or
-  ./build/bin/llama-cli --list-devices
-  ./build/bin/llama-bench --list-devices
-  ./build/bin/llama-completion --list-devices
+  ./build/bin/local-inference-cli --list-devices
+  ./build/bin/local-inference-bench --list-devices
+  ./build/bin/local-inference-completion --list-devices
 
   Available devices:
     SYCL0: Intel(R) Arc(TM) A770 Graphics (15473 MiB, 15473 MiB free)
@@ -940,7 +936,7 @@ Pass these via `CXXFLAGS` or add a one-off `#define` to enable a flag on the spo
 
   2. Set the iGPU and dGPU
 
-  Set the iGPU and dGPU by `./build/bin/llama-server --device SYCL0,SYCL1,SYCLxxx`.
+  Set the iGPU and dGPU by `./build/bin/local-inference-server --device SYCL0,SYCL1,SYCLxxx`.
 
 
 ### **GitHub contribution**:

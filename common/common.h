@@ -531,7 +531,7 @@ struct common_params {
     std::string logits_file          = ""; // file for saving *all* logits                                  // NOLINT
     std::string path_prompts_log_dir = ""; // directory with logged prompts                                 // NOLINT
 
-    // llama-debug specific options
+    // local-inference-debug specific options
     std::string logits_output_dir = "data"; // directory for saving logits output files                     // NOLINT
     bool        save_logits       = false;  // whether to save logits to files                              // NOLINT
     std::vector<std::string> tensor_filter; // filter tensor names for debug output (regex)                 // NOLINT
@@ -566,7 +566,7 @@ struct common_params {
 
     bool   kl_divergence    = false; // compute KL divergence
 
-    bool check             = false; // check rather than generate results for llama-results
+    bool check             = false; // check rather than generate results for local-inference-results
 
     bool usage             = false; // print usage
     bool completion        = false; // print source-able completion script
@@ -773,7 +773,7 @@ struct common_params {
     std::string tts_lang = "";
     std::string tts_speaker_file = "";
 
-    bool is_gen_docs = false; // whether we are running inside llama-gen-docs
+    bool is_gen_docs = false; // whether we are running inside local-inference-gen-docs
 };
 
 // call once at the start of a program if it uses libcommon

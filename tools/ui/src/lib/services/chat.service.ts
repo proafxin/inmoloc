@@ -1010,7 +1010,7 @@ export class ChatService {
 	}
 
 	/**
-	 * Sends a chat completion request to the llama-server.
+	 * Sends a chat completion request to the local-inference-server.
 	 * Supports both streaming and non-streaming responses with comprehensive parameter configuration.
 	 * Automatically converts database messages with attachments to the appropriate API format.
 	 *
@@ -1380,7 +1380,7 @@ export class ChatService {
 	 * Extracts model name from Chat Completions API response data.
 	 * Handles various response formats including streaming chunks and final responses.
 	 *
-	 * WORKAROUND: In single model mode, llama-server returns a default/incorrect model name
+	 * WORKAROUND: In single model mode, local-inference-server returns a default/incorrect model name
 	 * in the response. We override it with the actual model name from serverStore.
 	 *
 	 * @param data - Raw response data from the Chat Completions API

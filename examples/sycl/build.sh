@@ -46,8 +46,8 @@ fi
 #build example/main
 #cmake --build . --config Release --target main
 
-#build example/llama-bench
-#cmake --build . --config Release --target llama-bench
+#build example/local-inference-bench
+#cmake --build . --config Release --target local-inference-bench
 
 #build all binary
 cmake --build . --config Release -j$((($(nproc)+1)/2)) -v

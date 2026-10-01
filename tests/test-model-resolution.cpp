@@ -488,7 +488,7 @@ int main(void) {
     cache_dir = std::filesystem::temp_directory_path() /
                 ("test-model-resolution-cache-" + std::to_string(port));
     std::filesystem::remove_all(cache_dir);
-    common_set_env("LLAMA_CACHE", cache_dir.string());
+    common_set_env("LOCAL_INFERENCE_CACHE", cache_dir.string());
 
     std::thread server_thread([&server] { server.listen_after_bind(); });
     server.wait_until_ready();

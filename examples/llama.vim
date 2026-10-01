@@ -17,7 +17,7 @@
 "
 " start the llama.cpp server with a FIM-compatible model. for example:
 "
-"   $ llama-server -m {model.gguf} --port 8012 -ngl 99 -fa --ubatch-size 512 --batch-size 1024 --cache-reuse 256
+"   $ local-inference-server -m {model.gguf} --port 8012 -ngl 99 -fa --ubatch-size 512 --batch-size 1024 --cache-reuse 256
 "
 "   --batch-size [512, model max context]
 "
@@ -27,7 +27,7 @@
 "   --ubatch-size [64, 2048]
 "
 "     chunks the batch into smaller chunks for faster processing
-"     depends on the specific hardware. use llama-bench to profile and determine the best size
+"     depends on the specific hardware. use local-inference-bench to profile and determine the best size
 "
 "   --cache-reuse (ge:llama_config.n_predict, 1024]
 "

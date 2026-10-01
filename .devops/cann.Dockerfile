@@ -138,26 +138,26 @@ RUN yum install -y git python3 python3-pip && \
 # You need to provide a tools.sh script as the entrypoint
 ENTRYPOINT ["/app/tools.sh"]
 # If there is no tools.sh, you can set the default to start the server
-# ENTRYPOINT ["/app/llama-server"]
+# ENTRYPOINT ["/app/local-inference-server"]
 
 ### Target: light
-# Lightweight image containing only llama-cli and llama-completion
+# Lightweight image containing only local-inference-cli and local-inference-completion
 # ==============================================================================
 FROM base AS light
 
-COPY --from=build /app/full/llama /app/full/llama-cli /app/full/llama-completion /app
+COPY --from=build /app/full/local-inference /app/full/local-inference-cli /app/full/local-inference-completion /app
 
-ENTRYPOINT [ "/app/llama-cli" ]
+ENTRYPOINT [ "/app/local-inference-cli" ]
 
 ### Target: server
-# Dedicated server image containing only llama-server
+# Dedicated server image containing only local-inference-server
 # ==============================================================================
 FROM base AS server
 
-ENV LLAMA_ARG_HOST=0.0.0.0
+ENV LOCAL_INFERENCE_ARG_HOST=0.0.0.0
 
-COPY --from=build /app/full/llama /app/full/llama-server /app
+COPY --from=build /app/full/local-inference /app/full/local-inference-server /app
 
 HEALTHCHECK --interval=5m CMD [ "curl", "-f", "http://localhost:8080/health" ]
 
-ENTRYPOINT [ "/app/llama-server" ]
+ENTRYPOINT [ "/app/local-inference-server" ]

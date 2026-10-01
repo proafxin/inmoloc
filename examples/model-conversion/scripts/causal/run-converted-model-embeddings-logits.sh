@@ -18,6 +18,6 @@ if [ -z "$BUILD_DIR" ]; then
     BUILD_DIR="../../build"
 fi
 
-cmake --build ${BUILD_DIR} --target llama-debug -j8
+cmake --build ${BUILD_DIR} --target local-inference-debug -j8
 
-${BUILD_DIR}/bin/llama-debug -m $CONVERTED_MODEL --embedding -p "Hello world today" --save-logits
+${BUILD_DIR}/bin/local-inference-debug -m $CONVERTED_MODEL --embedding -p "Hello world today" --save-logits

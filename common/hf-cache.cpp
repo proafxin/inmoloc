@@ -36,7 +36,7 @@ static fs::path get_cache_directory() {
             const char * var;
             fs::path path;
         } entries[] = {
-            {"LLAMA_CACHE",           fs::path()},
+            {"LOCAL_INFERENCE_CACHE",           fs::path()},
             {"HF_HUB_CACHE",          fs::path()},
             {"HUGGINGFACE_HUB_CACHE", fs::path()},
             {"HF_HOME",               fs::path("hub")},
@@ -196,7 +196,7 @@ static common_json api_get(const std::string & url,
     auto [cli, parts] = common_http_client(url);
 
     httplib::Headers headers = {
-        {"User-Agent", "llama-cpp/" + std::string(llama_build_info())},
+        {"User-Agent", "local-inference/" + std::string(llama_build_info())},
         {"Accept", "application/json"}
     };
 

@@ -2,7 +2,7 @@
 
 if [ $# -lt 2 ]; then
     echo "usage: ./scripts/compare-commits.sh <commit1> <commit2> [tool] [additional arguments]"
-    echo "  tool: 'llama-bench' (default) or 'test-backend-ops'"
+    echo "  tool: 'local-inference-bench' (default) or 'test-backend-ops'"
     echo "  additional arguments: passed to the selected tool"
     exit 1
 fi
@@ -17,8 +17,8 @@ tool=${3:-llama-bench}
 additional_args="${@:4}"
 
 # Validate tool argument
-if [ "$tool" != "llama-bench" ] && [ "$tool" != "test-backend-ops" ]; then
-    echo "Error: tool must be 'llama-bench' or 'test-backend-ops'"
+if [ "$tool" != "local-inference-bench" ] && [ "$tool" != "test-backend-ops" ]; then
+    echo "Error: tool must be 'local-inference-bench' or 'test-backend-ops'"
     exit 1
 fi
 
@@ -31,9 +31,9 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ "$tool" = "llama-bench" ]; then
-    db_file="llama-bench.sqlite"
-    target="llama-bench"
+if [ "$tool" = "local-inference-bench" ]; then
+    db_file="local-inference-bench.sqlite"
+    target="local-inference-bench"
     run_args="-o sql -oe md $additional_args"
 else  # test-backend-ops
     db_file="test-backend-ops.sqlite"

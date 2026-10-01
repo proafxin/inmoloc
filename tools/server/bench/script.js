@@ -51,22 +51,22 @@ const data = new SharedArray('conversations', function () {
         .slice(0, n_prompt)
 })
 
-const llamacpp_prompt_tokens = new Trend('llamacpp_prompt_tokens')
-const llamacpp_completion_tokens = new Trend('llamacpp_completion_tokens')
+const local_inference_prompt_tokens = new Trend('local_inference_prompt_tokens')
+const local_inference_completion_tokens = new Trend('local_inference_completion_tokens')
 
-const llamacpp_tokens_second = new Trend('llamacpp_tokens_second')
-const llamacpp_prompt_processing_second = new Trend('llamacpp_prompt_processing_second')
-const llamacpp_emit_first_token_second = new Trend('llamacpp_emit_first_token_second')
+const local_inference_tokens_second = new Trend('local_inference_tokens_second')
+const local_inference_prompt_processing_second = new Trend('local_inference_prompt_processing_second')
+const local_inference_emit_first_token_second = new Trend('local_inference_emit_first_token_second')
 
-const llamacpp_prompt_tokens_total_counter = new Counter('llamacpp_prompt_tokens_total_counter')
-const llamacpp_completion_tokens_total_counter = new Counter('llamacpp_completion_tokens_total_counter')
+const local_inference_prompt_tokens_total_counter = new Counter('local_inference_prompt_tokens_total_counter')
+const local_inference_completion_tokens_total_counter = new Counter('local_inference_completion_tokens_total_counter')
 
-const llamacpp_completions_truncated_rate = new Rate('llamacpp_completions_truncated_rate')
-const llamacpp_completions_stop_rate = new Rate('llamacpp_completions_stop_rate')
+const local_inference_completions_truncated_rate = new Rate('local_inference_completions_truncated_rate')
+const local_inference_completions_stop_rate = new Rate('local_inference_completions_stop_rate')
 
 export const options = {
     thresholds: {
-        llamacpp_completions_truncated_rate: [
+        local_inference_completions_truncated_rate: [
             // more than 80% of truncated input will abort the test
             {threshold: 'rate < 0.8', abortOnFail: true, delayAbortEval: '1m'},
         ],
@@ -109,7 +109,7 @@ export default function () {
         client.on('event', function (event) {
             if (promptEvalEndTime == null) {
                 promptEvalEndTime = new Date()
-                llamacpp_emit_first_token_second.add((promptEvalEndTime - startTime) / 1.e3)
+                local_inference_emit_first_token_second.add((promptEvalEndTime - startTime) / 1.e3)
             }
 
             if (event.data === '[DONE]' || event.data === '') {
@@ -127,12 +127,12 @@ export default function () {
 
             if (chunk.usage) {
                 prompt_tokens = chunk.usage.prompt_tokens
-                llamacpp_prompt_tokens.add(prompt_tokens)
-                llamacpp_prompt_tokens_total_counter.add(prompt_tokens)
+                local_inference_prompt_tokens.add(prompt_tokens)
+                local_inference_prompt_tokens_total_counter.add(prompt_tokens)
 
                 completions_tokens = chunk.usage.completion_tokens
-                llamacpp_completion_tokens.add(completions_tokens)
-                llamacpp_completion_tokens_total_counter.add(completions_tokens)
+                local_inference_completion_tokens.add(completions_tokens)
+                local_inference_completion_tokens_total_counter.add(completions_tokens)
             }
         })
 
@@ -148,15 +148,15 @@ export default function () {
 
     const promptEvalTime = promptEvalEndTime - startTime
     if (promptEvalTime > 0) {
-        llamacpp_prompt_processing_second.add(prompt_tokens / (promptEvalEndTime - startTime) * 1.e3)
+        local_inference_prompt_processing_second.add(prompt_tokens / (promptEvalEndTime - startTime) * 1.e3)
     }
 
     const completion_time = endTime - promptEvalEndTime
     if (completions_tokens > 0 && completion_time > 0) {
-        llamacpp_tokens_second.add(completions_tokens / completion_time * 1.e3)
+        local_inference_tokens_second.add(completions_tokens / completion_time * 1.e3)
     }
-    llamacpp_completions_truncated_rate.add(finish_reason === 'length')
-    llamacpp_completions_stop_rate.add(finish_reason === 'stop')
+    local_inference_completions_truncated_rate.add(finish_reason === 'length')
+    local_inference_completions_stop_rate.add(finish_reason === 'stop')
 
     sleep(0.3)
 }

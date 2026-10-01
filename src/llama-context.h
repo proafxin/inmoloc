@@ -386,7 +386,7 @@ private:
 
     bool has_evaluated_once = false;
 
-    // env: LLAMA_GRAPH_REUSE_DISABLE
+    // env: LOCAL_INFERENCE_GRAPH_REUSE_DISABLE
     bool graph_reuse_disable = false;
 
     // perf

@@ -22,7 +22,7 @@
 /**
  * **ChatService** - Chat Completions API communication layer
  *
- * Handles direct communication with the llama-server's `/v1/chat/completions` endpoint.
+ * Handles direct communication with the local-inference-server's `/v1/chat/completions` endpoint.
  * Provides streaming and non-streaming response parsing, message format conversion
  * (DatabaseMessage → API format), and request lifecycle management.
  *
@@ -34,7 +34,7 @@
  *
  * **Architecture & Relationships:**
  * - **ChatService** (this class): Stateless API communication layer
- *   - Handles HTTP requests/responses with the llama-server
+ *   - Handles HTTP requests/responses with the local-inference-server
  *   - Manages streaming and non-streaming response parsing
  *   - Converts database messages to API format (multimodal, tool calls)
  *   - Handles error translation with user-friendly messages
@@ -255,7 +255,7 @@ export { ParameterSyncService } from './parameter-sync.service';
  * - Prompt listing (`listPrompts`) and retrieval (`getPrompt`) with arguments
  * - Resource operations: list, read, subscribe/unsubscribe, template support
  * - Completion suggestions for prompt arguments and resource URI templates
- * - CORS proxy routing via llama-server for cross-origin MCP servers
+ * - CORS proxy routing via local-inference-server for cross-origin MCP servers
  * - Tool result formatting (text, images, embedded resources)
  *
  * **Transport Hierarchy:**

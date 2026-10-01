@@ -1,4 +1,4 @@
-set(TARGET llama-tts)
+set(TARGET local-inference-tts)
 add_executable(${TARGET} tts.cpp)
 target_link_libraries(${TARGET} PRIVATE llama llama-common mtmd ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)

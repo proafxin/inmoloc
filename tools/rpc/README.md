@@ -25,8 +25,8 @@ flowchart TD
     srva[ggml-rpc-server]<-->dev2["CUDA1"]
     end
     subgraph host[Main Host]
-    local["Local devices"]<-->ggml[llama-cli]
-    ggml[llama-cli]<-->rpcb[RPC backend]
+    local["Local devices"]<-->ggml[local-inference-cli]
+    ggml[local-inference-cli]<-->rpcb[RPC backend]
     end
     style hostn stroke:#66,stroke-width:2px,stroke-dasharray: 5 5
     classDef devcls fill:#5B9BD5
@@ -74,10 +74,10 @@ $ bin/ggml-rpc-server --device CUDA0 -p 50052
 ### Main host
 
 On the main host build `llama.cpp` with the backends for the local devices and add `-DGGML_RPC=ON` to the build options.
-Finally, when running `llama-cli` or `llama-server`, use the `--rpc` option to specify the host and port of each `ggml-rpc-server`:
+Finally, when running `local-inference-cli` or `local-inference-server`, use the `--rpc` option to specify the host and port of each `ggml-rpc-server`:
 
 ```bash
-$ llama-cli -hf ggml-org/gemma-3-1b-it-GGUF -ngl 99 --rpc 192.168.88.10:50052,192.168.88.11:50052
+$ local-inference-cli -hf ggml-org/gemma-3-1b-it-GGUF -ngl 99 --rpc 192.168.88.10:50052,192.168.88.11:50052
 ```
 
 By default, llama.cpp distributes model weights and the KV cache across all available devices -- both local and remote -- in proportion to each device's available memory.
@@ -93,7 +93,7 @@ To enable the cache, use the `-c` option:
 $ bin/ggml-rpc-server -c
 ```
 
-By default, the cache is stored in the `$HOME/.cache/llama.cpp/rpc` directory and can be controlled via the `LLAMA_CACHE` environment variable.
+By default, the cache is stored in the `$HOME/.cache/local-inference/rpc` directory and can be controlled via the `LOCAL_INFERENCE_CACHE` environment variable.
 
 ### RDMA transport
 

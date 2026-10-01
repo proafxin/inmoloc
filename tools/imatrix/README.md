@@ -6,7 +6,7 @@ More information is available in <https://github.com/ggml-org/llama.cpp/pull/486
 ## Usage
 
 ```
-./llama-imatrix \
+./local-inference-imatrix \
     -m model.gguf -f some-text.txt [-o imatrix.gguf] [--output-format {gguf,dat}] [--no-ppl] \
     [--process-output] [--chunk 123] [--save-frequency 0] [--output-frequency 10] \
     [--in-file imatrix-prev-0.gguf --in-file imatrix-prev-1.gguf ...] [--parse-special] \
@@ -32,46 +32,46 @@ The parameters in square brackets are optional and have the following meaning:
 
 For faster computation, make sure to use GPU offloading via the `-ngl | --n-gpu-layers` argument.
 
-Recent versions of `llama-imatrix` store data in GGUF format by default. For the legacy format, use an extension other than `.gguf` when saving the output file. More information is available in <https://github.com/ggml-org/llama.cpp/pull/9400>.
+Recent versions of `local-inference-imatrix` store data in GGUF format by default. For the legacy format, use an extension other than `.gguf` when saving the output file. More information is available in <https://github.com/ggml-org/llama.cpp/pull/9400>.
 
 ## Examples
 
 ```bash
 # generate importance matrix using default filename (imatrix.gguf), offloading 99 layers to GPU
-./llama-imatrix -m ggml-model-f16.gguf -f calibration-data.txt -ngl 99
+./local-inference-imatrix -m ggml-model-f16.gguf -f calibration-data.txt -ngl 99
 
 # use the imatrix to perform a Q4_K_M quantization
-./llama-quantize --imatrix imatrix.gguf ggml-model-f16.gguf ./ggml-model-q4_k_m.gguf q4_k_m
+./local-inference-quantize --imatrix imatrix.gguf ggml-model-f16.gguf ./ggml-model-q4_k_m.gguf q4_k_m
 ```
 
 ```bash
 # generate and save the imatrix using legacy format
-./llama-imatrix -m ggml-model-f16.gguf -f calibration-data.txt --output-format dat -o imatrix-legcy-format.dat -ngl 99
+./local-inference-imatrix -m ggml-model-f16.gguf -f calibration-data.txt --output-format dat -o imatrix-legcy-format.dat -ngl 99
 ```
 
 ```bash
 # convert legacy (binary) imatrix format to new (GGUF) format
-./llama-imatrix --in-file imatrix-legacy-format.dat -o imatrix-new-format.gguf
+./local-inference-imatrix --in-file imatrix-legacy-format.dat -o imatrix-new-format.gguf
 ```
 
 ```bash
 # convert new (GGUF) imatrix format to legacy (binary) format
-./llama-imatrix --in-file imatrix-new-format.gguf --output-format dat -o imatrix-legacy-format.dat
+./local-inference-imatrix --in-file imatrix-new-format.gguf --output-format dat -o imatrix-legacy-format.dat
 ```
 
 ```bash
 # combine existing imatrices
-./llama-imatrix --in-file imatrix-prev-0.gguf --in-file imatrix-prev-1.gguf -o imatrix-combined.gguf
+./local-inference-imatrix --in-file imatrix-prev-0.gguf --in-file imatrix-prev-1.gguf -o imatrix-combined.gguf
 ```
 
 ```bash
 # skip first 5 chunks, save intermediates every 20 chunks and snapshots every 50, parsing special tokens
-./llama-imatrix -m ggml-model-f16.gguf -f calibration-data.txt --chunk 5 --output-frequency 20 --save-frequency 50 --parse-special
+./local-inference-imatrix -m ggml-model-f16.gguf -f calibration-data.txt --chunk 5 --output-frequency 20 --save-frequency 50 --parse-special
 ```
 
 ```bash
 # analyse imatrix file and display summary statistics instead of running inference
-./llama-imatrix --in-file imatrix.gguf --show-statistics
+./local-inference-imatrix --in-file imatrix.gguf --show-statistics
 ```
 
 `--show-statistics` will display the following statistics:

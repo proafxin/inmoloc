@@ -1041,7 +1041,7 @@ static std::string dsv4_plan_positions(const std::vector<int32_t> & values) {
 
 static bool dsv4_compress_debug() {
     static const bool debug = []() {
-        const char * env = getenv("LLAMA_DSV4_COMPRESS_DEBUG");
+        const char * env = getenv("LOCAL_INFERENCE_DSV4_COMPRESS_DEBUG");
         return env && atoi(env) > 0;
     }();
 
@@ -1492,8 +1492,8 @@ bool llm_graph_input_sampling::can_reuse(const llm_graph_params & params) {
 llm_graph_result::llm_graph_result(int64_t max_nodes) : max_nodes(max_nodes) {
     reset();
 
-    const char * LLAMA_GRAPH_RESULT_DEBUG = getenv("LLAMA_GRAPH_RESULT_DEBUG");
-    debug = LLAMA_GRAPH_RESULT_DEBUG ? atoi(LLAMA_GRAPH_RESULT_DEBUG) : 0;
+    const char * LOCAL_INFERENCE_GRAPH_RESULT_DEBUG = getenv("LOCAL_INFERENCE_GRAPH_RESULT_DEBUG");
+    debug = LOCAL_INFERENCE_GRAPH_RESULT_DEBUG ? atoi(LOCAL_INFERENCE_GRAPH_RESULT_DEBUG) : 0;
 }
 
 int64_t llm_graph_result::get_max_nodes() const {

@@ -29,7 +29,7 @@ def parse_metrics(text: str) -> dict:
         if line.startswith("# TYPE "):
             _, _, name, kind = line.split(" ", 3)
             types[name] = kind
-        elif line.startswith("llamacpp:") and "{" not in line:
+        elif line.startswith("local_inference:") and "{" not in line:
             name, value = line.split(" ", 1)
             # the _sum and _count samples of a histogram have the # TYPE line of the histogram
             base = re.sub(r"_(sum|count)$", "", name)
@@ -56,23 +56,23 @@ def test_metrics_prometheus_format():
     metrics = parse_metrics(text)
 
     expected_counters = [
-        "llamacpp:prompt_tokens_total",
-        "llamacpp:prompt_tokens_cached_total",
-        "llamacpp:prompt_seconds_total",
-        "llamacpp:tokens_predicted_total",
-        "llamacpp:tokens_predicted_seconds_total",
-        "llamacpp:n_decode_total",
-        "llamacpp:n_tokens_max",
-        "llamacpp:spec_decode_num_draft_tokens_total",
-        "llamacpp:spec_decode_num_accepted_tokens_total",
-        "llamacpp:spec_decode_num_drafts_total",
+        "local_inference:prompt_tokens_total",
+        "local_inference:prompt_tokens_cached_total",
+        "local_inference:prompt_seconds_total",
+        "local_inference:tokens_predicted_total",
+        "local_inference:tokens_predicted_seconds_total",
+        "local_inference:n_decode_total",
+        "local_inference:n_tokens_max",
+        "local_inference:spec_decode_num_draft_tokens_total",
+        "local_inference:spec_decode_num_accepted_tokens_total",
+        "local_inference:spec_decode_num_drafts_total",
     ]
     expected_gauges = [
-        "llamacpp:prompt_tokens_seconds",
-        "llamacpp:predicted_tokens_seconds",
-        "llamacpp:requests_processing",
-        "llamacpp:requests_deferred",
-        "llamacpp:n_busy_slots_per_decode",
+        "local_inference:prompt_tokens_seconds",
+        "local_inference:predicted_tokens_seconds",
+        "local_inference:requests_processing",
+        "local_inference:requests_deferred",
+        "local_inference:n_busy_slots_per_decode",
     ]
 
     for name in expected_counters:
@@ -84,8 +84,8 @@ def test_metrics_prometheus_format():
     for name in expected_counters + expected_gauges:
         assert f"# HELP {name} " in text
 
-    assert metrics["llamacpp:n_decode_total"][1] > 0
-    assert metrics["llamacpp:requests_processing"][1] == 0
+    assert metrics["local_inference:n_decode_total"][1] > 0
+    assert metrics["local_inference:requests_processing"][1] == 0
 
 
 def test_metrics_prompt_processed_and_cached():
@@ -109,8 +109,8 @@ def test_metrics_prompt_processed_and_cached():
     metrics = parse_metrics(fetch_metrics(server))
 
     # cached tokens are counted apart, they cost no decode
-    assert metrics["llamacpp:prompt_tokens_total"][1] == n_processed
-    assert metrics["llamacpp:prompt_tokens_cached_total"][1] == n_cached
+    assert metrics["local_inference:prompt_tokens_total"][1] == n_processed
+    assert metrics["local_inference:prompt_tokens_cached_total"][1] == n_cached
 
 
 def test_metrics_predicted_total_matches_requests():
@@ -124,7 +124,7 @@ def test_metrics_predicted_total_matches_requests():
         n_predicted += res.body["timings"]["predicted_n"]
 
     metrics = parse_metrics(fetch_metrics(server))
-    assert metrics["llamacpp:tokens_predicted_total"][1] == n_predicted
+    assert metrics["local_inference:tokens_predicted_total"][1] == n_predicted
 
 
 def test_metrics_generation_rate_excludes_first_token():
@@ -226,6 +226,6 @@ def test_metrics_embedding_prompt_is_counted():
 
     # embedding tasks never sample a token, but their prompt still costs a decode
     metrics = parse_metrics(fetch_metrics(server))
-    assert metrics["llamacpp:prompt_tokens_total"][1] > 0
-    assert metrics["llamacpp:n_decode_total"][1] > 0
-    assert metrics["llamacpp:tokens_predicted_total"][1] == 0
+    assert metrics["local_inference:prompt_tokens_total"][1] > 0
+    assert metrics["local_inference:n_decode_total"][1] > 0
+    assert metrics["local_inference:tokens_predicted_total"][1] == 0

@@ -36,10 +36,10 @@ make -j GGML_CUDA=1
 
 %install
 mkdir -p %{buildroot}%{_bindir}/
-cp -p llama-cli %{buildroot}%{_bindir}/llama-cuda-cli
-cp -p llama-completion %{buildroot}%{_bindir}/llama-cuda-completion
-cp -p llama-server %{buildroot}%{_bindir}/llama-cuda-server
-cp -p llama-simple %{buildroot}%{_bindir}/llama-cuda-simple
+cp -p local-inference-cli %{buildroot}%{_bindir}/llama-cuda-cli
+cp -p local-inference-completion %{buildroot}%{_bindir}/llama-cuda-completion
+cp -p local-inference-server %{buildroot}%{_bindir}/llama-cuda-server
+cp -p local-inference-simple %{buildroot}%{_bindir}/llama-cuda-simple
 
 mkdir -p %{buildroot}/usr/lib/systemd/system
 %{__cat} <<EOF  > %{buildroot}/usr/lib/systemd/system/llamacuda.service

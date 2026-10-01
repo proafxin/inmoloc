@@ -61,7 +61,7 @@ def write_qdc_log(filename: str, content: str) -> None:
 
 def ensure_bundle(check_binary: str | None = None) -> None:
     """Ensure the llama_cpp_bundle is available on the target device."""
-    push_bundle_if_needed(check_binary or f"{BIN_PATH}/llama-cli")
+    push_bundle_if_needed(check_binary or f"{BIN_PATH}/local-inference-cli")
 
 
 # ---------------------------------------------------------------------------

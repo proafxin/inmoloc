@@ -466,18 +466,18 @@ static std::filesystem::path get_server_exec_path() {
 }
 
 static void unset_reserved_args(common_preset & preset, bool unset_model_args) {
-    preset.unset_option("LLAMA_ARG_SSL_KEY_FILE");
-    preset.unset_option("LLAMA_ARG_SSL_CERT_FILE");
+    preset.unset_option("LOCAL_INFERENCE_ARG_SSL_KEY_FILE");
+    preset.unset_option("LOCAL_INFERENCE_ARG_SSL_CERT_FILE");
     preset.unset_option("LLAMA_API_KEY");
-    preset.unset_option("LLAMA_ARG_MODELS_DIR");
-    preset.unset_option("LLAMA_ARG_MODELS_MAX");
-    preset.unset_option("LLAMA_ARG_MODELS_PRESET");
-    preset.unset_option("LLAMA_ARG_MODELS_AUTOLOAD");
+    preset.unset_option("LOCAL_INFERENCE_ARG_MODELS_DIR");
+    preset.unset_option("LOCAL_INFERENCE_ARG_MODELS_MAX");
+    preset.unset_option("LOCAL_INFERENCE_ARG_MODELS_PRESET");
+    preset.unset_option("LOCAL_INFERENCE_ARG_MODELS_AUTOLOAD");
     if (unset_model_args) {
-        preset.unset_option("LLAMA_ARG_MODEL");
-        preset.unset_option("LLAMA_ARG_MMPROJ");
-        preset.unset_option("LLAMA_ARG_ALIAS");
-        preset.unset_option("LLAMA_ARG_HF_REPO");
+        preset.unset_option("LOCAL_INFERENCE_ARG_MODEL");
+        preset.unset_option("LOCAL_INFERENCE_ARG_MMPROJ");
+        preset.unset_option("LOCAL_INFERENCE_ARG_ALIAS");
+        preset.unset_option("LOCAL_INFERENCE_ARG_HF_REPO");
     }
 }
 
@@ -527,16 +527,16 @@ static std::vector<std::string> get_environment() {
 void server_model_meta::update_args(common_preset_context & ctx_preset, std::string bin_path) {
     // update params
     unset_reserved_args(preset, false);
-    preset.set_option(ctx_preset, "LLAMA_ARG_HOST",  CHILD_ADDR);
-    preset.set_option(ctx_preset, "LLAMA_ARG_PORT",  std::to_string(port));
-    preset.set_option(ctx_preset, "LLAMA_ARG_ALIAS", name);
+    preset.set_option(ctx_preset, "LOCAL_INFERENCE_ARG_HOST",  CHILD_ADDR);
+    preset.set_option(ctx_preset, "LOCAL_INFERENCE_ARG_PORT",  std::to_string(port));
+    preset.set_option(ctx_preset, "LOCAL_INFERENCE_ARG_ALIAS", name);
     // TODO: maybe validate preset before rendering ?
     // render args
     args = preset.to_args(bin_path);
 
     // unified binary dispatches by subcommand, re-inject it right after the
     // binary path so the child starts as 'llama serve ...' not 'llama ...'
-    const char * app_cmd = std::getenv("LLAMA_APP_CMD");
+    const char * app_cmd = std::getenv("LOCAL_INFERENCE_APP_CMD");
     if (app_cmd != nullptr && app_cmd[0] != '\0' && !bin_path.empty()) {
         args.insert(args.begin() + 1, app_cmd);
     }
@@ -546,13 +546,13 @@ void server_model_meta::update_caps() {
     try {
         common_params params;
         preset.apply_to_params(params, {
-            "LLAMA_ARG_MODEL",
-            "LLAMA_ARG_MODEL_URL",
-            "LLAMA_ARG_MMPROJ",
-            "LLAMA_ARG_MMPROJ_URL",
-            "LLAMA_ARG_MMPROJ_AUTO",
-            "LLAMA_ARG_HF_REPO",
-            "LLAMA_ARG_HF_REPO_FILE",
+            "LOCAL_INFERENCE_ARG_MODEL",
+            "LOCAL_INFERENCE_ARG_MODEL_URL",
+            "LOCAL_INFERENCE_ARG_MMPROJ",
+            "LOCAL_INFERENCE_ARG_MMPROJ_URL",
+            "LOCAL_INFERENCE_ARG_MMPROJ_AUTO",
+            "LOCAL_INFERENCE_ARG_HF_REPO",
+            "LOCAL_INFERENCE_ARG_HF_REPO_FILE",
         });
         params.offline = true;
         common_models_handler handler = common_models_handler_init(params, LLAMA_EXAMPLE_SERVER);
@@ -593,7 +593,7 @@ server_models::server_models(
         LOG_WRN("using original argv[0] as fallback: %s\n", argv[0]);
     }
     load_models();
-    debug_fake_timing = !common_get_env("LLAMA_SERVER_DEBUG_FAKE_TIMING").empty();
+    debug_fake_timing = !common_get_env("LOCAL_INFERENCE_SERVER_DEBUG_FAKE_TIMING").empty();
 }
 
 server_models::~server_models() = default;
@@ -617,7 +617,7 @@ void server_models::add_model(server_model_meta && meta) {
 
     // parse aliases from preset's --alias option (comma-separated)
     std::string alias_str;
-    if (meta.preset.get_option("LLAMA_ARG_ALIAS", alias_str) && !alias_str.empty()) {
+    if (meta.preset.get_option("LOCAL_INFERENCE_ARG_ALIAS", alias_str) && !alias_str.empty()) {
         for (auto & alias : string_split<std::string>(alias_str, ',')) {
             alias = string_strip(alias);
             if (!alias.empty()) {
@@ -628,7 +628,7 @@ void server_models::add_model(server_model_meta && meta) {
 
     // parse tags from preset's --tags option (comma-separated)
     std::string tags_str;
-    if (meta.preset.get_option("LLAMA_ARG_TAGS", tags_str) && !tags_str.empty()) {
+    if (meta.preset.get_option("LOCAL_INFERENCE_ARG_TAGS", tags_str) && !tags_str.empty()) {
         for (auto & tag : string_split<std::string>(tags_str, ',')) {
             tag = string_strip(tag);
             if (!tag.empty()) {
@@ -718,7 +718,7 @@ void server_models::load_models() {
     }
 
     // overlay router's own CLI args on top of every model preset so that
-    // e.g. `llama-server --temp 0` is honoured by all child processes
+    // e.g. `local-inference-server --temp 0` is honoured by all child processes
     for (auto & [name, preset] : final_presets) {
         preset.merge(base_preset);
     }
@@ -737,11 +737,11 @@ void server_models::load_models() {
                 continue;
             }
             std::string hf_repo;
-            if (!preset.get_option("LLAMA_ARG_HF_REPO", hf_repo) || hf_repo.empty()) {
+            if (!preset.get_option("LOCAL_INFERENCE_ARG_HF_REPO", hf_repo) || hf_repo.empty()) {
                 continue;
             }
             std::string hf_file;
-            preset.get_option("LLAMA_ARG_HF_FILE", hf_file);
+            preset.get_option("LOCAL_INFERENCE_ARG_HF_FILE", hf_file);
             std::string path = common_download_resolve_path(hf_repo, hf_file);
             if (!path.empty()) {
                 preset_paths.insert(path);
@@ -803,9 +803,9 @@ void server_models::load_models() {
     };
     // update_args() injects HOST/PORT/ALIAS, so strip them before comparing presets
     auto preset_options_for_compare = [](common_preset p) {
-        p.unset_option("LLAMA_ARG_HOST");
-        p.unset_option("LLAMA_ARG_PORT");
-        p.unset_option("LLAMA_ARG_ALIAS");
+        p.unset_option("LOCAL_INFERENCE_ARG_HOST");
+        p.unset_option("LOCAL_INFERENCE_ARG_PORT");
+        p.unset_option("LOCAL_INFERENCE_ARG_ALIAS");
         return p.options;
     };
 
@@ -921,7 +921,7 @@ void server_models::load_models() {
             // re-parse aliases, then validate against other models
             std::set<std::string> new_aliases;
             std::string alias_str;
-            if (inst.meta.preset.get_option("LLAMA_ARG_ALIAS", alias_str) && !alias_str.empty()) {
+            if (inst.meta.preset.get_option("LOCAL_INFERENCE_ARG_ALIAS", alias_str) && !alias_str.empty()) {
                 for (auto & alias : string_split<std::string>(alias_str, ',')) {
                     alias = string_strip(alias);
                     if (!alias.empty()) new_aliases.insert(alias);
@@ -945,7 +945,7 @@ void server_models::load_models() {
             // re-parse tags
             inst.meta.tags.clear();
             std::string tags_str;
-            if (inst.meta.preset.get_option("LLAMA_ARG_TAGS", tags_str) && !tags_str.empty()) {
+            if (inst.meta.preset.get_option("LOCAL_INFERENCE_ARG_TAGS", tags_str) && !tags_str.empty()) {
                 for (auto & tag : string_split<std::string>(tags_str, ',')) {
                     tag = string_strip(tag);
                     if (!tag.empty()) inst.meta.tags.insert(tag);
@@ -1162,12 +1162,12 @@ void server_models::load(const std::string & name, const load_options & opts) {
 
         std::vector<std::string> child_args = inst.meta.args; // copy
         std::vector<std::string> child_env  = base_env; // copy
-        child_env.push_back("LLAMA_SERVER_ROUTER_PORT=" + std::to_string(base_params.port));
+        child_env.push_back("LOCAL_INFERENCE_SERVER_ROUTER_PORT=" + std::to_string(base_params.port));
 
         if (opts.mode == SERVER_CHILD_MODE_DOWNLOAD) {
             inst.meta.status = SERVER_MODEL_STATUS_DOWNLOADING;
-            child_env.push_back("LLAMA_SERVER_CHILD_MODE=download");
-            child_env.push_back("LLAMA_ARG_HF_REPO=" + name);
+            child_env.push_back("LOCAL_INFERENCE_SERVER_CHILD_MODE=download");
+            child_env.push_back("LOCAL_INFERENCE_ARG_HF_REPO=" + name);
         }
 
         SRV_INF("%s", "spawning server instance with args:\n");
@@ -1664,12 +1664,12 @@ void server_models::handle_child_state(const std::string & name, const std::stri
 //
 
 bool server_child::is_child() {
-    const char * router_port = std::getenv("LLAMA_SERVER_ROUTER_PORT");
+    const char * router_port = std::getenv("LOCAL_INFERENCE_SERVER_ROUTER_PORT");
     return router_port != nullptr;
 }
 
 server_child_mode server_child::get_mode() {
-    const char * mode = std::getenv("LLAMA_SERVER_CHILD_MODE");
+    const char * mode = std::getenv("LOCAL_INFERENCE_SERVER_CHILD_MODE");
     std::string mode_str(mode ? mode : "");
     if (mode_str == "download") {
         return SERVER_CHILD_MODE_DOWNLOAD;
@@ -1929,7 +1929,7 @@ void server_models_routes::init_routes() {
                 {"max_instances",        params.models_max},
                 {"models_autoload",      params.models_autoload},
                 // this is a dummy response to make sure the UI doesn't break
-                {"model_alias", "llama-server"},
+                {"model_alias", "local-inference-server"},
                 {"model_path",  "none"},
                 {"default_generation_settings", {
                     {"params", json{}},
@@ -2028,10 +2028,10 @@ void server_models_routes::init_routes() {
             if (!meta.preset.name.empty()) {
                 common_preset preset_copy = meta.preset;
                 unset_reserved_args(preset_copy, false);
-                preset_copy.unset_option("LLAMA_ARG_HOST");
-                preset_copy.unset_option("LLAMA_ARG_PORT");
-                preset_copy.unset_option("LLAMA_ARG_ALIAS");
-                preset_copy.unset_option("LLAMA_ARG_TAGS");
+                preset_copy.unset_option("LOCAL_INFERENCE_ARG_HOST");
+                preset_copy.unset_option("LOCAL_INFERENCE_ARG_PORT");
+                preset_copy.unset_option("LOCAL_INFERENCE_ARG_ALIAS");
+                preset_copy.unset_option("LOCAL_INFERENCE_ARG_TAGS");
                 status["preset"] = preset_copy.to_ini();
             }
             if (meta.is_failed()) {
@@ -2057,7 +2057,7 @@ void server_models_routes::init_routes() {
                 {"aliases",       meta.aliases},
                 {"tags",          meta.tags},
                 {"object",        "model"},    // for OAI-compat
-                {"owned_by",      "llamacpp"}, // for OAI-compat
+                {"owned_by",      "local-inference"}, // for OAI-compat
                 {"created",       t},          // for OAI-compat
                 {"status",        status},
                 {"architecture",  architecture},

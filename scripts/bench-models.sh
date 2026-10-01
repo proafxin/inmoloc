@@ -35,20 +35,20 @@ run_model() {
     printf "Model: https://huggingface.co/${HFR}\n" | tee -a "$RESULTS"
     printf "\n" | tee -a "$RESULTS"
 
-    printf -- "- \`llama-batched-bench\`\n" | tee -a "$RESULTS"
+    printf -- "- \`local-inference-batched-bench\`\n" | tee -a "$RESULTS"
     printf "\n" | tee -a "$RESULTS"
 
-    ./bin/llama-batched-bench \
+    ./bin/local-inference-batched-bench \
         -hfr "${HFR}" -hff "${HFF}" \
         -m "${HFF}" -fa 1 -ub 2048 \
         ${ARGS_BB} | tee -a "$RESULTS"
 
     printf "\n" | tee -a "$RESULTS"
 
-    printf -- "- \`llama-bench\`\n" | tee -a "$RESULTS"
+    printf -- "- \`local-inference-bench\`\n" | tee -a "$RESULTS"
     printf "\n" | tee -a "$RESULTS"
 
-    ./bin/llama-bench \
+    ./bin/local-inference-bench \
         -m "${HFF}" -fa 1 -ub 2048 \
         ${ARGS_B} | tee -a "$RESULTS"
 

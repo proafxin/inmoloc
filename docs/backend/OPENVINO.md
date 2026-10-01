@@ -65,7 +65,7 @@ Although OpenVINO supports a wide range of [Intel hardware](https://docs.openvin
 
 **Additional Notes:**
 - Both `Q4_0` and `Q4_1` models use `Q6_K` for the token embedding tensor and the final matmul weight tensor (often the same tensor)
-- `Q4_0` models may produce some `Q4_1` tensors if an imatrix is provided during quantization using `llama-quantize`
+- `Q4_0` models may produce some `Q4_1` tensors if an imatrix is provided during quantization using `local-inference-quantize`
 - `Q4_K_M` models may include both `Q6_K` and `Q5_K` tensors (observed in Phi-3)
 - `Q5_1` tensors are dequantized natively (weights, scales, and zero-points extracted directly)
 
@@ -74,18 +74,18 @@ Although OpenVINO supports a wide range of [Intel hardware](https://docs.openvin
 The OpenVINO backend integrates with the standard llama.cpp tools listed below.
 However, all the tools coverage across all devices is not uniform and exhaustive validation is work in progress.
 
-- llama-bench
-- llama-cli
-- llama-completion
-- llama-embedding
-- llama-perplexity
+- local-inference-bench
+- local-inference-cli
+- local-inference-completion
+- local-inference-embedding
+- local-inference-perplexity
 - llama-run
-- llama-server
-- llama-simple
+- local-inference-server
+- local-inference-simple
 
 ## Validated Models
 
-Although, the validated models below were tested with `llama-cli` using the `Q4_K_M` quantization format on Intel® Core™ Ultra Series 2 (Lunar Lake), the OpenVINO backend is expected to work across a broader range of [Intel hardware](https://docs.openvino.ai/2026/about-openvino/release-notes-openvino/system-requirements.html), [supported model precisions](#supported-model-precisions), [supported llama.cpp tools](#supported-llamacpp-tools) and additional model architectures.
+Although, the validated models below were tested with `local-inference-cli` using the `Q4_K_M` quantization format on Intel® Core™ Ultra Series 2 (Lunar Lake), the OpenVINO backend is expected to work across a broader range of [Intel hardware](https://docs.openvino.ai/2026/about-openvino/release-notes-openvino/system-requirements.html), [supported model precisions](#supported-model-precisions), [supported llama.cpp tools](#supported-llamacpp-tools) and additional model architectures.
 
 > [!NOTE]
 > Extensive accuracy validation, performance optimizations, and broader architecture coverage are work in progress.
@@ -336,7 +336,7 @@ echo
 echo "NOTE: To run, source setupvars.sh and pick a device:"
 echo "  source /opt/intel/openvino/setupvars.sh"
 echo "  export GGML_OPENVINO_DEVICE=CPU   # or GPU / NPU"
-echo "  ./build/ReleaseOV/bin/llama-cli -m model.gguf"
+echo "  ./build/ReleaseOV/bin/local-inference-cli -m model.gguf"
 ```
 
 > [!NOTE]
@@ -543,7 +543,7 @@ echo.
 echo NOTE: To run, source setupvars.bat and pick a device:
 echo   call "C:\Intel\openvino\setupvars.bat"
 echo   set GGML_OPENVINO_DEVICE=CPU   ^&^& REM or GPU / NPU
-echo   build\ReleaseOV\bin\llama-cli.exe -m model.gguf
+echo   build\ReleaseOV\bin\local-inference-cli.exe -m model.gguf
 echo.
 
 endlocal
@@ -589,16 +589,16 @@ When using the OpenVINO backend, the first inference token may have slightly hig
 export GGML_OPENVINO_DEVICE=GPU
 # Optional: enable stateful execution for improved GPU performance (recommended).
 export GGML_OPENVINO_STATEFUL_EXECUTION=1
-# To run llama-simple:
-./build/ReleaseOV/bin/llama-simple -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -n 50 "The story of AI is "
+# To run local-inference-simple:
+./build/ReleaseOV/bin/local-inference-simple -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -n 50 "The story of AI is "
 # To run in chat mode:
-./build/ReleaseOV/bin/llama-cli -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -c 1024
-# To run llama-bench, -fa 1 is needed
-GGML_OPENVINO_STATEFUL_EXECUTION=1 GGML_OPENVINO_DEVICE=GPU ./build/ReleaseOV/bin/llama-bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -fa 1
+./build/ReleaseOV/bin/local-inference-cli -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -c 1024
+# To run local-inference-bench, -fa 1 is needed
+GGML_OPENVINO_STATEFUL_EXECUTION=1 GGML_OPENVINO_DEVICE=GPU ./build/ReleaseOV/bin/local-inference-bench -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -fa 1
 
 # NPU: keep context small to avoid failures from very large model context windows.
 export GGML_OPENVINO_DEVICE=NPU
-./build/ReleaseOV/bin/llama-cli -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -c 512
+./build/ReleaseOV/bin/local-inference-cli -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -c 512
 
 # Windows Command Line
 set GGML_OPENVINO_DEVICE=GPU
@@ -608,19 +608,19 @@ set GGML_OPENVINO_STATEFUL_EXECUTION=1
 $env:GGML_OPENVINO_DEVICE = "GPU"
 $env:GGML_OPENVINO_STATEFUL_EXECUTION = "1"
 
-# To run llama-simple
-build\ReleaseOV\bin\llama-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf" -n 50 "The story of AI is "
+# To run local-inference-simple
+build\ReleaseOV\bin\local-inference-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf" -n 50 "The story of AI is "
 # To run in chat mode:
-build\ReleaseOV\bin\llama-cli.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf" -c 1024
-# To run llama-bench, -fa 1 is needed
-build\ReleaseOV\bin\llama-bench.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf" -fa 1
+build\ReleaseOV\bin\local-inference-cli.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf" -c 1024
+# To run local-inference-bench, -fa 1 is needed
+build\ReleaseOV\bin\local-inference-bench.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf" -fa 1
 
 # NPU: keep context small to avoid failures from very large model context windows.
 # Windows Command Line
 set GGML_OPENVINO_DEVICE=NPU
 # Windows PowerShell
 $env:GGML_OPENVINO_DEVICE = "NPU"
-build\ReleaseOV\bin\llama-cli.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf" -c 512
+build\ReleaseOV\bin\local-inference-cli.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf" -c 512
 ```
 > [!NOTE]
 > On systems with multiple GPUs, use `GPU.0` or `GPU.1` to explicitly target specific GPU. See [OpenVINO GPU Device](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device.html) for more details.
@@ -636,10 +636,10 @@ docker build -t llama-openvino:base -f .devops/openvino.Dockerfile .
 # Build the complete image with all binaries, Python tools, gguf-py library, and model conversion utilities.
 docker build --target=full -t llama-openvino:full -f .devops/openvino.Dockerfile .
 
-# Build a minimal CLI-only image containing just the llama-cli executable.
+# Build a minimal CLI-only image containing just the local-inference-cli executable.
 docker build --target=light -t llama-openvino:light -f .devops/openvino.Dockerfile .
 
-# Builds a server-only image with llama-server executable, health check endpoint, and REST API support.
+# Builds a server-only image with local-inference-server executable, health check endpoint, and REST API support.
 docker build --target=server -t llama-openvino:server -f .devops/openvino.Dockerfile .
 
 # If you are behind a proxy:
@@ -669,7 +669,7 @@ llama-openvino:light --no-warmup -c 1024 -m /models/Llama-3.2-1B-Instruct-Q4_K_M
 
 Run Llama.cpp Server with OpenVINO Backend.
 > [!NOTE]
-> `llama-server` with OpenVINO backend supports only one chat session/thread, when `GGML_OPENVINO_STATEFUL_EXECUTION=1` is enabled.
+> `local-inference-server` with OpenVINO backend supports only one chat session/thread, when `GGML_OPENVINO_STATEFUL_EXECUTION=1` is enabled.
 
 ```bash
 # Run the llama-openvino:server Docker container (CPU)
@@ -687,8 +687,8 @@ docker run --rm -it -v ~/models:/models \
 -p 8080:8080 --env=GGML_OPENVINO_DEVICE=NPU \
 llama-openvino:server --no-warmup -c 1024 -m /models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --host 0.0.0.0
 
-# Or Using llama-server executable
-./build/ReleaseOV/bin/llama-server -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --port 8080 -c 1024
+# Or Using local-inference-server executable
+./build/ReleaseOV/bin/local-inference-server -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf --port 8080 -c 1024
 
 # Option 1: Open your browser to http://localhost:8080 to access the web UI for the llama.cpp server.
 # Option 2: In a NEW terminal, test the server with curl
@@ -732,7 +732,7 @@ Boolean flags follow a uniform convention: set to a **positive integer** (e.g. `
 | `GGML_OPENVINO_LOG_UNSUPPORTED_OPS`| Boolean   | `0`        | Log warning messages with tensor details and rejection reasons for any ops not supported by the OpenVINO backend. Emits at `WARN` level (requires `--log-verbosity >= 2`, enabled by default). |
 
 > [!NOTE]
-> - `GGML_OPENVINO_STATEFUL_EXECUTION` is an **Experimental** feature to allow stateful execution for managing the KV cache internally inside the OpenVINO model, improving performance on CPUs and GPUs. Stateful execution is not effective on NPUs, and not all models currently support this feature. This feature is experimental and has been validated only with the llama-simple, llama-cli, llama-bench, and llama-run applications and is recommended to enable for the best performance. Other applications, such as llama-server and llama-perplexity, are not yet supported.
+> - `GGML_OPENVINO_STATEFUL_EXECUTION` is an **Experimental** feature to allow stateful execution for managing the KV cache internally inside the OpenVINO model, improving performance on CPUs and GPUs. Stateful execution is not effective on NPUs, and not all models currently support this feature. This feature is experimental and has been validated only with the local-inference-simple, local-inference-cli, local-inference-bench, and llama-run applications and is recommended to enable for the best performance. Other applications, such as local-inference-server and local-inference-perplexity, are not yet supported.
 > - `GGML_OPENVINO_LOG_UNSUPPORTED_OPS` emits logs at `WARN` level (`GGML_LOG_WARN`), which requires application log verbosity `--log-verbosity >= 2` (or `-lv 2`).
 
 ### Example Usage
@@ -748,7 +748,7 @@ export GGML_OPENVINO_PROFILING=1
 export GGML_OPENVINO_DEVICE=GPU
 export GGML_OPENVINO_STATEFUL_EXECUTION=1
 
-./build/ReleaseOV/bin/llama-simple -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -n 50 "The story of AI is "
+./build/ReleaseOV/bin/local-inference-simple -m ~/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf -n 50 "The story of AI is "
 
 # Windows Command Line
 set GGML_OPENVINO_CACHE_DIR=C:\tmp\ov_cache
@@ -762,7 +762,7 @@ $env:GGML_OPENVINO_PROFILING = "1"
 $env:GGML_OPENVINO_DEVICE = "GPU"
 $env:GGML_OPENVINO_STATEFUL_EXECUTION = "1"
 
-build\ReleaseOV\bin\llama-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf" -n 50 "The story of AI is "
+build\ReleaseOV\bin\local-inference-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.gguf" -n 50 "The story of AI is "
 
 ```
 
@@ -777,21 +777,21 @@ build\ReleaseOV\bin\llama-simple.exe -m "C:\models\Llama-3.2-1B-Instruct-Q4_K_M.
 
 **Tool-specific**
 
-- `llama-bench`: requires `-fa 1` (flash-attention).
-- `llama-cli --context-shift`: stateless only (`GGML_OPENVINO_STATEFUL_EXECUTION=0`). In stateful mode the KV cache is owned by the OpenVINO model and cannot be shifted externally.
-- `llama-server`: only one chat session/thread when `GGML_OPENVINO_STATEFUL_EXECUTION=1`.
+- `local-inference-bench`: requires `-fa 1` (flash-attention).
+- `local-inference-cli --context-shift`: stateless only (`GGML_OPENVINO_STATEFUL_EXECUTION=0`). In stateful mode the KV cache is owned by the OpenVINO model and cannot be shifted externally.
+- `local-inference-server`: only one chat session/thread when `GGML_OPENVINO_STATEFUL_EXECUTION=1`.
 
 **GPU-specific**
 
-- `llama-server -np > 1`: concurrent requests are batched together, which may slightly reduce per-request throughput.
+- `local-inference-server -np > 1`: concurrent requests are batched together, which may slightly reduce per-request throughput.
 
 **NPU-specific**
 
 - Default context resolves to the model's training context (e.g. 131072 for Llama 3.2 1B), which can OOM or fail or degrade performance on NPU. Inspect the resolved value with `-lv 3`.
   - **Workaround:** Pass an explicit `-c <N>`, e.g. `-c 1024`.
 - NPU device uses a static graph with a fixed prefill chunk size (defaults to 256), configurable with `GGML_OPENVINO_PREFILL_CHUNK_SIZE`. Large prefill/batch settings may need tuning.
-- `llama-server -np > 1` (multiple parallel sequences) is not supported.
-- `llama-perplexity`: requires `-b 512` or smaller.
+- `local-inference-server -np > 1` (multiple parallel sequences) is not supported.
+- `local-inference-perplexity`: requires `-b 512` or smaller.
 
 > [!NOTE]
 > The OpenVINO backend is actively under development. Fixes and improvements are underway, and this document will continue to be updated.

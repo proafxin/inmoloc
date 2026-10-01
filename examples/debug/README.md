@@ -8,7 +8,7 @@ model.
 ### Usage
 
 ```shell
-llama-debug \
+local-inference-debug \
   --hf-repo ggml-org/models \
   --hf-file phi-2/ggml-model-q4_0.gguf \
   --model phi-2-q4_0.gguf \
@@ -30,7 +30,7 @@ specific tensors.
 This example supports all standard `llama.cpp` options and also accepts the
 following options:
 ```console
-$ llama-debug --help
+$ local-inference-debug --help
 ...
 
 ----- example-specific params -----

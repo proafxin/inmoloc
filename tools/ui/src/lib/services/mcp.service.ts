@@ -444,7 +444,7 @@ export class MCPService {
 	/**
 	 * Create transport based on server configuration.
 	 * Supports WebSocket, StreamableHTTP (modern), and SSE (legacy) transports.
-	 * When `useProxy` is enabled, routes HTTP requests through llama-server's CORS proxy.
+	 * When `useProxy` is enabled, routes HTTP requests through local-inference-server's CORS proxy.
 	 *
 	 * **Fallback Order:**
 	 * 1. WebSocket — if explicitly configured (no CORS proxy support)

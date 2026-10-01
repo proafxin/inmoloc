@@ -30,9 +30,9 @@ if [ -z "$BUILD_DIR" ]; then
     BUILD_DIR="../../build"
 fi
 
-cmake --build $BUILD_DIR --target llama-perplexity -j8
+cmake --build $BUILD_DIR --target local-inference-perplexity -j8
 
-${BUILD_DIR}/bin/llama-perplexity -m $CONVERTED_MODEL \
+${BUILD_DIR}/bin/local-inference-perplexity -m $CONVERTED_MODEL \
     -f ppl/wikitext-2-raw/wiki.test.raw \
     --kl-divergence-base $OUTPUTFILE
 

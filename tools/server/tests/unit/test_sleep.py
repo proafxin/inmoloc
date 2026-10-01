@@ -34,7 +34,7 @@ def fetch_metrics(server: ServerProcess) -> str:
 
 
 def get_metric(text: str, name: str) -> float:
-    prefix = f"llamacpp:{name} "
+    prefix = f"local_inference:{name} "
     values = [ln for ln in text.splitlines() if ln.startswith(prefix)]
     assert len(values) == 1, f"{name} not found in metrics"
     return float(values[0][len(prefix):])

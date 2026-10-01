@@ -18,8 +18,8 @@ fi
 
 set -x
 
-SPLIT=$1/llama-gguf-split
-MAIN=$1/llama-completion
+SPLIT=$1/local-inference-gguf-split
+MAIN=$1/local-inference-completion
 WORK_PATH=$TMP_DIR/gguf-split
 ROOT_DIR=$(realpath $(dirname $0)/../../)
 

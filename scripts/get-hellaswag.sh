@@ -33,6 +33,6 @@ fi
 cat <<EOF
 Usage:
 
-  llama-perplexity -m model.gguf -f $FILE --hellaswag [--hellaswag-tasks N] [other params]
+  local-inference-perplexity -m model.gguf -f $FILE --hellaswag [--hellaswag-tasks N] [other params]
 
 EOF

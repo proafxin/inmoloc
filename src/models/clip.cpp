@@ -1,6 +1,6 @@
 #include "models.h"
 
-// Stub to allow llama-quantize to open mmproj GGUFs
+// Stub to allow local-inference-quantize to open mmproj GGUFs
 
 [[noreturn]]
 void llama_model_clip::load_arch_hparams(llama_model_loader &) {

@@ -181,7 +181,7 @@ def test_tool_call(url, stream):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test llama-server functionality.")
+    parser = argparse.ArgumentParser(description="Test local-inference-server functionality.")
     parser.add_argument("--host", default="localhost", help="Server host")
     parser.add_argument("--port", default=8080, type=int, help="Server port")
     args = parser.parse_args()

@@ -314,10 +314,10 @@ llama_kv_cache::llama_kv_cache(
         attn_rot_k = other->attn_rot_k;
         attn_rot_v = other->attn_rot_v;
     } else {
-        const char * LLAMA_ATTN_ROT_DISABLE = getenv("LLAMA_ATTN_ROT_DISABLE");
-        const bool attn_rot_disable = LLAMA_ATTN_ROT_DISABLE ? atoi(LLAMA_ATTN_ROT_DISABLE) : false;
+        const char * LOCAL_INFERENCE_ATTN_ROT_DISABLE = getenv("LOCAL_INFERENCE_ATTN_ROT_DISABLE");
+        const bool attn_rot_disable = LOCAL_INFERENCE_ATTN_ROT_DISABLE ? atoi(LOCAL_INFERENCE_ATTN_ROT_DISABLE) : false;
         if (attn_rot_disable) {
-            LLAMA_LOG_WARN("%s: attention rotation force disabled (LLAMA_ATTN_ROT_DISABLE)\n", __func__);
+            LLAMA_LOG_WARN("%s: attention rotation force disabled (LOCAL_INFERENCE_ATTN_ROT_DISABLE)\n", __func__);
         }
 
         attn_rot_k =
@@ -364,8 +364,8 @@ llama_kv_cache::llama_kv_cache(
         }
     }
 
-    const char * LLAMA_KV_CACHE_DEBUG = getenv("LLAMA_KV_CACHE_DEBUG");
-    debug = LLAMA_KV_CACHE_DEBUG ? atoi(LLAMA_KV_CACHE_DEBUG) : 0;
+    const char * LOCAL_INFERENCE_KV_CACHE_DEBUG = getenv("LOCAL_INFERENCE_KV_CACHE_DEBUG");
+    debug = LOCAL_INFERENCE_KV_CACHE_DEBUG ? atoi(LOCAL_INFERENCE_KV_CACHE_DEBUG) : 0;
 }
 
 void llama_kv_cache::clear(bool data) {

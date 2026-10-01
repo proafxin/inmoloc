@@ -178,7 +178,7 @@ def _get_img_base64(url: str) -> str:
 @pytest.fixture
 def mmproj_server():
     # tinygemma3 is a small multimodal model: the mmproj is provided by the HF registry API and auto-downloaded on first run.
-    os.environ['LLAMA_MEDIA_MARKER'] = '<__media__>'
+    os.environ['LOCAL_INFERENCE_MEDIA_MARKER'] = '<__media__>'
     mm_server = ServerPreset.tinygemma3()
     mm_server.slot_save_path = "./tmp"
     mm_server.temperature = 0.0

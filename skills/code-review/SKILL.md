@@ -89,7 +89,6 @@ See the `add-new-model` skill and `docs/development/HOWTO-add-model.md` for the 
 - `supports_op` (and any dispatch/gating condition) must be scoped exactly to the cases being changed - a condition meant for a few quant types must not silently disable or enable everything else.
 - No hardcoded warp/lane size - use `ggml_cuda_get_physical_warp_size()` (32 on CUDA, 64 on HIP/ROCm) and the portable helpers.
 - Strip leftover debug/profiling/logging code before review.
-- New or changed op? Update `docs/ops.md` and the relevant `docs/ops/*.csv` for the touched backend.
 - New op or operator change needs corresponding `test-backend-ops` cases, and (per `CONTRIBUTING.md`) consistency across at least two backends.
 - New kernels are expected to come with concrete perf data (throughput across realistic tensor shapes), not just correctness.
 - Don't have a backend mutate the cgraph as a shortcut - that's an unresolved architectural question, not something to slip in.

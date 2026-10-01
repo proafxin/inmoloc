@@ -122,7 +122,7 @@ struct mtmd_cli_context {
 
         if (!mtmd_helper_model_can_chat(lctx, ctx_vision.get())) {
             LOG_ERR("Model does not support chat mode\n");
-            LOG_ERR("Hint: for TTS models, please use llama-tts\n");
+            LOG_ERR("Hint: for TTS models, please use local-inference-tts\n");
             exit(1);
         }
 
@@ -474,7 +474,7 @@ int main(int argc, char ** argv) {
     };
 
     LOG_WRN("WARN: This is an experimental CLI for testing multimodal capability.\n");
-    LOG_WRN("      For normal use cases, please use the standard llama-cli\n");
+    LOG_WRN("      For normal use cases, please use the standard local-inference-cli\n");
 
     if (eval_system_prompt_if_present()) {
         return 1;

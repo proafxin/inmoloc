@@ -6,9 +6,9 @@ This example program provides the tools for llama.cpp for SYCL on Intel GPU.
 
 |Tool Name| Function|Status|
 |-|-|-|
-|llama-ls-sycl-device| List all SYCL devices with ID, compute capability, max work group size, etc.|Support|
+|local-inference-ls-sycl-device| List all SYCL devices with ID, compute capability, max work group size, etc.|Support|
 
-### llama-ls-sycl-device
+### local-inference-ls-sycl-device
 
 List all SYCL devices with ID, compute capability, max work group size, etc.
 
@@ -23,7 +23,7 @@ source /opt/intel/oneapi/setvars.sh
 3. Execute
 
 ```
-./build/bin/llama-ls-sycl-device
+./build/bin/local-inference-ls-sycl-device
 ```
 
 Check the ID in startup log, like:

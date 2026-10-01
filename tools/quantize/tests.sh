@@ -18,9 +18,9 @@ fi
 
 set -x
 
-SPLIT=$1/llama-gguf-split
-QUANTIZE=$1/llama-quantize
-MAIN=$1/llama-completion
+SPLIT=$1/local-inference-gguf-split
+QUANTIZE=$1/local-inference-quantize
+MAIN=$1/local-inference-completion
 WORK_PATH=$TMP_DIR/quantize
 ROOT_DIR=$(realpath $(dirname $0)/../../)
 
