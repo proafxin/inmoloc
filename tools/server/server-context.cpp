@@ -1141,7 +1141,7 @@ public:
 
     // what the /metrics endpoint reports: the server metrics and those of its contexts; while sleeping, the endpoint
     // reports what this returned when the server went to sleep
-    server_task_result_metrics collect_metrics() {
+    server_task_result_metrics collect_metrics(size_t n_tasks_deferred) {
         server_task_result_metrics res;
 
         for (server_slot & slot : slots) {
@@ -1172,7 +1172,7 @@ public:
             usage.attn_cells_owned += usage_slept.attn_cells_owned;
         }
 
-        res.n_tasks_deferred       = queue_tasks.queue_tasks_deferred_size();
+        res.n_tasks_deferred       = n_tasks_deferred;
         res.device_memory_free_min = device_memory_free_min;
         res.mem_usage              = usage;
         res.n_graph_reused         = perf.n_reused;
@@ -3580,7 +3580,7 @@ private:
                 } break;
             case SERVER_TASK_TYPE_METRICS:
                 {
-                    auto res = std::make_unique<server_task_result_metrics>(collect_metrics());
+                    auto res = std::make_unique<server_task_result_metrics>(collect_metrics(queue_tasks.queue_tasks_deferred_size()));
                     res->id = task.id;
 
                     if (task.metrics_reset_bucket) {
@@ -6905,7 +6905,7 @@ void server_routes::update_cached_responses(bool is_sleeping) {
     if (is_sleeping) {
         cached_models  = get_res_models(*meta);
         cached_props   = get_res_props(*meta, params, true);
-        cached_metrics = ctx_server.collect_metrics();
+        cached_metrics = ctx_server.collect_metrics(queue_tasks.queue_tasks_deferred_size_locked());
 
         should_reset_buckets = false;
 

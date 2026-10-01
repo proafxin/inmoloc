@@ -112,6 +112,11 @@ public:
         return queue_tasks_deferred.size();
     }
 
+    // for the sleeping state callbacks, which are called with mutex_tasks held
+    size_t queue_tasks_deferred_size_locked() const {
+        return queue_tasks_deferred.size();
+    }
+
     //
     // Functions below are not thread-safe, must only be used before start_loop() is called
     //
