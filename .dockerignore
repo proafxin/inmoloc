@@ -1,21 +1,30 @@
 *.o
 *.a
+*.log
+*.bin
 .cache/
-# Do not ignore .git directory, otherwise the reported build number will always be 0
+# Do not ignore .git directory, otherwise the reported build commit is unknown
 .github/
 .gitignore
 .vs/
 .vscode/
+.idea/
+.kilo/
+.mypy_cache/
+.venv/
 .DS_Store
+__pycache__/
 
 build*/
 
+# the images build the web UI themselves
 tools/ui/node_modules/
+tools/ui/dist/
+
+# models the server tests download
+tools/server/tests/tmp/
 
 models/*
-
-/local-inference-cli
-/local-inference-quantize
 
 arm_neon.h
 compile_commands.json

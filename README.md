@@ -48,7 +48,14 @@ So inmoloc is maintained as its own project with its own direction, rather than 
 
 ## Quick start
 
-Build with CUDA (see [the build guide](docs/build.md) for other backends):
+Run the published image (NVIDIA driver 570 or newer, Turing to Blackwell GPUs; see [Docker](docs/docker.md)):
+
+```sh
+docker run --gpus all -p 8080:8080 -v /path/to/models:/models ghcr.io/proafxin/inmoloc:latest \
+    -m /models/model.gguf -ngl 999 --flash-attn on --ctx-size 131072 --vram-budget 22G --parallel 64
+```
+
+Or build with CUDA (see [the build guide](docs/build.md) for other backends):
 
 ```sh
 cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
@@ -88,6 +95,7 @@ On one RTX 5090 laptop GPU (24 GiB) with Qwen3.8-27B IQ4_XS, MTP speculative dec
 
 - [Server](tools/server/README.md)
 - [Build](docs/build.md)
+- [Docker](docs/docker.md)
 - [Multi-GPU](docs/multi-gpu.md)
 - [Models](docs/models.md)
 

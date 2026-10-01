@@ -167,42 +167,6 @@ lspci -n | grep -Eo '19e5:d[0-9a-f]{3}' | cut -d: -f2
 > - `Q8_0`: data transform / buffer path is implemented, and `GET_ROWS` is supported, but quantized `MUL_MAT` / `MUL_MAT_ID` are not supported.
 > - `Q4_0`: data transform / buffer path is implemented, but quantized `MUL_MAT` / `MUL_MAT_ID` are not supported.
 
-## Docker
-
-### Build Images
-You can get a image with llama.cpp in one command.
-```sh
-docker build -t llama-cpp-cann -f .devops/llama-cli-cann.Dockerfile .
-```
-
-### Run container
-
-```sh
-# Find all cards.
-npu-smi info
-
-# Select the cards that you want to use, make sure these cards are not used by someone.
-# Following using cards of device0.
-docker run --name llamacpp \
-  --device /dev/davinci0 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-  -v /PATH_TO_YOUR_MODELS/:/app/models \
-  -it llama-cpp-cann \
-  -m /app/models/MODEL_PATH \
-  -ngl 32 \
-  -p "Building a website can be done in 10 simple steps:"
-```
-
-*Notes:*
-
-- You may need to install Ascend Driver and firmware on the **host** machine *(Please refer to the [Linux configuration](#linux) for details)*.
-
 ## Linux
 
 ### I. Setup Environment
