@@ -28,6 +28,9 @@ RUN apt-get update && \
 
 ENV CC=gcc-14 CXX=g++-14
 
+# OFF for a release: the version then has no -dev suffix
+ARG BUILD_IS_DEV=ON
+
 WORKDIR /app
 
 COPY . .
@@ -39,7 +42,7 @@ RUN if [ "$TARGETARCH" != "amd64" ] && [ "$TARGETARCH" != "arm64" ]; then \
         echo "Unsupported architecture: $TARGETARCH"; exit 1; \
     fi && \
     cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \
-        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF && \
+        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_IS_DEV=${BUILD_IS_DEV} && \
     cmake --build build --config Release -j$(nproc) --target local-inference-server local-inference-cli local-inference-app
 
 RUN mkdir -p /app/lib /app/bin && \

@@ -26,7 +26,7 @@ jobs:
       # the tokenizer tests clone vocab files stored with Git LFS
       - name: Unit tests
         run: |
-          git lfs install
+          git lfs install --skip-repo
           ctest --test-dir build -L main --output-on-failure -j $(nproc)
 
       # the unit tests run the recurrent state rollback in snapshot mode, on the tiny models they generate

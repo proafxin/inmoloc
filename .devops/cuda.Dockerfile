@@ -36,6 +36,9 @@ RUN apt-get update && \
 
 ENV CC=gcc-${GCC_VERSION} CXX=g++-${GCC_VERSION} CUDAHOSTCXX=g++-${GCC_VERSION}
 
+# OFF for a release: the version then has no -dev suffix
+ARG BUILD_IS_DEV=ON
+
 WORKDIR /app
 
 COPY . .
@@ -45,7 +48,7 @@ COPY --from=web /app/tools/ui/dist tools/ui/dist
 # the CPU backend is built for every x86 variant and the one the host supports is loaded at run time
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_CUDA=ON \
         -DCMAKE_CUDA_ARCHITECTURES="${CUDA_DOCKER_ARCH}" -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON \
-        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined && \
+        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_IS_DEV=${BUILD_IS_DEV} -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined && \
     cmake --build build --config Release -j$(nproc) --target local-inference-server local-inference-cli local-inference-app
 
 RUN mkdir -p /app/lib /app/bin && \

@@ -53,13 +53,22 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version="${GITHUB_REF#refs/tags/v}"
+            # the binaries report the version set in CMakeLists.txt: a tag must match it
+            cmake_version="$(sed -nE 's/^set\(INMOLOC_VERSION_BASE "([^"]+)"\)/\1/p' CMakeLists.txt)"
+            if [ "$version" != "$cmake_version" ]; then
+              echo "::error::tag v$version does not match INMOLOC_VERSION_BASE $cmake_version in CMakeLists.txt"
+              exit 1
+            fi
             if [ -n "${{ matrix.suffix }}" ]; then latest="cpu"; else latest="latest"; fi
             tags="$IMAGE:${version}${{ matrix.suffix }},$IMAGE:${latest}"
+            dev=OFF
           else
-            version="$(git describe --tags --always)"
-            tags="$IMAGE:sha-$(git rev-parse --short HEAD)${{ matrix.suffix }}"
+            version="$(git rev-parse --short HEAD)"
+            tags="$IMAGE:sha-${version}${{ matrix.suffix }}"
+            dev=ON
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dev=$dev" >> "$GITHUB_OUTPUT"
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
@@ -83,3 +92,4 @@ jobs:
             APP_VERSION=${{ steps.tags.outputs.version }}
             APP_REVISION=${{ github.sha }}
             BUILD_DATE=${{ steps.tags.outputs.date }}
+            BUILD_IS_DEV=${{ steps.tags.outputs.dev }}
