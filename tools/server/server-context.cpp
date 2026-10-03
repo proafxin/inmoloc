@@ -2142,7 +2142,12 @@ private:
         // a shared prefix puts the same cells in several slots, so count the cells the cache actually uses
         const auto usage = llama_memory_get_usage(llama_get_memory(ctx_tgt));
         if (usage.kv_size > 0) {
-            return (int32_t) usage.kv_used;
+            // the draft context decodes the same tokens into a cache of the same size: a step must fit in both
+            uint32_t n_used = usage.kv_used;
+            if (ctx_dft) {
+                n_used = std::max(n_used, llama_memory_get_usage(llama_get_memory(ctx_dft)).kv_used);
+            }
+            return (int32_t) n_used;
         }
 
         int32_t n = 0;
@@ -2179,6 +2184,13 @@ private:
 
     bool prefix_share_allowed(server_task_type type) const {
         return params_base.prefix_share && params_base.kv_unified && !params_base.ctx_shift && type == SERVER_TASK_TYPE_COMPLETION;
+    }
+
+    // a draft memory that can be cut at any position (a plain KV cache) needs no state in a checkpoint: seq_cp and
+    // seq_rm leave the cells it needs. Its state is the whole sequence, and loading it would replace cells the slot
+    // shares with another slot by a copy of its own
+    bool ckpt_needs_dft() const {
+        return ctx_dft != nullptr && ctx_dft_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_PART;
     }
 
     // recurrent or SWA state cannot be cut at any position, only at a checkpoint
@@ -2297,11 +2309,15 @@ private:
             common_prompt_checkpoint cur;
 
             cur.update_tgt(ctx_tgt, best->id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-            cur.update_dft(ctx_dft, best->id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            if (ckpt_needs_dft()) {
+                cur.update_dft(ctx_dft, best->id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            }
             common_speculative_get_state(spec.get(), best->id, cur.data_spec);
 
             cur.load_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-            cur.load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            if (ckpt_needs_dft()) {
+                cur.load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            }
             common_speculative_set_state(spec.get(), slot.id, cur.data_spec);
         }
 
@@ -3380,7 +3396,9 @@ private:
         cur.update_pos(slot.prompt.n_tokens() - n_tokens_cur, pos_min, pos_max);
 
         cur.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-        cur.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+        if (ckpt_needs_dft()) {
+            cur.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+        }
         // stash the draft's speculative state with the checkpoint
         common_speculative_get_state(spec.get(), slot.id, cur.data_spec);
 
@@ -4617,7 +4635,9 @@ private:
                                     if (!do_reset) {
                                         // restore the context checkpoint
                                         it->load_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
-                                        it->load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                                        if (ckpt_needs_dft()) {
+                                            it->load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                                        }
                                         // restore the draft's speculative state
                                         common_speculative_set_state(spec.get(), slot.id, it->data_spec);
 
