@@ -72,4 +72,9 @@ struct llama_cparams {
     void * cb_eval_user_data;
 
     llama_context * ctx_other;
+
+    // pooled embeddings have one output per sequence, the token logits are not used
+    bool has_logits() const {
+        return !embeddings || pooling_type == LLAMA_POOLING_TYPE_NONE;
+    }
 };

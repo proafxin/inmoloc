@@ -23,7 +23,7 @@ endif()
 message(STATUS "libllama version: ${LLAMA_VERSION}")
 
 ### inmoloc version: the version of the project and its tools, LLAMA_VERSION above is the version of the libllama API
-set(INMOLOC_VERSION_BASE "0.1.1")
+set(INMOLOC_VERSION_BASE "0.1.2")
 
 if (LLAMA_BUILD_IS_DEV)
     set(INMOLOC_VERSION "${INMOLOC_VERSION_BASE}-dev")
