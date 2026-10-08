@@ -14,6 +14,7 @@
 #include "jinja/runtime.h"
 #include "jinja/caps.h"
 #include "peg-parser.h"
+#include "unicode.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -1418,6 +1419,31 @@ common_chat_params common_chat_templates_apply(const struct common_chat_template
                               common_chat_templates_apply_legacy(tmpls, inputs);
 }
 
+// replaces each byte that is not part of a valid UTF-8 sequence with U+FFFD
+// an incomplete sequence at the end is kept, more input can complete it
+static std::string utf8_replace_invalid(const std::string & s) {
+    std::string res;
+    res.reserve(s.size());
+
+    size_t pos = 0;
+    while (pos < s.size()) {
+        const auto cp = common_parse_utf8_codepoint(s, pos);
+        if (cp.status == utf8_parse_result::INCOMPLETE) {
+            res.append(s, pos, std::string::npos);
+            break;
+        }
+        if (cp.status == utf8_parse_result::INVALID) {
+            res += "\xEF\xBF\xBD";
+            pos++;
+            continue;
+        }
+        res.append(s, pos, cp.bytes_consumed);
+        pos += cp.bytes_consumed;
+    }
+
+    return res;
+}
+
 common_chat_msg common_chat_parse(const std::string &               input,
                                   bool                              is_partial,
                                   const common_chat_parser_params & params) {
@@ -1436,9 +1462,10 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
         LOG_DBG("No parser definition detected, assuming pure content parser.");
     }
 
-    const std::string effective_input = params.generation_prompt.empty()
+    // the model can sample a token that is part of a UTF-8 sequence on its own, and the parser fails on malformed UTF-8
+    const std::string effective_input = utf8_replace_invalid(params.generation_prompt.empty()
         ? input
-        : params.generation_prompt + input;
+        : params.generation_prompt + input);
 
     //LOG_DBG("Parsing PEG input with format %s: %s\n", common_chat_format_name(params.format), effective_input.c_str());
 

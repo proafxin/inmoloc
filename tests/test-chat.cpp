@@ -7248,6 +7248,23 @@ static void test_msg_diffs_compute() {
     }
 }
 
+static void test_parse_malformed_utf8() {
+    LOG_DBG("%s\n", __func__);
+
+    common_peg_arena          arena;
+    common_chat_parser_params pp;
+
+    // a byte that is not valid UTF-8 becomes U+FFFD, the text around it is kept
+    assert_equals(std::string("a < \xEF\xBF\xBD" "g(x) \xC3\xBC"),
+                  common_chat_peg_parse(arena, "a < \xCE" "g(x) \xC3\xBC", /* is_partial= */ false, pp).content);
+    assert_equals(std::string("\xEF\xBF\xBD" "b"),
+                  common_chat_peg_parse(arena, "\x80" "b", /* is_partial= */ false, pp).content);
+
+    // an incomplete sequence at the end of a partial output is held back
+    assert_equals(std::string("a"),
+                  common_chat_peg_parse(arena, "a\xC3", /* is_partial= */ true, pp).content);
+}
+
 int main(int argc, char ** argv) {
     bool detailed_debug    = false;
     bool only_run_filtered = false;
@@ -7321,6 +7338,7 @@ int main(int argc, char ** argv) {
 #endif
     {
         test_msg_diffs_compute();
+        test_parse_malformed_utf8();
         test_msgs_oaicompat_json_conversion();
         test_msg_token_delimiters_split();
         test_tools_oaicompat_json_conversion();

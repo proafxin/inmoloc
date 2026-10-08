@@ -5217,6 +5217,8 @@ private:
 
                     slot.resuming = false;
                     slot.encode_wait();
+                    // the media batch points at chunks of resume_tokens
+                    slot.mbatch.reset();
                     slot.resume_tokens.clear();
                 }
 
