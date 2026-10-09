@@ -4660,6 +4660,21 @@ static void ggml_backend_cuda_set_priority(ggml_backend_t backend, enum ggml_bac
     ggml_cuda_set_device(ctx->device);
 }
 
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+// the wait is a property of the device for all the threads of the process; without this call the driver chooses it
+static void ggml_backend_cuda_set_wait(enum ggml_backend_wait wait) {
+    const unsigned int flags =
+        wait == GGML_BACKEND_WAIT_BLOCK ? cudaDeviceScheduleBlockingSync :
+        wait == GGML_BACKEND_WAIT_YIELD ? cudaDeviceScheduleYield        : cudaDeviceScheduleSpin;
+
+    const ggml_cuda_device_info & info = ggml_cuda_info();
+    for (int id = 0; id < info.physical_device_count; ++id) {
+        CUDA_CHECK(cudaSetDevice(id));
+        CUDA_CHECK(cudaSetDeviceFlags(flags));
+    }
+}
+#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+
 // the device memory a cuBLAS handle takes with its workspace, measured once per device on a handle created for it
 static size_t ggml_cuda_cublas_cost(int device) {
     static std::mutex mutex;
@@ -6018,6 +6033,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
         return (void *)ggml_backend_cuda_set_priority;
     }
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    if (strcmp(name, "ggml_backend_set_wait") == 0) {
+        return (void *)ggml_backend_cuda_set_wait;
+    }
     if (strcmp(name, "ggml_backend_flash_attn_ext_kv_rows") == 0) {
         // feature flag, see ggml_flash_attn_ext_set_kv_rows(); supports_op still checks the device and the shapes
         return (void *)ggml_flash_attn_ext_set_kv_rows;

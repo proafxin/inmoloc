@@ -34,6 +34,7 @@ So inmoloc is maintained as its own project with its own direction, rather than 
 - **A cost-based prompt cap** (`--prompt-cap`): prompt tokens are admitted per iteration by their measured cost, which grows with depth, so generating requests are not held up by a long prompt next to them.
 - **Prefix sharing across requests** (`--prefix-share`): a new request starts from the cells of another request that holds the same prefix.
 - **An asynchronous vision encoder**: images are encoded on their own thread and GPU stream, at a lower stream priority than text generation, while the other requests keep generating.
+- **A choice of how the server waits for the GPU** (`--gpu-wait block`, CUDA): by default the CUDA driver keeps one CPU core busy while the GPU works, which heats the CPU with no work done. With `block` the thread sleeps until the GPU is done, for a short wake-up delay per wait; `spin` and `yield` are the other values.
 
 ### Attention
 

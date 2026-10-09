@@ -2634,6 +2634,38 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ));
     add_opt(common_arg(
+        {"--gpu-wait"}, "{spin,yield,block}",
+        "how a thread waits for the GPU to finish its work (CUDA only):\n"
+        "- spin: keeps one CPU core busy, the lowest latency\n"
+        "- yield: like spin, but gives the core to other threads that are ready to run\n"
+        "- block: sleeps until the GPU is done, an idle core for a short wake-up delay per wait\n"
+        "(default: chosen by the GPU driver)",
+        [](common_params &, const std::string & value) {
+            enum ggml_backend_wait wait;
+            if (value == "spin") {
+                wait = GGML_BACKEND_WAIT_SPIN;
+            } else if (value == "yield") {
+                wait = GGML_BACKEND_WAIT_YIELD;
+            } else if (value == "block") {
+                wait = GGML_BACKEND_WAIT_BLOCK;
+            } else {
+                throw std::invalid_argument("error: --gpu-wait must be spin, yield or block\n");
+            }
+            ggml_backend_load_all();
+            bool found = false;
+            for (size_t i = 0; i < ggml_backend_reg_count(); i++) {
+                auto * set_wait = (ggml_backend_set_wait_t) ggml_backend_reg_get_proc_address(ggml_backend_reg_get(i), "ggml_backend_set_wait");
+                if (set_wait != nullptr) {
+                    set_wait(wait);
+                    found = true;
+                }
+            }
+            if (!found) {
+                LOG_WRN("--gpu-wait has no effect: no loaded backend supports it\n");
+            }
+        }
+    ));
+    add_opt(common_arg(
         {"-ns", "--sequences"}, "N",
         string_format("number of sequences to decode (default: %d)", params.n_sequences),
         [](common_params & params, int value) {

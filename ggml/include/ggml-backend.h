@@ -231,6 +231,14 @@ extern "C" {
         GGML_BACKEND_PRIORITY_HIGH   =  1,
     };
     typedef void                         (*ggml_backend_set_priority_t)(ggml_backend_t backend, enum ggml_backend_priority priority);
+    // How a host thread waits for the devices of a backend to finish their work: spin keeps a core busy for the lowest
+    // latency, yield also gives the core to threads that are ready to run, block sleeps until the device is done
+    enum ggml_backend_wait {
+        GGML_BACKEND_WAIT_SPIN  = 0,
+        GGML_BACKEND_WAIT_YIELD = 1,
+        GGML_BACKEND_WAIT_BLOCK = 2,
+    };
+    typedef void                         (*ggml_backend_set_wait_t)(enum ggml_backend_wait wait);
     // The device memory a backend takes outside its buffers to compute a graph (e.g. scratch pools, library handles),
     // see ggml_backend_sched_reserve_scratch; with alloc the backend takes it now, otherwise it only measures it
     typedef size_t                       (*ggml_backend_graph_scratch_t)(ggml_backend_t backend, struct ggml_cgraph * graph, bool alloc);

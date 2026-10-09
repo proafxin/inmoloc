@@ -22,6 +22,7 @@ inmoloc started from llama.cpp at commit 56381e407 (2026-09-12) and is maintaine
 | Prompt and generation in one batch | Prompt tokens fill the batch next to the generated tokens | Prompt tokens are admitted by their measured cost, which grows with depth (`--prompt-cap`) |
 | Shared prefixes | A request reuses the prefix its own slot holds | A request can also start from the cells of another request with the same prefix (`--prefix-share`) |
 | Images | Encoded on the server loop, while generation waits | Encoded on their own thread and GPU stream at a lower priority, while the other requests generate |
+| Waiting for the GPU (CUDA) | Chosen by the driver, usually a busy CPU core | Also `--gpu-wait block`: the thread sleeps until the GPU is done (`spin` and `yield` are the other values) |
 
 ## Attention and KV cache
 
