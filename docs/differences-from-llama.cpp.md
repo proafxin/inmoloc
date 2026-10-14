@@ -16,9 +16,10 @@ inmoloc started from llama.cpp at commit 56381e407 (2026-09-12) and is maintaine
 | Area | llama.cpp | inmoloc |
 | --- | --- | --- |
 | Number of requests at once | Fixed by `--parallel` | The most that fit the memory budget (`--vram-budget`), up to `--parallel` |
-| Memory projection | Fits the model and context to free memory with a margin (`--fit`) | Measures every part (weights, KV cache, per-request state, compute, draft, vision encoder, backend scratch) with no margin |
+| KV cache per request | With `--parallel N`, by default the context is split into N fixed parts; with `--kv-unified`, one cache shared by all requests | Always one cache shared by all requests; a request takes cells for the tokens it holds |
+| Memory projection | Fits the model and context to free memory with a margin (`--fit`) | Measures every part (weights, KV cache, per-request state, compute, draft, vision encoder, backend scratch) with no margin; `--fit` still chooses `--ctx-size` and `--gpu-layers` with its margin when they are not given |
 | Memory outside the buffers (CUDA pools, cuBLAS) | Grows while serving, when an operation first needs it | Sized from the worst-case graphs and reserved at startup |
-| KV cache full | No preemption | The newest requests give their cells back and are recomputed later (vLLM-style preemption) |
+| KV cache full | Retries with smaller batches; when one token does not fit, every active request fails ("Context size has been exceeded.") and its cache is cleared | The newest requests give their cells back and are recomputed later (vLLM-style preemption); the others continue |
 | Prompt and generation in one batch | Prompt tokens fill the batch next to the generated tokens | Prompt tokens are admitted by their measured cost, which grows with depth (`--prompt-cap`) |
 | Shared prefixes | A request reuses the prefix its own slot holds | A request can also start from the cells of another request with the same prefix (`--prefix-share`) |
 | Images | Encoded on the server loop, while generation waits | Encoded on their own thread and GPU stream at a lower priority, while the other requests generate |
@@ -44,5 +45,5 @@ inmoloc started from llama.cpp at commit 56381e407 (2026-09-12) and is maintaine
 ## What stays the same
 
 - The GGUF format and the models it supports.
-- The ggml library and the `llama_*` C API (`include/llama.h`), so code written against llama.cpp's library works with inmoloc's.
+- The ggml library and the `llama_*` C API (`include/llama.h`), so code written against llama.cpp's library builds against inmoloc's. The API has additions, and `llama_context_params` has new fields, so bindings that copy the struct layout (e.g. through ctypes) need updating.
 - Quantization types, backends and the OpenAI-compatible HTTP API.
