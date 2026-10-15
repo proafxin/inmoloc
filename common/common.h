@@ -485,6 +485,10 @@ struct common_params {
     size_t  vram_budget        = 0;
     size_t  vram_budget_used   = 0;     // memory taken from the budget by something else, e.g. the vision encoder
 
+    // the server sizes the cache from the budget too, see common_budget_params()
+    bool    vram_budget_ctx    = false;
+    int32_t n_ctx_typical      = 0;     // tokens a typical request holds (0 = n_ctx, else the longest request that fits)
+
     // filled in at startup: the memory the configuration is projected to use, and the free device memory it was
     // measured against; compared with the memory actually used once everything is loaded
     size_t  vram_predicted     = 0;

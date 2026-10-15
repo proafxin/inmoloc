@@ -29,7 +29,7 @@ FROM ${BASE_CUDA_DEV_CONTAINER} AS build
 
 ARG GCC_VERSION
 # Turing (RTX 20xx, T4) to Blackwell (RTX 50xx); 120a is the architecture-specific Blackwell target
-ARG CUDA_DOCKER_ARCH="75-real;80-real;86-real;89-real;90-real;120a-real"
+ARG CUDA_DOCKER_ARCH="61-virtual;70-virtual;75-real;80-real;86-real;89-real;90-real;120a-real"
 
 RUN apt-get update && \
     apt-get install -y gcc-${GCC_VERSION} g++-${GCC_VERSION} build-essential cmake git libssl-dev libgomp1

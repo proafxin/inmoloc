@@ -2065,16 +2065,30 @@ private:
         return n;
     }
 
-    // true if a starting slot can share a long enough prefix from this idle slot, see try_share_prefix()
-    bool idle_slot_is_donor(const server_slot & slot) const {
+    // a starting slot that may share a prefix, and the tokens its own memory already provides
+    struct prefix_share_starter {
+        const server_slot * slot;
+        int32_t             n_own;
+    };
+
+    std::vector<prefix_share_starter> prefix_share_starters() const {
+        std::vector<prefix_share_starter> res;
         for (const auto & other : slots) {
-            if (other.state != SLOT_STATE_STARTED || !other.task || !prefix_share_allowed(other.task->type) ||
-                !are_lora_equal(other.lora, slot.lora)) {
+            if (other.state != SLOT_STATE_STARTED || !other.task || !prefix_share_allowed(other.task->type)) {
                 continue;
             }
+            res.push_back({ &other, (int32_t) other.prompt.tokens.get_common_prefix(other.task->tokens) });
+        }
+        return res;
+    }
 
-            const int32_t n_own = other.prompt.tokens.get_common_prefix(other.task->tokens);
-            if (prefix_share_from(slot, other.task->tokens).n_share >= n_own + prefix_share_min_gain()) {
+    // true if a starting slot can share a long enough prefix from this idle slot, see try_share_prefix()
+    bool idle_slot_is_donor(const server_slot & slot, const std::vector<prefix_share_starter> & starters) const {
+        for (const auto & st : starters) {
+            if (!are_lora_equal(st.slot->lora, slot.lora)) {
+                continue;
+            }
+            if (prefix_share_from(slot, st.slot->task->tokens).n_share >= st.n_own + prefix_share_min_gain()) {
                 return true;
             }
         }
@@ -2091,12 +2105,14 @@ private:
         server_slot * victim       = nullptr;
         bool          victim_donor = false;
 
+        const auto starters = prefix_share_starters();
+
         for (auto & slot : slots) {
             if (&slot == keep || &slot == keep_donor || slot.is_processing() || slot.prompt.n_tokens() == 0) {
                 continue;
             }
 
-            const bool donor = idle_slot_is_donor(slot);
+            const bool donor = idle_slot_is_donor(slot, starters);
 
             if (victim == nullptr || (victim_donor && !donor) ||
                 (donor == victim_donor && slot.t_last_used < victim->t_last_used)) {

@@ -12,7 +12,8 @@ inmoloc serves many requests at once from one GPU, with a local runtime's startu
 - Explain a problem before fixing it: find the cause with measurements (logs, counters, a comparison with the base llama.cpp at commit 56381e407 in a separate worktree), then change the code.
 - Claims about speed need measurements on the same workload with and without the change, alternating runs on fresh servers, with nothing else using the GPU.
 - Keep the internal `llama_*` and `ggml_*` C API and the GGUF format unchanged unless the change requires it, so that model support can still be ported from llama.cpp.
-- Tests: reuse the existing ones (`test-backend-ops`, `tests/test-*.cpp`, the `scripts/check-*.sh` checks) rather than adding new test files, unless the user agrees.
+- Tests: reuse the existing ones (`test-backend-ops`, `tests/test-*.cpp`, the server tests in `tools/server/tests`, `scripts/kv-quality.py` for KV cache quality, `scripts/bench-server-concurrency.py` for load) rather than adding new test files, unless the user agrees.
+- After adding or changing a command-line option, regenerate the option tables of the tool READMEs: build `local-inference-gen-docs` and run it from the repository root. Add new server options to the options table of [README.md](README.md) too.
 
 ## Code standards
 

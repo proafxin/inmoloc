@@ -14,8 +14,8 @@ inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps
 
 ## Features
 
-- **Shared KV cache**: all requests share one cache of `--ctx-size` tokens, and each request takes cells only for the tokens it holds, up to the model's training context.
-- **Memory budget**: at startup the server measures the weights, KV cache, per-request state, compute buffers, draft model, vision encoder and backend scratch memory, and runs the most requests at once that fit `--vram-budget`. Memory does not grow while serving.
+- **Shared KV cache**: all requests share one cache, and each request takes cells only for the tokens it holds, up to the model's training context.
+- **Memory budget**: at startup the server measures the weights, KV cache, per-request state, compute buffers, draft model, vision encoder and backend scratch memory. From the typical request size (`--ctx-typical`) it chooses the number of requests at once and the cache size that serve the most requests within `--vram-budget`. Memory does not grow while serving.
 - **Preemption**: when the cache is full, the newest requests are paused and recomputed later, and the others continue.
 - **Per-request attention** (CUDA): each request reads only its own KV cells, so its cost grows with its own context, not with other requests. Quantized q8_0 and q4_0 caches are read directly.
 - **Prefix sharing**: a new request starts from the cached cells of another request with the same prefix, without copying them.
@@ -27,14 +27,14 @@ inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps
 
 ## Quick start
 
-Run the published image (NVIDIA driver 570 or newer, Turing to Blackwell GPUs; see [Docker](docs/docker.md)):
+Run the published CUDA image (built with CUDA 12.8, so it needs NVIDIA driver 570 or newer, like llama.cpp's; see [Docker](docs/docker.md)):
 
 ```sh
 docker run --gpus all -p 8080:8080 -v /path/to/models:/models ghcr.io/proafxin/inmoloc:latest \
     -m /models/model.gguf -ngl 999 --flash-attn on --ctx-size 131072 --vram-budget 22G --parallel 64
 ```
 
-Or build with CUDA (see [the build guide](docs/build.md) for other backends):
+Or build it yourself, for any hardware llama.cpp supports (see [the build guide](docs/build.md) for other backends and older CUDA versions):
 
 ```sh
 cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
@@ -62,7 +62,9 @@ The options below are specific to inmoloc; all other options are as in llama.cpp
 | Option | Default | Description |
 | --- | --- | --- |
 | `--vram-budget SIZE` | free device memory | Device memory the server may use, summed over the devices the model runs on (e.g. `22G`). |
-| `--parallel N` | | Upper limit on requests at once; the budget may lower it. |
+| `--ctx-typical N` | the longest request that fits | Tokens a typical request holds. The budget runs the most requests at once whose typical requests fit in the KV cache, and gives the memory left to the cache. The startup log shows the longest request the budget holds. |
+| `--ctx-size N` | automatic | The most tokens the KV cache holds. Not needed: without it the cache is sized from the budget. |
+| `--parallel N` | auto | Upper limit on requests at once; the budget may lower it. |
 | `--prompt-cap N` | `-1` | Prompt tokens per iteration while requests generate, weighted by cost. `-1`: fill one ubatch, `0`: no cap. |
 | `--prefix-share`, `--no-prefix-share` | enabled | Let a new request start from another request's cached prefix. |
 | `--prefix-share-min N` | `256` | Least number of tokens a shared prefix must save. |
@@ -70,7 +72,7 @@ The options below are specific to inmoloc; all other options are as in llama.cpp
 | `--gpu-wait {spin,yield,block}` | driver | How a thread waits for the GPU (CUDA). `block` sleeps and frees the CPU core. |
 | `--slow-loop-ms N` | `1000` | Log a time breakdown of server iterations slower than N ms. `0`: off. |
 
-When `--ctx-size` or `--gpu-layers` is not given, `--fit` chooses them first with its own margin (`--fit-target`).
+When `--gpu-layers` is not given and the model does not fit, `--fit` chooses it against the budget, with no margin.
 
 ## Measured
 
@@ -102,9 +104,34 @@ llama.cpp at commit 56381e407 (2026-09-12); vLLM as of 2026-10-15.
 
 - **Models**: GGUF models supported by llama.cpp at the base commit, see [docs/models.md](docs/models.md).
 - **API**: OpenAI-compatible chat completions, completions and embeddings, see [the server documentation](tools/server/README.md).
-- **Backends**: all llama.cpp backends build and run. Per-request attention and `--gpu-wait` are CUDA only; other backends attend over the whole cache with a mask.
+- **Hardware and backends**: the same as llama.cpp: all its backends build and run, on the same GPUs and CPUs. The memory budget, preemption, prefix sharing and prompt scheduling work on every backend. Per-request attention and `--gpu-wait` are NVIDIA only (per-request attention for prompt chunks needs Turing or newer); elsewhere attention reads the whole cache with a mask, as in llama.cpp.
 - **Multiple GPUs**: llama.cpp's multi-GPU modes work (see [Multi-GPU](docs/multi-gpu.md)); the budget is summed over devices, and multi-GPU serving is not tested yet.
-- **Coming from llama.cpp**: executables are named `local-inference-*` (unified binary: `local-inference`), environment variables start with `LOCAL_INFERENCE_`, metrics start with `local_inference:`, and `--no-kv-unified` is not supported. The C API is source compatible; bindings that copy the `llama_context_params` layout need updating.
+
+## Coming from llama.cpp
+
+Most `llama-server` command lines run unchanged under the new name. To let inmoloc size the server for you, replace the fixed sizes with the size of a typical request and a memory budget:
+
+```sh
+# llama.cpp
+llama-server -m model.gguf -ngl 999 --flash-attn on --ctx-size 65536 --parallel 16 --kv-unified
+
+# inmoloc
+local-inference-server -m model.gguf -ngl 999 --flash-attn on --ctx-typical 4096 --vram-budget 22G
+```
+
+| llama.cpp | inmoloc |
+| --- | --- |
+| `llama-server`, `llama-cli`, ... | `local-inference-server`, `local-inference-cli`, ...; unified binary `local-inference` |
+| `--ctx-size N`: the KV cache size | The most the KV cache holds. Leave it out to size the cache from `--vram-budget` |
+| `--parallel N`: the number of slots | An upper limit; the budget runs as many requests at once as fit |
+| `--kv-unified-per-slot N` | `--ctx-typical N` |
+| `--kv-unified` | Always on; `--no-kv-unified` is refused |
+| `--fit-target` | Not used by the server: `--vram-budget` is the limit, with no margin |
+| `LLAMA_ARG_*` environment variables | `LOCAL_INFERENCE_ARG_*` |
+| `llamacpp:*` metrics | `local_inference:*` |
+| `ghcr.io/ggml-org/llama.cpp:server-cuda` | `ghcr.io/proafxin/inmoloc:latest` |
+
+The HTTP API, GGUF models and chat templates are the same. The C API is source compatible; bindings that copy the `llama_context_params` layout need updating. All option changes are listed in [differences from llama.cpp](docs/differences-from-llama.cpp.md#options).
 
 ## Documentation
 

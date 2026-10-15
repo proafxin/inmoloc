@@ -6,7 +6,7 @@ The images are published to the GitHub Container Registry on every release:
 
 | Image | Contents |
 | --- | --- |
-| `ghcr.io/proafxin/inmoloc:latest`, `:<version>` | `local-inference-server` built with CUDA 12.8, for NVIDIA GPUs from Turing (RTX 20xx, T4) to Blackwell (RTX 50xx) |
+| `ghcr.io/proafxin/inmoloc:latest`, `:<version>` | `local-inference-server` built with CUDA 12.8, for NVIDIA GPUs from Pascal (GTX 10xx, P40) to Blackwell (RTX 50xx) |
 | `ghcr.io/proafxin/inmoloc:cpu`, `:<version>-cpu` | `local-inference-server` for the CPU only |
 
 Both images start the server, listen on port 8080 on all interfaces and include the web UI. The CUDA image needs an NVIDIA driver of version 570 or newer on the host, and the [NVIDIA Container Toolkit](https://github.com/NVIDIA/nvidia-container-toolkit).
@@ -57,4 +57,4 @@ docker build -t inmoloc:cpu  -f .devops/cpu.Dockerfile .
 The default target is the server; `--target light` builds an image with `local-inference-cli` instead. Build arguments of the CUDA image:
 
 - `CUDA_VERSION`, default `12.8.1`: must be supported by the host driver.
-- `CUDA_DOCKER_ARCH`, default `75-real;80-real;86-real;89-real;90-real;120a-real`: the GPU architectures to compile for. Building for your GPU alone is much faster, for example `--build-arg CUDA_DOCKER_ARCH=120a-real` for an RTX 50xx or `86-real` for an RTX 30xx.
+- `CUDA_DOCKER_ARCH`, default `61-virtual;70-virtual;75-real;80-real;86-real;89-real;90-real;120a-real`: the GPU architectures to compile for (`virtual` entries are compiled by the driver on first start). Building for your GPU alone is much faster, for example `--build-arg CUDA_DOCKER_ARCH=120a-real` for an RTX 50xx or `86-real` for an RTX 30xx.

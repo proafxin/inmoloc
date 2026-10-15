@@ -17,7 +17,7 @@ inmoloc started from llama.cpp at commit 56381e407 (2026-09-12) and is maintaine
 | --- | --- | --- |
 | Number of requests at once | Fixed by `--parallel` | The most that fit the memory budget (`--vram-budget`), up to `--parallel` |
 | KV cache per request | With `--parallel N`, by default the context is split into N fixed parts; with `--kv-unified`, one cache shared by all requests | Always one cache shared by all requests; a request takes cells for the tokens it holds |
-| Memory projection | Fits the model and context to free memory with a margin (`--fit`) | Measures every part (weights, KV cache, per-request state, compute, draft, vision encoder, backend scratch) with no margin; `--fit` still chooses `--ctx-size` and `--gpu-layers` with its margin when they are not given |
+| Memory projection | Fits the model and context to free memory with a margin (`--fit`) | Measures every part (weights, KV cache, per-request state, compute, draft, vision encoder, backend scratch) with no margin, and sizes both the KV cache and the number of requests from the typical request size (`--ctx-typical`) |
 | Memory outside the buffers (CUDA pools, cuBLAS) | Grows while serving, when an operation first needs it | Sized from the worst-case graphs and reserved at startup |
 | KV cache full | Retries with smaller batches; when one token does not fit, every active request fails ("Context size has been exceeded.") and its cache is cleared | The newest requests give their cells back and are recomputed later (vLLM-style preemption); the others continue |
 | Prompt and generation in one batch | Prompt tokens fill the batch next to the generated tokens | Prompt tokens are admitted by their measured cost, which grows with depth (`--prompt-cap`) |
@@ -41,6 +41,41 @@ inmoloc started from llama.cpp at commit 56381e407 (2026-09-12) and is maintaine
 | Startup memory | Buffer sizes | The projection, what fills it, and the device memory in use after each stage |
 | Metrics | Throughput and request counts | Also preemptions, KV cells read against cells owned, idle cached tokens, lowest free device memory |
 | Stalls | - | `--slow-loop-ms` logs a time breakdown of slow server iterations |
+
+## Options
+
+Options of `local-inference-server` that are new, or that mean something else than in `llama-server`. All other options are the same.
+
+### New
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--vram-budget SIZE` | free device memory | Device memory the server may use, summed over the devices the model runs on |
+| `--ctx-typical N` | the longest request that fits | Tokens a typical request holds; sets the number of requests at once and the KV cache size |
+| `--prompt-cap N` | `-1` (one ubatch) | Prompt tokens per iteration while requests generate, weighted by their cost; `0` = no cap |
+| `--prefix-share`, `--no-prefix-share` | enabled | Let a new request start from another request's cached prefix |
+| `--prefix-share-min N` | `256` | Least number of tokens a shared prefix must save |
+| `--rs-rollback {snapshot,replay}` | `snapshot` | How recurrent state rolls back rejected speculative tokens |
+| `--gpu-wait {spin,yield,block}` | driver | How a thread waits for the GPU (CUDA) |
+| `--slow-loop-ms N` | `1000` | Log a time breakdown of server iterations slower than N ms; `0` = off |
+
+### Changed
+
+| Option | llama.cpp | inmoloc |
+| --- | --- | --- |
+| `-c`, `--ctx-size` | The KV cache size; `0` = the training context | The most the KV cache holds; not given, the cache is sized from `--vram-budget` and `--ctx-typical` |
+| `-np`, `--parallel` | Number of slots; auto = 4 | Upper limit on requests at once; the budget may lower it; auto = as many as fit |
+| `--fit`, `--fit-target` | Chooses the context size and GPU layers, leaving `--fit-target` (1 GiB) free per device | Chooses only the GPU layers, against `--vram-budget`, with no margin; `--fit-target` is not used by the server |
+| `-kvu`, `--kv-unified` | Off with an explicit `--parallel`, the context is split into fixed parts per slot | Always on; `--no-kv-unified` is refused |
+| `--cache-idle-slots` | Saves idle slots to the prompt cache when a new task starts | Saves an idle slot to the prompt cache when its memory is needed; until then it stays in the KV cache |
+
+### Removed
+
+| Option | Instead |
+| --- | --- |
+| `--kv-unified-per-slot N` | `--ctx-typical N` sizes the cache for requests of N tokens, and `--ctx-size` caps it |
+
+Environment variables start with `LOCAL_INFERENCE_` instead of `LLAMA_` (e.g. `LOCAL_INFERENCE_ARG_CTX_SIZE`).
 
 ## What stays the same
 

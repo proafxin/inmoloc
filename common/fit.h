@@ -45,6 +45,10 @@ common_params_fit_status common_fit_params(
 //   - budget 0 means the free memory of the devices, and a larger budget than that is lowered to it; a model on the
 //     host alone is left as is
 //   - budget_used is memory the caller takes from the same budget, e.g. a vision encoder
+//   - size_ctx: the cache is sized too, so that n_seq_max typical requests of n_ctx_typical tokens fit (0 = the longest
+//     request the budget holds, i.e. the largest cache of one sequence up to the training context); the memory left
+//     after the cap on sequences grows the cache, up to n_seq_max training contexts; cparams->n_ctx on entry, if not 0,
+//     is the most the cache holds
 //   - returns false when not even one sequence fits, leaving cparams unchanged
 //   - predicted and free_before, when given, report the memory the configuration is projected to use and the free
 //     device memory it was measured against, so that the caller can compare them with what is used in the end
@@ -55,6 +59,8 @@ bool common_budget_params(
  const common_fit_extra_model * extra,
                          size_t   budget,
                          size_t   budget_used,
+                       uint32_t   n_ctx_typical,
+                           bool   size_ctx,
                  ggml_log_level   log_level,
                        size_t *   predicted = nullptr,
                        size_t *   free_before = nullptr);

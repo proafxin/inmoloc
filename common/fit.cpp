@@ -1106,6 +1106,8 @@ bool common_budget_params(
  const common_fit_extra_model * extra,
                          size_t   budget,
                          size_t   budget_used,
+                       uint32_t   n_ctx_typical,
+                           bool   size_ctx,
                  ggml_log_level   log_level,
                        size_t *   predicted,
                        size_t *   free_before) {
@@ -1166,8 +1168,9 @@ bool common_budget_params(
         }
     };
 
-    const auto measure = [&](uint32_t n_seq, measured & res) {
+    const auto measure = [&](uint32_t n_seq, uint32_t n_ctx, measured & res) {
         llama_context_params cp = *cparams;
+        cp.n_ctx      = n_ctx;
         cp.n_seq_max  = n_seq;
         cp.n_rs_cells = 0; // one recurrent state per sequence
 
@@ -1231,35 +1234,109 @@ bool common_budget_params(
 
     const size_t avail = budget > budget_used ? budget - budget_used : 0;
 
-    const uint32_t n_seq_cap = std::max<uint32_t>(1, cparams->n_seq_max);
+    const uint32_t n_seq_cap   = std::max<uint32_t>(1, cparams->n_seq_max);
+    const uint32_t n_ctx_train = llama_model_n_ctx_train(model);
+
+    // size_ctx: the tokens a typical request holds, --ctx-typical, else the longest request; n_ctx on entry (--ctx-size)
+    // is the most the cache holds, 0 = no most
+    uint32_t       typical   = n_ctx_typical > 0 ? n_ctx_typical : n_ctx_train;
+    const uint32_t n_ctx_cap = cparams->n_ctx > 0 ? cparams->n_ctx : UINT32_MAX;
+
+    const auto pad_ctx = [&](uint64_t n) {
+        return (uint32_t) std::min<uint64_t>(GGML_PAD(n, 256), std::min<uint64_t>(n_ctx_cap, UINT32_MAX/256*256));
+    };
+    // the cache for n_seq typical requests, and the most that n_seq requests can use
+    const auto ctx_for = [&](uint32_t n_seq) {
+        return size_ctx ? pad_ctx((uint64_t) n_seq*typical) : cparams->n_ctx;
+    };
+    const auto ctx_most = [&](uint32_t n_seq) {
+        return pad_ctx((uint64_t) n_seq*n_ctx_train);
+    };
+
+    // the largest cache in [ctx_lo, ctx_hi] that n_seq sequences fit with, 0 if not even ctx_lo fits; the memory of the
+    // cache is linear in its size, so the size is interpolated from the two ends and then checked
+    const auto largest_ctx = [&](uint32_t n_seq, uint32_t ctx_lo, uint32_t ctx_hi, measured & res) -> uint32_t {
+        measured m_hi;
+        if (measure(n_seq, ctx_hi, m_hi) && m_hi.total() <= avail) {
+            res = m_hi;
+            return ctx_hi;
+        }
+        measured m_lo;
+        if (ctx_hi <= ctx_lo || !measure(n_seq, ctx_lo, m_lo) || m_lo.total() > avail) {
+            return 0;
+        }
+        res = m_lo;
+        if (m_hi.total() <= m_lo.total()) {
+            return ctx_lo;
+        }
+        const double per_tok = (double) (m_hi.total() - m_lo.total())/(ctx_hi - ctx_lo);
+
+        uint32_t cur = (uint32_t) std::min<uint64_t>(ctx_hi, ctx_lo + (uint64_t) ((avail - m_lo.total())/per_tok));
+        cur -= cur % 256;
+        while (cur > ctx_lo) {
+            measured m;
+            if (measure(n_seq, cur, m) && m.total() <= avail) {
+                res = m;
+                return cur;
+            }
+            cur -= std::max<uint32_t>(256, (cur - ctx_lo)/8);
+            cur -= cur % 256;
+        }
+        return ctx_lo;
+    };
+
+    const char * func = __func__;
+
+    const auto print = [&](const char * what, uint32_t n_seq, uint32_t n_ctx, const measured & m) {
+        LOG_INF("%s: %s: %u sequences, %u tokens of context: model %.0f + context %.0f + compute %.0f + draft %.0f"
+                " + other %.0f = %.0f MiB of %.0f MiB\n", func, what, n_seq, n_ctx,
+                m.main.model/MiB, m.main.context/MiB, m.main.compute/MiB, m.dft.total()/MiB,
+                budget_used/MiB, (m.total() + budget_used)/MiB, budget/MiB);
+    };
+
+    // the longest request this budget holds: the largest cache of one sequence, up to the training context
+    uint32_t n_ctx_longest = 0;
+    if (size_ctx) {
+        measured m;
+        n_ctx_longest = largest_ctx(1, std::min<uint32_t>(256, n_ctx_cap), ctx_most(1), m);
+        if (n_ctx_longest == 0) {
+            restore_log();
+            LOG_ERR("%s: not even one sequence of 256 tokens fits in the memory budget of %.0f MiB%s\n", __func__,
+                    budget/MiB, budget_auto ? "" : ", raise --vram-budget");
+            cleanup();
+            return false;
+        }
+        if (typical > n_ctx_longest) {
+            if (n_ctx_typical > 0) {
+                restore_log();
+                LOG_ERR("%s: a typical request of %u tokens (--ctx-typical) does not fit, the longest request this budget "
+                        "holds is %u tokens%s\n", __func__, typical, n_ctx_longest,
+                        n_ctx_cap < UINT32_MAX ? " (at most --ctx-size)" : "");
+                cleanup();
+                return false;
+            }
+            typical = n_ctx_longest;
+        }
+    }
 
     measured m_one;
-    if (!measure(1, m_one)) {
+    if (!measure(1, ctx_for(1), m_one)) {
         cleanup();
         LOG_ERR("%s: failed to create a context to measure its memory\n", __func__);
         return false;
     }
 
-    const char * func = __func__;
-
-    const auto print = [&](const char * what, uint32_t n_seq, const measured & m) {
-        LOG_INF("%s: %s: %u sequences, %u tokens of context: model %.0f + context %.0f + compute %.0f + draft %.0f"
-                " + other %.0f = %.0f MiB of %.0f MiB\n", func, what, n_seq, cparams->n_ctx,
-                m.main.model/MiB, m.main.context/MiB, m.main.compute/MiB, m.dft.total()/MiB,
-                budget_used/MiB, (m.total() + budget_used)/MiB, budget/MiB);
-    };
-
     if (m_one.total() > avail) {
         restore_log();
-        print("does not fit", 1, m_one);
+        print("does not fit", 1, ctx_for(1), m_one);
         LOG_ERR("%s: not even one sequence fits in the memory budget, lower --ctx-size%s\n", __func__,
                 budget_auto ? "" : " or raise --vram-budget");
         cleanup();
         return false;
     }
 
-    // the memory grows with the number of sequences (state, compute buffers), so the largest that fits is found by
-    // bisection between one sequence and the cap
+    // the memory grows with the number of sequences (state, compute buffers, and with size_ctx the cache of their typical
+    // requests), so the largest that fits is found by bisection between one sequence and the cap
     uint32_t lo = 1;
     uint32_t hi = n_seq_cap;
 
@@ -1269,7 +1346,7 @@ bool common_budget_params(
         const uint32_t mid = lo + (hi - lo + 1)/2;
 
         measured m;
-        if (measure(mid, m) && m.total() <= avail) {
+        if (measure(mid, ctx_for(mid), m) && m.total() <= avail) {
             lo     = mid;
             m_best = m;
         } else {
@@ -1277,12 +1354,29 @@ bool common_budget_params(
         }
     }
 
+    uint32_t n_ctx = ctx_for(lo);
+
+    // the memory left after the cap on sequences goes to the cache, up to what the sequences can use
+    if (size_ctx && ctx_most(lo) > n_ctx) {
+        measured m;
+        const uint32_t n_ctx_more = largest_ctx(lo, n_ctx, ctx_most(lo), m);
+        if (n_ctx_more > n_ctx) {
+            n_ctx  = n_ctx_more;
+            m_best = m;
+        }
+    }
+
     restore_log();
 
-    print(lo < n_seq_cap ? "limited by the budget" : "at the requested maximum", lo, m_best);
-    if (lo > 1) {
+    print(lo < n_seq_cap ? "limited by the budget" : "at the requested maximum", lo, n_ctx, m_best);
+    if (size_ctx) {
+        LOG_INF("%s: the longest request this budget holds is %u tokens%s; a typical request holds %u tokens%s, the "
+                "cache holds %u tokens: %u per sequence\n", __func__, n_ctx_longest,
+                n_ctx_cap < UINT32_MAX ? " (at most --ctx-size)" : "", typical,
+                n_ctx_typical > 0 ? " (--ctx-typical)" : "", n_ctx, n_ctx/lo);
+    } else if (lo > 1) {
         LOG_INF("%s: each sequence adds %.0f MiB (its state and compute), the context of %u tokens takes %.0f MiB\n",
-                __func__, (double) (m_best.total() - m_one.total())/(lo - 1)/MiB, cparams->n_ctx,
+                __func__, (double) (m_best.total() - m_one.total())/(lo - 1)/MiB, n_ctx,
                 (m_one.main.context + m_one.dft.context)/MiB);
     }
 
@@ -1300,6 +1394,7 @@ bool common_budget_params(
                 free_sum > free_after ? (free_sum - free_after)/MiB : 0.0);
     }
 
+    cparams->n_ctx      = n_ctx;
     cparams->n_seq_max  = lo;
     cparams->n_rs_cells = 0;
 

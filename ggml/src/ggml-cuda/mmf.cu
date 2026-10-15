@@ -30,7 +30,7 @@ void ggml_cuda_mul_mat_f(ggml_backend_cuda_context & ctx, const ggml_tensor * sr
     GGML_ASSERT(        nb0        == ts_dst);
 
     const float   * src1_d =       (const float   *) src1->data;
-    const int32_t *  ids_d = ids ? (const int32_t *)  ids->data : nullptr;
+    const int32_t *  ids_d = ggml_cuda_ids_data(ids);
     float         *  dst_d =       (float         *)  dst->data;
 
     const int64_t s01 = src0->nb[1] / ts_src0;

@@ -194,6 +194,16 @@ void ggml_cuda_error(const char * stmt, const char * func, const char * file, in
 // and its tensors may have no memory yet, so a failing call is one refused for a placeholder address, not an error
 extern thread_local bool ggml_cuda_sizing;
 
+// the expert ids of a mul_mat_id; a graph that is sized may have no memory yet, and a null pointer would make the op a
+// mul_mat, so the ids get a placeholder address that is never read
+static inline const int32_t * ggml_cuda_ids_data(const ggml_tensor * ids) {
+    static const int32_t placeholder = 0;
+    if (ids == nullptr) {
+        return nullptr;
+    }
+    return ids->data == nullptr && ggml_cuda_sizing ? &placeholder : (const int32_t *) ids->data;
+}
+
 #define CUDA_CHECK_GEN(err, success, error_fn)                                      \
      do {                                                                           \
         auto err_ = (err);                                                          \

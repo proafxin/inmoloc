@@ -2098,8 +2098,17 @@ static void ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
     ggml_cuda_pool_alloc<char>  dst_sorted(ctx.pool(), ne2 *n_expert_used* ne0*ts_dst_sorted);
 
     std::vector<char> ids_host(ggml_nbytes(ids));
-    CUDA_CHECK(cudaMemcpyAsync(ids_host.data(), ids->data, ggml_nbytes(ids), cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));
+    if (ggml_cuda_sizing) {
+        // a graph that is sized has no ids to read: slot iex of every token goes to expert iex, the most tokens an expert gets
+        for (int64_t i12 = 0; i12 < ne12; ++i12) {
+            for (int64_t iex = 0; iex < n_expert_used; ++iex) {
+                *(int32_t *)(ids_host.data() + i12*ids->nb[1] + iex*ids->nb[0]) = (int32_t) (iex % ne02);
+            }
+        }
+    } else {
+        CUDA_CHECK(cudaMemcpyAsync(ids_host.data(), ids->data, ggml_nbytes(ids), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
 
     for (int64_t i02 = 0; i02 < ne02; ++i02) { // expert matrices
         for (int64_t i12 = 0; i12 < ne12; ++i12) { // tokens
@@ -4670,7 +4679,14 @@ static void ggml_backend_cuda_set_wait(enum ggml_backend_wait wait) {
     const ggml_cuda_device_info & info = ggml_cuda_info();
     for (int id = 0; id < info.physical_device_count; ++id) {
         CUDA_CHECK(cudaSetDevice(id));
-        CUDA_CHECK(cudaSetDeviceFlags(flags));
+        // CUDA 12 overwrites the flags of an initialized device, older versions refuse to change them
+        const cudaError_t err = cudaSetDeviceFlags(flags);
+        if (err == cudaErrorSetOnActiveProcess) {
+            (void) cudaGetLastError();
+            GGML_LOG_WARN("%s: device %d is already in use, its wait for the GPU is unchanged\n", __func__, id);
+            continue;
+        }
+        CUDA_CHECK(err);
     }
 }
 #endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)

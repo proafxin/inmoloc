@@ -3845,10 +3845,7 @@ llama_context_params llama_context_default_params() {
         /*.n_ubatch                    =*/ 512,
         /*.n_seq_max                   =*/ 1,
         /*.n_rs_seq                    =*/ 0,
-        /*.n_rs_cells                  =*/ 0,
-        /*.rs_rollback                 =*/ LLAMA_RS_ROLLBACK_SNAPSHOT,
-        /*.backend_priority            =*/ GGML_BACKEND_PRIORITY_NORMAL,
-        /*.n_outputs_max               =*/ 0,
+        /*.n_outputs_max              =*/ 0,
         /*.n_outputs_max_per_seq       =*/ 1,
         /*.n_threads                   =*/ GGML_DEFAULT_N_THREADS, // TODO: better default
         /*.n_threads_batch             =*/ GGML_DEFAULT_N_THREADS,
@@ -3880,6 +3877,9 @@ llama_context_params llama_context_default_params() {
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
         /*.ctx_other                   =*/ nullptr,
+        /*.n_rs_cells                  =*/ 0,
+        /*.rs_rollback                 =*/ LLAMA_RS_ROLLBACK_SNAPSHOT,
+        /*.backend_priority            =*/ GGML_BACKEND_PRIORITY_NORMAL,
     };
 
     return result;

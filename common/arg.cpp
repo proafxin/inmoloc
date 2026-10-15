@@ -1627,7 +1627,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_examples({LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-c", "--ctx-size"}, "N",
-        string_format("size of the prompt context (default: %d, 0 = loaded from model)", params.n_ctx),
+        string_format("size of the prompt context (default: %d, 0 = loaded from model); in the server, the most the KV cache "
+                      "holds, 0 = sized from --vram-budget and --ctx-typical", params.n_ctx),
         [](common_params & params, int value) {
             params.n_ctx = value;
             if (value == 0) {
@@ -1713,7 +1714,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"-kvu", "--kv-unified"},
         {"-no-kvu", "--no-kv-unified"},
-        "the requests processed at once always share one KV cache of --ctx-size tokens; accepted for compatibility",
+        "the requests processed at once always share one KV cache; accepted for compatibility",
         [](common_params & params, bool value) {
             if (!value) {
                 throw std::invalid_argument("error: the server always shares one KV cache between the requests it processes at once, --no-kv-unified is not supported\n");
@@ -1762,7 +1763,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"--cache-idle-slots"},
         {"--no-cache-idle-slots"},
-        "save idle slots to the prompt cache on new task, and clear them when using unified KV (default: enabled, requires cache-ram)",
+        "save an idle slot to the prompt cache when its memory is needed, by a new task or to free KV cells; until then it stays in the KV cache (default: enabled, requires cache-ram)",
         [](common_params & params, bool value) {
             params.cache_idle_slots = value;
         }
@@ -2573,7 +2574,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         // this is to make sure this option appears in the server-specific section of the help message
         add_opt(common_arg(
             {"-np", "--parallel"}, "N",
-            string_format("number of server slots (default: %d, -1 = auto)", params.n_parallel),
+            string_format("most requests processed at once; the memory budget may lower it (default: %d, -1 = as many as fit)", params.n_parallel),
             [](common_params & params, int value) {
                 if (value == 0) {
                     throw std::invalid_argument("error: invalid value for n_parallel\n");
@@ -2593,9 +2594,10 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"--vram-budget"}, "SIZE",
         "device memory the server may use, summed over the devices the model runs on, e.g. 10G, 10240M or 10240 (MiB);\n"
-        "the weights, the vision encoder, the draft model, a unified KV cache of --ctx-size tokens and the compute\n"
-        "buffers are measured, and the number of requests processed at once becomes the largest that fits, at most\n"
-        "--parallel; the per-request memory (e.g. recurrent state) depends on --rs-rollback\n"
+        "the weights, the vision encoder, the draft model, the KV cache, the per-request state and the compute buffers\n"
+        "are measured; the server then runs the most requests at once (at most --parallel) whose typical requests\n"
+        "(--ctx-typical) fit in the KV cache, and gives the memory left to the cache (at most --ctx-size); the\n"
+        "per-request memory (e.g. recurrent state) depends on --rs-rollback\n"
         "(default: the free device memory; a larger budget is lowered to it)",
         [](common_params & params, const std::string & value) {
             size_t pos = 0;
@@ -2616,6 +2618,18 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.vram_budget = (size_t) (num*mul);
         }
     ));
+    add_opt(common_arg(
+        {"--ctx-typical"}, "N",
+        "tokens a typical request holds (prompt and output); the memory budget then runs the most requests at once whose\n"
+        "typical requests fit in the KV cache, and gives the memory left to the cache\n"
+        "(default: the longest request the budget holds)",
+        [](common_params & params, int value) {
+            if (value < 1) {
+                throw std::invalid_argument("error: --ctx-typical must be positive\n");
+            }
+            params.n_ctx_typical = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--rs-rollback"}, "{snapshot,replay}",
         "how the recurrent state of a hybrid or recurrent model rolls back rejected speculative tokens:\n"

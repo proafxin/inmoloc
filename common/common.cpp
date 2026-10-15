@@ -1330,29 +1330,72 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
         cparams.kv_unified = true;
     }
 
+    // with the cache sized by the budget, fit only places the layers: for the cache of one typical request, against the
+    // budget and without a margin
+    const bool fit_layers_only = params.vram_budget_ctx && !model_only;
+
     if (params.fit_params) {
         COM_TRC("%s", "fitting params to device memory ...\n");
         COM_TRC("%s", "(for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)\n");
 
+        std::vector<size_t> targets = params.fit_params_target;
+        const uint32_t n_ctx_user = cparams.n_ctx;
+
+        if (fit_layers_only) {
+            std::fill(targets.begin(), targets.end(), 0);
+
+            // a budget below the free memory of a single device leaves the rest free
+            std::vector<ggml_backend_dev_t> devs = params.devices;
+            if (devs.empty()) {
+                for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+                    ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+                    if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU) {
+                        devs.push_back(dev);
+                    }
+                }
+            }
+            devs.erase(std::remove(devs.begin(), devs.end(), nullptr), devs.end());
+            if (params.vram_budget > 0 && devs.size() == 1) {
+                size_t free  = 0;
+                size_t total = 0;
+                ggml_backend_dev_memory(devs[0], &free, &total);
+                targets[0] = free > params.vram_budget ? free - params.vram_budget : 0;
+            }
+
+            // fit_params_min_ctx is negative (UINT32_MAX) after -c 0
+            cparams.n_ctx = params.n_ctx_typical > 0 ? params.n_ctx_typical : params.fit_params_min_ctx > 0 ? params.fit_params_min_ctx : 4096;
+            if (n_ctx_user > 0) {
+                cparams.n_ctx = std::min(cparams.n_ctx, n_ctx_user);
+            }
+        }
+
         common_fit_params(params.model.path.c_str(), &mparams, &cparams,
             params.tensor_split,
             params.tensor_buft_overrides.data(),
-            params.fit_params_target.data(),
+            targets.data(),
             params.fit_params_min_ctx,
             has_draft || spec_mtp ? &extra : nullptr,
             log_level_fit);
+
+        if (fit_layers_only) {
+            cparams.n_ctx = n_ctx_user;
+        }
     }
 
     // the number of requests processed at once: the most that fit in the memory budget, at most --parallel
     if (!model_only) {
         if (!common_budget_params(params.model.path.c_str(), &mparams, &cparams,
                 has_draft || spec_mtp ? &extra : nullptr, params.vram_budget, params.vram_budget_used,
+                params.n_ctx_typical, params.vram_budget_ctx,
                 log_level_fit,
                 &params.vram_predicted, &params.vram_free_at_start)) {
             return;
         }
 
         params.n_parallel = (int32_t) cparams.n_seq_max;
+        if (params.vram_budget_ctx) {
+            params.n_ctx = (int32_t) cparams.n_ctx;
+        }
     }
 
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);

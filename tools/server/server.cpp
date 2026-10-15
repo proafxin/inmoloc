@@ -155,6 +155,9 @@ int llama_server(common_params & params, int argc, char ** argv) {
 
             params.n_parallel = (int32_t) llama_max_parallel_sequences();
         }
+
+        // the memory budget sizes the KV cache too, see --ctx-typical; --ctx-size is then the most it holds
+        params.vram_budget_ctx = true;
     }
 
     // for consistency between server router mode and single-model mode, we set the same model name as alias

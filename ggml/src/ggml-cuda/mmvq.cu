@@ -1425,7 +1425,7 @@ void ggml_cuda_mul_mat_vec_q(
     GGML_ASSERT(!ids || ne12 <= MMVQ_MAX_BATCH_SIZE);
 
     const float   * src1_d =       (const float   *) src1->data;
-    const int32_t *  ids_d = ids ? (const int32_t *)  ids->data : nullptr;
+    const int32_t *  ids_d = ggml_cuda_ids_data(ids);
     float         *  dst_d =       (float         *)  dst->data;
 
     ggml_cuda_mm_fusion_args_device fusion_local{};
