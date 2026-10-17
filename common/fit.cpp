@@ -1221,18 +1221,34 @@ bool common_budget_params(
         return true;
     }
 
+    // what the process already holds on the devices (the CUDA context, loaded kernels and libraries) stays for its whole
+    // life, so it comes out of the budget; it is part of the budget in the first place when the budget is the free memory
+    size_t     own_start = 0;
+    const bool own       = llama_model_n_devices(model) > 0 && common_device_memory_own(model, own_start);
+    if (budget_auto) {
+        budget += own_start;
+    }
+
     if (budget_auto) {
         LOG_INF("%s: memory budget: %.0f MiB, the free device memory\n", __func__, budget/MiB);
-    } else if (llama_model_n_devices(model) > 0 && budget > free_sum) {
+    } else if (llama_model_n_devices(model) > 0 && budget > free_sum + own_start) {
         // a budget can only be used as far as the devices have it free: other processes may hold the rest
         LOG_WRN("%s: memory budget: %.0f MiB, the free device memory, less than the --vram-budget of %.0f MiB\n",
-                __func__, free_sum/MiB, budget/MiB);
-        budget = free_sum;
+                __func__, (free_sum + own_start)/MiB, budget/MiB);
+        budget = free_sum + own_start;
     } else {
         LOG_INF("%s: memory budget: %.0f MiB, the --vram-budget\n", __func__, budget/MiB);
     }
 
-    const size_t avail = budget > budget_used ? budget - budget_used : 0;
+    // the memory of the process outside the contexts it creates; without a per-process measure, only what the dry runs
+    // leave in use is seen (from the free memory of the devices, so other processes starting at the same time count too)
+    size_t runtime = own_start;
+
+    size_t avail = 0;
+    const auto set_avail = [&]() {
+        avail = budget > budget_used + runtime ? budget - budget_used - runtime : 0;
+    };
+    set_avail();
 
     const uint32_t n_seq_cap   = std::max<uint32_t>(1, cparams->n_seq_max);
     const uint32_t n_ctx_train = llama_model_n_ctx_train(model);
@@ -1289,87 +1305,191 @@ bool common_budget_params(
 
     const auto print = [&](const char * what, uint32_t n_seq, uint32_t n_ctx, const measured & m) {
         LOG_INF("%s: %s: %u sequences, %u tokens of context: model %.0f + context %.0f + compute %.0f + draft %.0f"
-                " + other %.0f = %.0f MiB of %.0f MiB\n", func, what, n_seq, n_ctx,
+                " + other %.0f + runtime %.0f = %.0f MiB of %.0f MiB\n", func, what, n_seq, n_ctx,
                 m.main.model/MiB, m.main.context/MiB, m.main.compute/MiB, m.dft.total()/MiB,
-                budget_used/MiB, (m.total() + budget_used)/MiB, budget/MiB);
+                budget_used/MiB, runtime/MiB, (m.total() + budget_used + runtime)/MiB, budget/MiB);
     };
 
-    // the longest request this budget holds: the largest cache of one sequence, up to the training context
     uint32_t n_ctx_longest = 0;
-    if (size_ctx) {
-        measured m;
-        n_ctx_longest = largest_ctx(1, std::min<uint32_t>(256, n_ctx_cap), ctx_most(1), m);
-        if (n_ctx_longest == 0) {
-            restore_log();
-            LOG_ERR("%s: not even one sequence of 256 tokens fits in the memory budget of %.0f MiB%s\n", __func__,
-                    budget/MiB, budget_auto ? "" : ", raise --vram-budget");
-            cleanup();
-            return false;
-        }
-        if (typical > n_ctx_longest) {
-            if (n_ctx_typical > 0) {
+    uint32_t n_ctx         = 0;
+    uint32_t lo            = 1;
+    bool     shared        = false; // no memory per sequence: the sequences share the cache, see size_all
+
+    measured m_one;
+    measured m_best;
+
+    // sizes the sequences and the cache to avail; false when not even one sequence fits (logged and cleaned up)
+    const auto size_all = [&]() -> bool {
+        typical = n_ctx_typical > 0 ? n_ctx_typical : n_ctx_train;
+
+        // the longest request this budget holds: the largest cache of one sequence, up to the training context
+        n_ctx_longest = 0;
+        if (size_ctx) {
+            measured m;
+            n_ctx_longest = largest_ctx(1, std::min<uint32_t>(256, n_ctx_cap), ctx_most(1), m);
+            if (n_ctx_longest == 0) {
                 restore_log();
-                LOG_ERR("%s: a typical request of %u tokens (--ctx-typical) does not fit, the longest request this budget "
-                        "holds is %u tokens%s\n", __func__, typical, n_ctx_longest,
-                        n_ctx_cap < UINT32_MAX ? " (at most --ctx-size)" : "");
+                LOG_ERR("%s: not even one sequence of 256 tokens fits in the memory budget of %.0f MiB%s\n", func,
+                        budget/MiB, budget_auto ? "" : ", raise --vram-budget");
                 cleanup();
                 return false;
             }
-            typical = n_ctx_longest;
+            if (typical > n_ctx_longest) {
+                if (n_ctx_typical > 0) {
+                    restore_log();
+                    LOG_ERR("%s: a typical request of %u tokens (--ctx-typical) does not fit, the longest request this "
+                            "budget holds is %u tokens%s\n", func, typical, n_ctx_longest,
+                            n_ctx_cap < UINT32_MAX ? " (at most --ctx-size)" : "");
+                    cleanup();
+                    return false;
+                }
+                typical = n_ctx_longest;
+            }
         }
-    }
 
-    measured m_one;
-    if (!measure(1, ctx_for(1), m_one)) {
-        cleanup();
-        LOG_ERR("%s: failed to create a context to measure its memory\n", __func__);
+        if (!measure(1, ctx_for(1), m_one)) {
+            cleanup();
+            LOG_ERR("%s: failed to create a context to measure its memory\n", func);
+            return false;
+        }
+
+        if (m_one.total() > avail) {
+            restore_log();
+            print("does not fit", 1, ctx_for(1), m_one);
+            LOG_ERR("%s: not even one sequence fits in the memory budget, lower --ctx-size%s\n", func,
+                    budget_auto ? "" : " or raise --vram-budget");
+            cleanup();
+            return false;
+        }
+
+        // a model without memory per sequence (no recurrent state, no sliding-window cache) holds the same cache for any
+        // number of sequences: a slot then costs only its share of the compute buffers, so all the slots run and share
+        // the whole cache, and how many requests run at once follows their sizes (tasks are admitted by free KV cells)
+        // memory per sequence shows as cache memory that grows with the sequences at the same cache size; it is checked
+        // at 2, 4, 8 and 16 sequences, as a small cost per sequence can hide in the padding of a cache for a few of them;
+        // without it, the most sequences whose compute buffers fit next to a cache of one typical request run, at most
+        // the cap (the dry runs allocate nothing, so measuring at the cap costs nothing whatever the device)
+        shared = false;
+        const auto no_memory_per_seq = [&]() {
+            for (uint32_t n = 2; n <= std::min<uint32_t>(16, n_seq_cap); n *= 2) {
+                measured m;
+                if (!measure(n, ctx_for(1), m) || m.main.context + m.dft.context != m_one.main.context + m_one.dft.context) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (size_ctx && n_seq_cap > 1) {
+            if (no_memory_per_seq()) {
+                uint32_t n_lo = 1;
+                uint32_t n_hi = n_seq_cap;
+
+                measured m_lo = m_one;
+                measured m_cap;
+                if (measure(n_seq_cap, ctx_for(1), m_cap) && m_cap.total() <= avail) {
+                    n_lo = n_seq_cap;
+                    m_lo = m_cap;
+                }
+                while (n_lo < n_hi) {
+                    const uint32_t mid = n_lo + (n_hi - n_lo + 1)/2;
+
+                    measured m;
+                    if (measure(mid, ctx_for(1), m) && m.total() <= avail) {
+                        n_lo = mid;
+                        m_lo = m;
+                    } else {
+                        n_hi = mid - 1;
+                    }
+                }
+
+                measured m;
+                const uint32_t ctx = largest_ctx(n_lo, ctx_for(1), ctx_most(n_lo), m);
+
+                lo     = n_lo;
+                n_ctx  = ctx > 0 ? ctx : ctx_for(1);
+                m_best = ctx > 0 ? m : m_lo;
+                shared = true;
+                return true;
+            }
+        }
+
+        // the memory grows with the number of sequences (state, compute buffers, and with size_ctx the cache of their
+        // typical requests), so the largest that fits is found by bisection between one sequence and the cap
+        lo = 1;
+        uint32_t hi = n_seq_cap;
+
+        m_best = m_one;
+
+        while (lo < hi) {
+            const uint32_t mid = lo + (hi - lo + 1)/2;
+
+            measured m;
+            if (measure(mid, ctx_for(mid), m) && m.total() <= avail) {
+                lo     = mid;
+                m_best = m;
+            } else {
+                hi = mid - 1;
+            }
+        }
+
+        n_ctx = ctx_for(lo);
+
+        // the memory left after the cap on sequences goes to the cache, up to what the sequences can use
+        if (size_ctx && ctx_most(lo) > n_ctx) {
+            measured m;
+            const uint32_t n_ctx_more = largest_ctx(lo, n_ctx, ctx_most(lo), m);
+            if (n_ctx_more > n_ctx) {
+                n_ctx  = n_ctx_more;
+                m_best = m;
+            }
+        }
+
+        return true;
+    };
+
+    if (!size_all()) {
         return false;
     }
 
-    if (m_one.total() > avail) {
-        restore_log();
-        print("does not fit", 1, ctx_for(1), m_one);
-        LOG_ERR("%s: not even one sequence fits in the memory budget, lower --ctx-size%s\n", __func__,
-                budget_auto ? "" : " or raise --vram-budget");
-        cleanup();
-        return false;
-    }
-
-    // the memory grows with the number of sequences (state, compute buffers, and with size_ctx the cache of their typical
-    // requests), so the largest that fits is found by bisection between one sequence and the cap
-    uint32_t lo = 1;
-    uint32_t hi = n_seq_cap;
-
-    measured m_best = m_one;
-
-    while (lo < hi) {
-        const uint32_t mid = lo + (hi - lo + 1)/2;
-
-        measured m;
-        if (measure(mid, ctx_for(mid), m) && m.total() <= avail) {
-            lo     = mid;
-            m_best = m;
+    // the dry runs hold no memory once their contexts are freed, but what they loaded stays for the life of the process:
+    // kernels loaded on first use and libraries initialized (e.g. cuBLAS); when the sizing no longer fits with it, the
+    // sizing runs again, with the kernels and libraries loaded by now
+    {
+        size_t runtime_now = runtime;
+        if (own) {
+            size_t used = 0;
+            if (common_device_memory_own(model, used)) {
+                runtime_now = std::max(runtime_now, used);
+            }
         } else {
-            hi = mid - 1;
+            const size_t free_after = common_device_memory_free(model);
+            runtime_now = free_sum > free_after ? free_sum - free_after : 0;
         }
-    }
 
-    uint32_t n_ctx = ctx_for(lo);
+        if (runtime_now > runtime) {
+            const size_t loaded = runtime_now - runtime;
 
-    // the memory left after the cap on sequences goes to the cache, up to what the sequences can use
-    if (size_ctx && ctx_most(lo) > n_ctx) {
-        measured m;
-        const uint32_t n_ctx_more = largest_ctx(lo, n_ctx, ctx_most(lo), m);
-        if (n_ctx_more > n_ctx) {
-            n_ctx  = n_ctx_more;
-            m_best = m;
+            runtime = runtime_now;
+            set_avail();
+
+            if (m_best.total() > avail) {
+                LOG_DBG("%s: the dry runs loaded %.0f MiB that stay in use, sizing again\n", __func__, loaded/MiB);
+                if (!size_all()) {
+                    return false;
+                }
+            }
         }
     }
 
     restore_log();
 
     print(lo < n_seq_cap ? "limited by the budget" : "at the requested maximum", lo, n_ctx, m_best);
-    if (size_ctx) {
+    if (shared) {
+        LOG_INF("%s: the model holds no memory per sequence: the %u sequences share a cache of %u tokens, so how many "
+                "requests run at once follows their sizes: %u of %u tokens (--ctx-typical), more of smaller ones, up to "
+                "%u; the longest request this budget holds is %u tokens\n", __func__, lo, n_ctx,
+                std::min(lo, n_ctx/std::max<uint32_t>(1, typical)), typical, lo, n_ctx_longest);
+    } else if (size_ctx) {
         LOG_INF("%s: the longest request this budget holds is %u tokens%s; a typical request holds %u tokens%s, the "
                 "cache holds %u tokens: %u per sequence\n", __func__, n_ctx_longest,
                 n_ctx_cap < UINT32_MAX ? " (at most --ctx-size)" : "", typical,
@@ -1379,27 +1499,16 @@ bool common_budget_params(
                 __func__, (double) (m_best.total() - m_one.total())/(lo - 1)/MiB, n_ctx,
                 (m_one.main.context + m_one.dft.context)/MiB);
     }
-
-    // the dry runs hold no memory once their contexts are freed, but what they loaded stays: kernels loaded on first
-    // use and libraries initialized (e.g. cuBLAS); taken after the free memory was measured, so outside the projection
-    {
-        size_t free_after = 0;
-        for (int i = 0; i < llama_model_n_devices(model); i++) {
-            size_t free  = 0;
-            size_t total = 0;
-            ggml_backend_dev_memory(llama_model_get_device(model, i), &free, &total);
-            free_after += free;
-        }
-        LOG_INF("%s: the dry runs left %.0f MiB of device memory in use\n", __func__,
-                free_sum > free_after ? (free_sum - free_after)/MiB : 0.0);
-    }
+    LOG_INF("%s: runtime: %.0f MiB of device memory the process holds outside its contexts (CUDA context, kernels, "
+            "libraries), %s\n", __func__, runtime/MiB,
+            own ? "measured for this process" : "seen as the free memory the dry runs left in use, other processes included");
 
     cparams->n_ctx      = n_ctx;
     cparams->n_seq_max  = lo;
     cparams->n_rs_cells = 0;
 
     if (predicted) {
-        *predicted = m_best.total() + budget_used;
+        *predicted = m_best.total() + budget_used + runtime;
     }
     if (free_before) {
         *free_before = free_sum;
@@ -1410,14 +1519,61 @@ bool common_budget_params(
     return true;
 }
 
+bool common_device_memory_own(const llama_model * model, size_t & used) {
+    used = 0;
+
+    for (int i = 0; i < llama_model_n_devices(model); i++) {
+        ggml_backend_dev_t dev = llama_model_get_device(model, i);
+        ggml_backend_reg_t reg = ggml_backend_dev_backend_reg(dev);
+
+        auto * fn = reg ? (ggml_backend_dev_process_memory_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_dev_process_memory") : nullptr;
+
+        size_t cur = 0;
+        if (fn == nullptr || !fn(dev, &cur)) {
+            return false;
+        }
+        used += cur;
+    }
+
+    return true;
+}
+
+// the device memory of this process, else what the devices lost since free_at_start (other processes included)
+static size_t common_device_memory_in_use(const llama_model * model, size_t free_at_start, bool & own) {
+    size_t used = 0;
+    own = common_device_memory_own(model, used);
+    if (own) {
+        return used;
+    }
+    const size_t free_now = common_device_memory_free(model);
+    return free_at_start > free_now ? free_at_start - free_now : 0;
+}
+
 void common_device_memory_log(const llama_model * model, size_t free_at_start, const char * stage) {
     if (free_at_start == 0) {
         return;
     }
     constexpr double MiB = 1024.0*1024.0;
-    const size_t free_now = common_device_memory_free(model);
-    LOG_INF("%s: %.0f MiB in use %s, %.0f MiB free\n", __func__,
-            free_at_start > free_now ? (free_at_start - free_now)/MiB : 0.0, stage, free_now/MiB);
+
+    bool own = false;
+    const size_t used = common_device_memory_in_use(model, free_at_start, own);
+
+    LOG_INF("%s: %.0f MiB in use %s%s, %.0f MiB free\n", __func__, used/MiB, stage,
+            own ? "" : " (since the budget was measured, other processes included)", common_device_memory_free(model)/MiB);
+}
+
+void common_device_memory_check(const llama_model * model, size_t predicted, size_t free_at_start) {
+    if (free_at_start == 0) {
+        return;
+    }
+    constexpr double MiB = 1024.0*1024.0;
+
+    bool own = false;
+    const size_t used = common_device_memory_in_use(model, free_at_start, own);
+
+    LOG_INF("%s: device memory: projected %.0f MiB, in use %.0f MiB%s, %.0f MiB of that outside the projection\n", __func__,
+            predicted/MiB, used/MiB, own ? "" : " (since the budget was measured, other processes included)",
+            used > predicted ? (used - predicted)/MiB : 0.0);
 }
 
 size_t common_device_memory_free(const llama_model * model) {

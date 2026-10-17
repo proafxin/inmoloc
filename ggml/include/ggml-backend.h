@@ -242,6 +242,9 @@ extern "C" {
     // The device memory a backend takes outside its buffers to compute a graph (e.g. scratch pools, library handles),
     // see ggml_backend_sched_reserve_scratch; with alloc the backend takes it now, otherwise it only measures it
     typedef size_t                       (*ggml_backend_graph_scratch_t)(ggml_backend_t backend, struct ggml_cgraph * graph, bool alloc);
+    // The device memory this process holds on a device, including what the driver and libraries take (e.g. the CUDA
+    // context); unlike the free memory of the device it does not change with other processes; false when not known
+    typedef bool                         (*ggml_backend_dev_process_memory_t)(ggml_backend_dev_t dev, size_t * used);
 
     //
     // Backend registry
@@ -355,6 +358,9 @@ extern "C" {
     // Get the number of splits of the last graph
     GGML_API int                  ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched);
     GGML_API int                  ggml_backend_sched_get_n_copies(ggml_backend_sched_t sched);
+
+    // Total time the re-plans of graphs waited for the work already submitted to the backends, in microseconds
+    GGML_API int64_t              ggml_backend_sched_get_t_realloc_sync_us(ggml_backend_sched_t sched);
 
     GGML_API ggml_backend_buffer_type_t ggml_backend_sched_get_buffer_type(ggml_backend_sched_t sched, ggml_backend_t backend);
     GGML_API size_t                     ggml_backend_sched_get_buffer_size(ggml_backend_sched_t sched, ggml_backend_t backend);

@@ -38,8 +38,8 @@ PROMPTS = [
 ]
 
 
-def complete(prompt: str, stream: bool) -> tuple[str, int]:
-    data = {"prompt": prompt, "n_predict": N_PREDICT, "temperature": 0.0, "ignore_eos": True, "cache_prompt": False}
+def complete(prompt: str, stream: bool, cache_prompt: bool = False) -> tuple[str, int]:
+    data = {"prompt": prompt, "n_predict": N_PREDICT, "temperature": 0.0, "ignore_eos": True, "cache_prompt": cache_prompt}
     if not stream:
         res = server.make_request("POST", "/completion", data=data)
         assert res.status_code == 200
@@ -67,6 +67,24 @@ def test_preempt_and_resume():
 
     assert metric("preemptions_total") > preemptions
     assert metric("resumes_total") > resumes
+
+    for k, (content, n_predicted) in enumerate(results):
+        assert n_predicted == N_PREDICT
+        reference, _ = complete(PROMPTS[k], stream=False)
+        assert content == reference, f"request {k} differs from the same request served alone"
+
+
+# with a prompt cache in host memory, a preempted request saves its state there and the resume restores it
+def test_preempt_and_restore():
+    global server
+    server.cache_ram = 64
+    server.start()
+
+    restored = metric("restored_tokens_total")
+
+    results = parallel_function_calls([(complete, (PROMPTS[k], k % 2 == 1, True)) for k in range(N_REQUESTS)])
+
+    assert metric("restored_tokens_total") > restored
 
     for k, (content, n_predicted) in enumerate(results):
         assert n_predicted == N_PREDICT

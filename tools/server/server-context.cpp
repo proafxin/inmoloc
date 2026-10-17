@@ -370,10 +370,8 @@ struct server_slot {
 
         const size_t cur_size = cur_size_tgt + cur_size_dft;
 
-        size_t ckpt_size = 0;
-        for (const auto & ckpt : prompt.checkpoints) {
-            ckpt_size += ckpt.size();
-        }
+        // the entry keeps only the newest checkpoint (see server_prompt_cache::alloc)
+        const size_t ckpt_size = prompt.checkpoints.empty() ? 0 : prompt.checkpoints.back().size();
 
         const int64_t t_size_us = ggml_time_us();
 
@@ -396,7 +394,7 @@ struct server_slot {
         SRV_TRC(" - saving prompt with length %d, total state size = %.3f MiB (draft: %.3f MiB), checkpoints %zu = %.3f MiB: "
                 "%.1f ms = size %.1f ms + alloc and copy of the checkpoints %.1f ms + state %.1f ms\n",
                 (int) prompt.tokens.size(), cur_size / (1024.0 * 1024.0), cur_size_dft / (1024.0 * 1024.0),
-                prompt.checkpoints.size(), ckpt_size / (1024.0 * 1024.0),
+                std::min<size_t>(1, prompt.checkpoints.size()), ckpt_size / (1024.0 * 1024.0),
                 (t_end_us - t_start_us)/1e3, (t_size_us - t_start_us)/1e3, (t_alloc_us - t_size_us)/1e3, (t_end_us - t_alloc_us)/1e3);
 
         return true;
@@ -1165,6 +1163,7 @@ public:
             perf.n_graph_computes += cur.n_graph_computes;
             perf.t_graph_build_ms += cur.t_graph_build_ms;
             perf.t_graph_alloc_ms += cur.t_graph_alloc_ms;
+            perf.t_graph_alloc_wait_ms += cur.t_graph_alloc_wait_ms;
 
             usage = llama_memory_get_usage(llama_get_memory(ctx_tgt));
             usage.attn_cells_read  += usage_slept.attn_cells_read;
@@ -1179,6 +1178,7 @@ public:
         res.n_graph_computes       = perf.n_graph_computes;
         res.t_graph_build_ms       = perf.t_graph_build_ms;
         res.t_graph_alloc_ms       = perf.t_graph_alloc_ms;
+        res.t_graph_alloc_wait_ms  = perf.t_graph_alloc_wait_ms;
         res.metrics                = metrics;
 
         return res;
@@ -1298,6 +1298,7 @@ private:
                 perf_slept.n_graph_computes += perf.n_graph_computes;
                 perf_slept.t_graph_build_ms += perf.t_graph_build_ms;
                 perf_slept.t_graph_alloc_ms += perf.t_graph_alloc_ms;
+                perf_slept.t_graph_alloc_wait_ms += perf.t_graph_alloc_wait_ms;
 
                 const auto attn = usage_slept;
                 usage_slept = usage;
@@ -1540,6 +1541,9 @@ private:
                 SRV_WRN("%s\n", "cache_reuse is not supported by multimodal, it will be disabled");
             }
         }
+
+        // everything the memory budget covers is loaded now
+        common_device_memory_check(model_tgt, params_base.vram_predicted, params_base.vram_free_at_start);
 
         if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
             if (params_base.ctx_shift) {
@@ -2552,6 +2556,20 @@ private:
             slot.spec_ckpt.clear();
         }
 
+        // the state goes to the prompt cache in host memory, so that the resume restores it instead of recomputing
+        // only a state that matches the prompt can be restored: the memory must hold exactly the tokens of the prompt
+        if (prompt_cache && slot.task->params.cache_prompt && slot.prompt.n_tokens() > 0) {
+            const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
+            const size_t n_tokens = slot.prompt.n_tokens();
+            const bool   exact    = pos_max >= 0 &&
+                slot.prompt.tokens.size_up_to_pos(pos_max + 1) == n_tokens && // the memory holds the last token
+                slot.prompt.tokens.size_up_to_pos(pos_max)     <  n_tokens;   // and no position after it
+            if (exact && slot.prompt_save(*prompt_cache)) {
+                prompt_cache->update();
+                SLT_INF(slot, "saved %d tokens of state to the prompt cache for the resume\n", slot.prompt.n_tokens());
+            }
+        }
+
         slot.i_batch = -1;
         slot.prompt_clear();
 
@@ -2622,10 +2640,19 @@ private:
                 }
             }
 
-            SLT_INF(*slot, "resuming, recompute %d tokens\n", slot->n_input_tokens());
+            // the state saved at the preemption, if the prompt cache still has it; the prompt then computes the rest
+            if (prompt_cache && slot->task->params.cache_prompt && !slot->prompt_load(*prompt_cache, slot->input_tokens())) {
+                slot->prompt_clear();
+            }
+
+            const int32_t n_restored  = slot->prompt.tokens.get_common_prefix(slot->input_tokens());
+            const int32_t n_recompute = slot->n_input_tokens() - n_restored;
+
+            SLT_INF(*slot, "resuming, restored %d tokens from the prompt cache, recompute %d tokens\n", n_restored, n_recompute);
 
             metrics.n_resumes++;
-            metrics.n_recomputed_tokens += slot->n_input_tokens();
+            metrics.n_recomputed_tokens += n_recompute;
+            metrics.n_restored_tokens   += n_restored;
 
             slot->state = SLOT_STATE_STARTED;
 

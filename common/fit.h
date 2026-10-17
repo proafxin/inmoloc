@@ -68,8 +68,16 @@ bool common_budget_params(
 // the free device memory of the devices a model runs on, summed
 size_t common_device_memory_free(const llama_model * model);
 
-// logs the device memory taken since the memory budget measured free_at_start, after a stage of the startup
+// the device memory this process holds on the devices a model runs on, the CUDA context and libraries included;
+// false when a device cannot tell (see ggml_backend_dev_process_memory_t)
+bool common_device_memory_own(const llama_model * model, size_t & used);
+
+// logs the device memory in use after a stage of the startup: the memory of the process, else what the devices lost
+// since the memory budget measured free_at_start
 void common_device_memory_log(const llama_model * model, size_t free_at_start, const char * stage);
+
+// logs the projection of the memory budget against the device memory in use, once everything it covers is loaded
+void common_device_memory_check(const llama_model * model, size_t predicted, size_t free_at_start);
 
 // print estimated memory to stdout
 void common_fit_print(

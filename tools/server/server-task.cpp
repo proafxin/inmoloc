@@ -1575,6 +1575,10 @@ std::string server_task_result_metrics::to_metrics() {
             "Number of tokens recomputed to resume preempted slots",
             (double) metrics.n_recomputed_tokens
         }, {
+            "restored_tokens_total",
+            "Number of tokens restored from the prompt cache in host memory to resume preempted slots",
+            (double) metrics.n_restored_tokens
+        }, {
             "prefix_shares_total",
             "Number of prompts that adopted a prefix held by another slot",
             (double) metrics.n_prefix_shares
@@ -1616,8 +1620,12 @@ std::string server_task_result_metrics::to_metrics() {
             t_graph_build_ms / 1.e3
         }, {
             "graph_alloc_seconds_total",
-            "Time spent allocating those graphs; includes waiting for queued GPU work when a graph is re-planned, so it is not all overhead",
+            "Time spent allocating those graphs, without the wait for the GPU below",
             t_graph_alloc_ms / 1.e3
+        }, {
+            "graph_alloc_wait_seconds_total",
+            "Time a re-plan of a graph waited for the GPU work already submitted; that work runs anyway, so this is not overhead",
+            t_graph_alloc_wait_ms / 1.e3
         }, {
             "kv_attn_cells_read_total",
             "Attention cost today: (token, KV cell) pairs read, n_kv per token",
@@ -1897,9 +1905,16 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
         }
     }
 
+    // the entry keeps only the newest checkpoint: the state restores the full prompt, and the newest checkpoint covers
+    // a new prompt that differs from it after the last prompt (e.g. in the re-rendered reply)
+    std::list<common_prompt_checkpoint> checkpoints;
+    if (!prompt.checkpoints.empty()) {
+        checkpoints.push_back(prompt.checkpoints.back());
+    }
+
     // calculate checkpoints size to see if it will fit with the prompt
     size_t checkpoints_size = 0;
-    for (const auto & ckpt : prompt.checkpoints) {
+    for (const auto & ckpt : checkpoints) {
         checkpoints_size += ckpt.size();
     }
 
@@ -1961,7 +1976,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
     states.push_back({
         /*.prompt =*/ {
             /*.tokens      =*/ prompt.tokens.clone(),
-            /*.checkpoints =*/ prompt.checkpoints,
+            /*.checkpoints =*/ std::move(checkpoints),
         },
         /*.data   =*/ {
             /*.main =*/ std::move(state_data_tgt),

@@ -165,6 +165,9 @@ if (CUDAToolkit_FOUND)
         target_link_libraries(ggml-cuda PRIVATE CUDA::cudart CUDA::cublas)
     endif()
 
+    # NVML is loaded at runtime for the device memory of the process, see ggml_cuda_nvml
+    target_link_libraries(ggml-cuda PRIVATE ${CMAKE_DL_LIBS})
+
     if (GGML_CUDA_NO_VMM)
         # No VMM requested, no need to link directly with the cuda driver lib (libcuda.so)
     else()

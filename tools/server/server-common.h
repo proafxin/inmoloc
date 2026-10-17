@@ -510,6 +510,7 @@ struct server_metrics {
     uint64_t n_preemptions       = 0;
     uint64_t n_resumes           = 0;
     uint64_t n_recomputed_tokens = 0; // tokens recomputed to resume preempted slots
+    uint64_t n_restored_tokens   = 0; // tokens restored from the prompt cache to resume preempted slots
 
     uint64_t n_prefix_shares        = 0; // prompts that adopted the cells of another slot
     uint64_t n_prefix_shared_tokens = 0; // tokens those prompts did not have to compute

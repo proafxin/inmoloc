@@ -22,6 +22,7 @@
 #include <numeric>
 #include <sstream>
 #include <string>
+#include <typeinfo>
 #include <unordered_set>
 
 // dedup helpers
@@ -1587,7 +1588,12 @@ void llm_graph_result::set_outputs(const llm_graph_params & params) {
 bool llm_graph_result::can_reuse(const llm_graph_params & params) {
     if (!this->params.allow_reuse(params)) {
         if (debug > 1) {
-            LLAMA_LOG_DEBUG("%s: cannot reuse graph due to incompatible graph parameters\n", __func__);
+            const auto & a = this->params.ubatch;
+            const auto & b = params.ubatch;
+            LLAMA_LOG_DEBUG("%s: cannot reuse graph due to incompatible graph parameters: "
+                    "n_tokens %u -> %u, n_seq_tokens %u -> %u, n_seqs %u -> %u, n_seqs_unq %u -> %u, n_outputs %u -> %u\n", __func__,
+                    a.n_tokens, b.n_tokens, a.n_seq_tokens, b.n_seq_tokens, a.n_seqs, b.n_seqs, a.n_seqs_unq, b.n_seqs_unq,
+                    this->params.n_outputs, params.n_outputs);
         }
 
         return false;
@@ -1603,7 +1609,7 @@ bool llm_graph_result::can_reuse(const llm_graph_params & params) {
         const bool cur = input->can_reuse(params);
 
         if (debug > 1) {
-            LLAMA_LOG_DEBUG("%s: can_reuse = %d\n", "placeholder", cur);
+            LLAMA_LOG_DEBUG("%s: can_reuse = %d\n", typeid(*input).name(), cur);
         }
 
         res = res && cur;

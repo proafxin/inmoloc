@@ -1620,18 +1620,8 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
         res->reset_samplers();
     }
 
-    // what the memory budget projected against what the devices actually hold now: the difference is the memory the
-    // graphs do not account for, such as the CUDA context, cuBLAS workspaces, captured graphs and backend pools
-    if (params.vram_free_at_start > 0) {
-        constexpr double MiB = 1024.0*1024.0;
-
-        const size_t free_now = common_device_memory_free(model);
-        const size_t used     = params.vram_free_at_start > free_now ? params.vram_free_at_start - free_now : 0;
-
-        COM_INF("device memory: projected %.0f MiB, in use %.0f MiB, %.0f MiB of that outside the projection, %.0f MiB free\n",
-                params.vram_predicted/MiB, used/MiB,
-                used > params.vram_predicted ? (used - params.vram_predicted)/MiB : 0.0, free_now/MiB);
-    }
+    // the projection is checked by the caller once everything it covers is loaded (see common_device_memory_check)
+    common_device_memory_log(model, params.vram_free_at_start, "with the context, after the warmup");
 
     return res;
 }

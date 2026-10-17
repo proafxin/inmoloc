@@ -91,6 +91,20 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#include <process.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#include <unistd.h>
+#endif
+
 static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
 #define GGML_LOG_WARN_ONCE(str) \
@@ -6022,6 +6036,97 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
     GGML_UNUSED(reg);
 }
 
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+// NVML, the management library of the NVIDIA driver, loaded at runtime when present: it reports the device memory of
+// each process, the CUDA context and the libraries included, so it is not changed by other processes the way the free
+// memory of the device is; in a container it lists the processes of the container with their PIDs there
+struct ggml_cuda_nvml {
+    typedef int (*init_t)(void);
+    typedef int (*handle_t)(const char * pci_bus_id, void ** device);
+    typedef int (*procs_t)(void * device, unsigned int * count, void * infos);
+
+    // nvmlProcessInfo_t of nvmlDeviceGetComputeRunningProcesses_v3
+    struct process_info {
+        unsigned int       pid;
+        unsigned long long used;
+        unsigned int       gpu_instance;
+        unsigned int       compute_instance;
+    };
+
+    handle_t handle = nullptr;
+    procs_t  procs  = nullptr;
+    bool     ok     = false;
+
+    static const ggml_cuda_nvml & get() {
+        static const ggml_cuda_nvml res = []() {
+            ggml_cuda_nvml cur;
+#ifdef _WIN32
+            HMODULE lib = LoadLibraryA("nvml.dll");
+            const auto sym = [&](const char * name) { return lib ? (void *) GetProcAddress(lib, name) : nullptr; };
+#else
+            void * lib = dlopen("libnvidia-ml.so.1", RTLD_LAZY | RTLD_LOCAL);
+            const auto sym = [&](const char * name) { return lib ? dlsym(lib, name) : nullptr; };
+#endif
+            const init_t init = (init_t) sym("nvmlInit_v2");
+            cur.handle = (handle_t) sym("nvmlDeviceGetHandleByPciBusId_v2");
+            cur.procs  = (procs_t)  sym("nvmlDeviceGetComputeRunningProcesses_v3");
+            cur.ok     = init && cur.handle && cur.procs && init() == 0;
+            return cur;
+        }();
+        return res;
+    }
+};
+
+// the device memory this process holds on the device; false when NVML is missing or does not report it
+static bool ggml_backend_cuda_dev_process_memory(ggml_backend_dev_t dev, size_t * used) {
+    const ggml_cuda_nvml & nvml = ggml_cuda_nvml::get();
+    if (!nvml.ok) {
+        return false;
+    }
+
+    const auto * ctx = (const ggml_backend_cuda_device_context *) dev->context;
+
+    void * device = nullptr;
+    if (ctx->pci_bus_id.empty() || nvml.handle(ctx->pci_bus_id.c_str(), &device) != 0) {
+        return false;
+    }
+
+    constexpr int NVML_ERROR_INSUFFICIENT_SIZE = 7;
+
+    std::vector<ggml_cuda_nvml::process_info> infos(64);
+    unsigned int n = infos.size();
+    int rc = nvml.procs(device, &n, infos.data());
+    if (rc == NVML_ERROR_INSUFFICIENT_SIZE) {
+        infos.resize(n + 16);
+        n  = infos.size();
+        rc = nvml.procs(device, &n, infos.data());
+    }
+    if (rc != 0) {
+        return false;
+    }
+
+#ifdef _WIN32
+    const unsigned int pid = (unsigned int) _getpid();
+#else
+    const unsigned int pid = (unsigned int) getpid();
+#endif
+
+    // a process that holds nothing on the device is not listed
+    *used = 0;
+    for (unsigned int i = 0; i < n; ++i) {
+        if (infos[i].pid == pid) {
+            // NVML_VALUE_NOT_AVAILABLE, e.g. on Windows with the WDDM driver model
+            if (infos[i].used == ~0ULL) {
+                return false;
+            }
+            *used = infos[i].used;
+        }
+    }
+
+    return true;
+}
+#endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+
 static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     GGML_UNUSED(reg);
     if (strcmp(name, "ggml_backend_comm_init") == 0) {
@@ -6051,6 +6156,9 @@ static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, con
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     if (strcmp(name, "ggml_backend_set_wait") == 0) {
         return (void *)ggml_backend_cuda_set_wait;
+    }
+    if (strcmp(name, "ggml_backend_dev_process_memory") == 0) {
+        return (void *)ggml_backend_cuda_dev_process_memory;
     }
     if (strcmp(name, "ggml_backend_flash_attn_ext_kv_rows") == 0) {
         // feature flag, see ggml_flash_attn_ext_set_kv_rows(); supports_op still checks the device and the shapes

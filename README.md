@@ -15,15 +15,15 @@ inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps
 ## Features
 
 - **Shared KV cache**: all requests share one cache, and each request takes cells only for the tokens it holds, up to the model's training context.
-- **Memory budget**: at startup the server measures the weights, KV cache, per-request state, compute buffers, draft model, vision encoder and backend scratch memory. From the typical request size (`--ctx-typical`) it chooses the number of requests at once and the cache size that serve the most requests within `--vram-budget`. Memory does not grow while serving.
-- **Preemption**: when the cache is full, the newest requests are paused and recomputed later, and the others continue.
+- **Memory budget**: at startup the server measures the weights, KV cache, per-request state, compute buffers, draft model, vision encoder, backend scratch memory, and what the process holds outside them (CUDA context, loaded kernels, libraries; measured for the process through NVML on NVIDIA GPUs). For a model with memory per request (e.g. recurrent state), it chooses from the typical request size (`--ctx-typical`) the number of requests at once and the cache size that serve the most requests within `--vram-budget`. A model without it runs `--parallel` requests that share the whole cache, as many at once as their sizes allow. Memory does not grow while serving.
+- **Preemption**: when the cache is full, the newest requests are paused and the others continue. A paused request's state goes to the prompt cache in host memory (`--cache-ram`) and is restored when it resumes; without room there, it is recomputed.
 - **Per-request attention** (CUDA): each request reads only its own KV cells, so its cost grows with its own context, not with other requests. Quantized q8_0 and q4_0 caches are read directly.
 - **Prefix sharing**: a new request starts from the cached cells of another request with the same prefix, without copying them.
 - **Cost-based prompt scheduling**: long prompts are processed in chunks sized by their measured cost, so requests that are generating are not held up.
 - **Asynchronous vision encoder**: images are encoded on their own thread and lower-priority GPU stream while other requests generate.
 - **Replay rollback for speculative decoding**: on hybrid gated delta-net models such as Qwen3.5, memory per request stays nearly the same at any draft depth.
 - **Low CPU load while waiting for the GPU** (CUDA): with `--gpu-wait block` the server thread sleeps instead of spinning a CPU core.
-- **Observability**: the startup log shows the memory projection and what fills it; Prometheus metrics cover KV cells, preemptions, prefix sharing, attention cost and free device memory; `--slow-loop-ms` logs slow server iterations.
+- **Observability**: the startup log shows the memory projection and what fills it; Prometheus metrics cover KV cells, preemptions and the tokens restored after them, prefix sharing, attention cost and free device memory; `--slow-loop-ms` logs slow server iterations.
 
 ## Quick start
 
@@ -62,7 +62,7 @@ The options below are specific to inmoloc; all other options are as in llama.cpp
 | Option | Default | Description |
 | --- | --- | --- |
 | `--vram-budget SIZE` | free device memory | Device memory the server may use, summed over the devices the model runs on (e.g. `22G`). |
-| `--ctx-typical N` | the longest request that fits | Tokens a typical request holds. The budget runs the most requests at once whose typical requests fit in the KV cache, and gives the memory left to the cache. The startup log shows the longest request the budget holds. |
+| `--ctx-typical N` | the longest request that fits | Tokens a typical request holds. For a model with memory per request (e.g. recurrent state), the budget runs the most requests at once whose typical requests fit in the KV cache, and gives the memory left to the cache. A model without it runs `--parallel` requests that share the cache. The startup log shows the longest request the budget holds. |
 | `--ctx-size N` | automatic | The most tokens the KV cache holds. Not needed: without it the cache is sized from the budget. |
 | `--parallel N` | auto | Upper limit on requests at once; the budget may lower it. |
 | `--prompt-cap N` | `-1` | Prompt tokens per iteration while requests generate, weighted by cost. `-1`: fill one ubatch, `0`: no cap. |

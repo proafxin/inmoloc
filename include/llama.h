@@ -1615,7 +1615,8 @@ extern "C" {
         int32_t n_reused;   // number of times a ggml compute graph had been reused
         int32_t n_graph_computes; // number of graph evaluations; the denominator for n_reused
         double  t_graph_build_ms; // time spent building graphs that could not be reused
-        double  t_graph_alloc_ms; // time spent allocating them; includes waiting for queued GPU work when the scheduler re-plans a graph, so it is not all overhead
+        double  t_graph_alloc_ms;      // time spent allocating them
+        double  t_graph_alloc_wait_ms; // time a re-plan of a graph waited for the GPU work already submitted, not overhead
     };
 
     struct llama_perf_sampler_data {

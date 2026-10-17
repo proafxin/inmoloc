@@ -1549,6 +1549,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         }
 
         const auto t_alloc_us = ggml_time_us();
+        const auto t_sync_us  = ggml_backend_sched_get_t_realloc_sync_us(sched.get());
 
         if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
             LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
@@ -1556,8 +1557,12 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             return nullptr;
         }
 
-        t_graph_build_us += t_alloc_us - t_start_us;
-        t_graph_alloc_us += ggml_time_us() - t_alloc_us;
+        // a re-plan first waits for the work already submitted, which is not time spent allocating
+        const int64_t t_wait_us = ggml_backend_sched_get_t_realloc_sync_us(sched.get()) - t_sync_us;
+
+        t_graph_build_us      += t_alloc_us - t_start_us;
+        t_graph_alloc_us      += ggml_time_us() - t_alloc_us - t_wait_us;
+        t_graph_alloc_wait_us += t_wait_us;
     }
 
     // set the input data for the input tensors
@@ -3567,6 +3572,7 @@ llama_perf_context_data llama_context::perf_get_data() const {
     data.n_graph_computes = std::max(0, n_graph_computes);
     data.t_graph_build_ms = 1e-3 * t_graph_build_us;
     data.t_graph_alloc_ms = 1e-3 * t_graph_alloc_us;
+    data.t_graph_alloc_wait_ms = 1e-3 * t_graph_alloc_wait_us;
 
     return data;
 }
@@ -3579,6 +3585,7 @@ void llama_context::perf_reset() {
     n_graph_computes = 0;
     t_graph_build_us = 0;
     t_graph_alloc_us = 0;
+    t_graph_alloc_wait_us = 0;
 }
 
 llama_memory_breakdown llama_context::memory_breakdown() const {
@@ -4552,10 +4559,10 @@ void llama_perf_context_print(const llama_context * ctx) {
     LLAMA_LOG_INFO("%s:        eval time = %10.2f ms / %5d runs   (%8.2f ms per token, %8.2f tokens per second)\n",
             __func__, data.t_eval_ms, data.n_eval, data.t_eval_ms / data.n_eval, 1e3 / data.t_eval_ms * data.n_eval);
     LLAMA_LOG_INFO("%s:       total time = %10.2f ms / %5d tokens\n", __func__, (t_end_ms - data.t_start_ms), (data.n_p_eval + data.n_eval));
-    LLAMA_LOG_INFO("%s:    graphs reused = %10d / %5d computes (%5.1f %%), build time = %8.2f ms, alloc time = %8.2f ms\n",
+    LLAMA_LOG_INFO("%s:    graphs reused = %10d / %5d computes (%5.1f %%), build time = %8.2f ms, alloc time = %8.2f ms, alloc wait for the GPU = %8.2f ms\n",
             __func__, data.n_reused, data.n_graph_computes,
             data.n_graph_computes > 0 ? 100.0 * data.n_reused / data.n_graph_computes : 0.0,
-            data.t_graph_build_ms, data.t_graph_alloc_ms);
+            data.t_graph_build_ms, data.t_graph_alloc_ms, data.t_graph_alloc_wait_ms);
 }
 
 void llama_perf_context_reset(llama_context * ctx) {

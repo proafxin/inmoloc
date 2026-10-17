@@ -2594,10 +2594,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"--vram-budget"}, "SIZE",
         "device memory the server may use, summed over the devices the model runs on, e.g. 10G, 10240M or 10240 (MiB);\n"
-        "the weights, the vision encoder, the draft model, the KV cache, the per-request state and the compute buffers\n"
-        "are measured; the server then runs the most requests at once (at most --parallel) whose typical requests\n"
-        "(--ctx-typical) fit in the KV cache, and gives the memory left to the cache (at most --ctx-size); the\n"
-        "per-request memory (e.g. recurrent state) depends on --rs-rollback\n"
+        "the weights, the vision encoder, the draft model, the KV cache, the per-request state, the compute buffers and\n"
+        "the memory the process holds outside them (e.g. the CUDA context) are measured; a model with memory per request\n"
+        "(e.g. recurrent state, which depends on --rs-rollback) runs the most requests at once (at most --parallel)\n"
+        "whose typical requests (--ctx-typical) fit in the KV cache; a model without it runs --parallel requests that\n"
+        "share the KV cache, as many at once as their sizes allow; the memory left goes to the cache (at most --ctx-size)\n"
         "(default: the free device memory; a larger budget is lowered to it)",
         [](common_params & params, const std::string & value) {
             size_t pos = 0;
@@ -2620,8 +2621,9 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ));
     add_opt(common_arg(
         {"--ctx-typical"}, "N",
-        "tokens a typical request holds (prompt and output); the memory budget then runs the most requests at once whose\n"
-        "typical requests fit in the KV cache, and gives the memory left to the cache\n"
+        "tokens a typical request holds (prompt and output); for a model with memory per request (e.g. recurrent state)\n"
+        "the memory budget runs the most requests at once whose typical requests fit in the KV cache, and gives the\n"
+        "memory left to the cache; a model without it runs --parallel requests that share the cache whatever their size\n"
         "(default: the longest request the budget holds)",
         [](common_params & params, int value) {
             if (value < 1) {

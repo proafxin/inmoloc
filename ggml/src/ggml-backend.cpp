@@ -850,6 +850,9 @@ struct ggml_backend_sched {
     int debug_realloc;
     int debug_graph_size;
     int debug_prev_graph_size;
+
+    // time a re-plan waited for the work already submitted to the backends
+    int64_t t_realloc_sync_us;
 };
 
 #define hash_id(tensor) ggml_hash_find_or_insert(&sched->hash_set, tensor)
@@ -1646,6 +1649,8 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
 
         const int64_t t_reserve_us = ggml_time_us();
 
+        sched->t_realloc_sync_us += t_reserve_us - t_sync_us;
+
         ggml_gallocr_reserve_n(sched->galloc, &sched->graph, sched->node_backend_ids, sched->leaf_backend_ids);
 
         // the synchronize waits for work already submitted, only the reserve is added by the reallocation
@@ -2091,6 +2096,11 @@ int ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched) {
 int ggml_backend_sched_get_n_copies(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);
     return sched->n_copies;
+}
+
+int64_t ggml_backend_sched_get_t_realloc_sync_us(ggml_backend_sched_t sched) {
+    GGML_ASSERT(sched);
+    return sched->t_realloc_sync_us;
 }
 
 int ggml_backend_sched_get_n_backends(ggml_backend_sched_t sched) {

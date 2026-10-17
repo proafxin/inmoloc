@@ -509,6 +509,7 @@ struct server_task_result_metrics : server_task_result {
     int32_t n_graph_computes = 0;
     double  t_graph_build_ms = 0.0;
     double  t_graph_alloc_ms = 0.0;
+    double  t_graph_alloc_wait_ms = 0.0;
 
     server_metrics metrics;
 

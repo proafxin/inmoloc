@@ -405,5 +405,6 @@ private:
     mutable int32_t n_graph_computes = 0; // number of graph evaluations, reused or rebuilt
 
     mutable int64_t t_graph_build_us = 0; // time spent building graphs that could not be reused
-    mutable int64_t t_graph_alloc_us = 0; // time spent allocating them, includes waiting for queued GPU work when the graph is re-planned
+    mutable int64_t t_graph_alloc_us      = 0; // time spent allocating them
+    mutable int64_t t_graph_alloc_wait_us = 0; // time a re-plan of the graph waited for the GPU work already submitted
 };
