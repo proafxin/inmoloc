@@ -11,6 +11,7 @@
 #include "json.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -440,6 +441,18 @@ struct server_slot_stats {
 
 // shared between server_context_impl and server_task_result_*
 // unlike server_slot_stats, server_metrics is server-global and cumulative, not tied to a slot
+// why a request waits before it gets a slot
+enum server_defer_reason {
+    SERVER_DEFER_NO_SLOT,          // all slots are busy, or the requested one
+    SERVER_DEFER_RECURRENT_CELL,   // no free recurrent-state cell
+    SERVER_DEFER_PREEMPTED_AHEAD,  // a preempted request resumes first
+    SERVER_DEFER_KV_CELLS,         // the prompt does not fit next to the KV cells held
+    SERVER_DEFER_CHILD_SLOTS,      // not enough free slots for the child tasks
+    SERVER_DEFER_REASON_COUNT,
+};
+
+const char * server_defer_reason_name(server_defer_reason reason);
+
 struct server_metrics {
     int64_t t_start = 0;
 
@@ -506,6 +519,11 @@ struct server_metrics {
     histogram inter_token_latency; // per generated token, a step that yields several tokens (speculative) splits its time
     histogram e2e_request_latency; // request arrival -> final response
     histogram request_queue_time;  // request arrival -> slot launch
+
+    // requests held back before they get a slot, by reason (server_defer_reason): how often, and the time from arrival
+    // to slot launch of the requests whose last wait had that reason
+    std::array<uint64_t, SERVER_DEFER_REASON_COUNT> n_deferred      = {};
+    std::array<double,   SERVER_DEFER_REASON_COUNT> t_deferred_wait = {};
 
     uint64_t n_preemptions       = 0;
     uint64_t n_resumes           = 0;

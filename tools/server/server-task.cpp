@@ -1735,6 +1735,21 @@ std::string server_task_result_metrics::to_metrics() {
     add_histogram("e2e_request_latency_seconds", "Time from request arrival to the final response", metrics.e2e_request_latency);
     add_histogram("request_queue_time_seconds",  "Time from request arrival to slot launch", metrics.request_queue_time);
 
+    // labeled counters: one time series per reason a request waits before it gets a slot
+    prometheus << "# HELP local_inference:requests_deferred_total Times a request was held back before it got a slot, by reason\n"
+               << "# TYPE local_inference:requests_deferred_total counter\n";
+    for (int r = 0; r < SERVER_DEFER_REASON_COUNT; r++) {
+        prometheus << "local_inference:requests_deferred_total{reason=\"" << server_defer_reason_name((server_defer_reason) r)
+                   << "\"} " << metrics.n_deferred[r] << "\n";
+    }
+    prometheus << "# HELP local_inference:request_wait_seconds_total Time from arrival to slot launch of the requests whose last "
+                  "wait had the reason\n"
+               << "# TYPE local_inference:request_wait_seconds_total counter\n";
+    for (int r = 0; r < SERVER_DEFER_REASON_COUNT; r++) {
+        prometheus << "local_inference:request_wait_seconds_total{reason=\"" << server_defer_reason_name((server_defer_reason) r)
+                   << "\"} " << metrics.t_deferred_wait[r] << "\n";
+    }
+
     // labeled counter: one time series per draft position
     if (!metrics.n_accepted_per_pos.empty()) {
         prometheus << "# HELP local_inference:spec_decode_num_accepted_tokens_per_pos_total"

@@ -1413,12 +1413,17 @@ private:
             auto mmproj_mem = mtmd_get_memory_usage(mmproj_path.c_str(), mparams);
             int64_t t_elapsed = ggml_time_us() - t_start;
             if (!mmproj_mem.empty()) {
-                size_t total = 0;
+                size_t total  = 0;
+                size_t on_gpu = 0; // host memory, e.g. with --no-mmproj-offload, is not part of the budget
                 for (auto & [dev, size] : mmproj_mem) {
                     total += size;
+                    if (ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_CPU) {
+                        on_gpu += size;
+                    }
                 }
-                SRV_INF("[mtmd] estimated worst-case memory usage of mmproj is %.2f MiB (took %.2f ms)\n", total / (1024.0 * 1024.0), t_elapsed / 1000.0);
-                params_base.vram_budget_used += total;
+                SRV_INF("[mtmd] estimated worst-case memory usage of mmproj is %.2f MiB, %.2f MiB of it on the GPU (took %.2f ms)\n",
+                        total / (1024.0 * 1024.0), on_gpu / (1024.0 * 1024.0), t_elapsed / 1000.0);
+                params_base.vram_budget_used += on_gpu;
             } else {
                 SRV_ERR("%s", "[mtmd] failed to get memory usage of mmproj\n");
             }
@@ -2875,7 +2880,11 @@ private:
 
         // child tasks are never posted on their own, so they have no arrival time
         if (slot.task->t_arrival_us > 0) {
-            metrics.request_queue_time.observe((ggml_time_us() - slot.task->t_arrival_us)/1e6);
+            const double t_queue = (ggml_time_us() - slot.task->t_arrival_us)/1e6;
+            metrics.request_queue_time.observe(t_queue);
+            if (slot.task->defer_reason >= 0) {
+                metrics.t_deferred_wait[slot.task->defer_reason] += t_queue;
+            }
         }
 
         slot.state = slot.task->is_child()
@@ -3451,6 +3460,13 @@ private:
                 cur.pos_max, cur.n_tokens, (float) cur.size() / 1024 / 1024);
     }
 
+    // holds a task back until it can get a slot, counting why
+    void defer_task(server_task && task, server_defer_reason reason) {
+        metrics.n_deferred[reason]++;
+        task.defer_reason = reason;
+        queue_tasks.defer(std::move(task));
+    }
+
     // returns false to decline the task, it is offered again after the decode is done
     bool process_single_task(server_task && task, bool is_yielding) {
         // while yielding, an encode / decode is running and only reading the server state is safe
@@ -3484,14 +3500,14 @@ private:
                     if (slot == nullptr) {
                         // if no slot is available, we defer this task for processing later
                         SRV_DBG("no slot is available, defer task, id_task = %d\n", id_task);
-                        queue_tasks.defer(std::move(task));
+                        defer_task(std::move(task), SERVER_DEFER_NO_SLOT);
                         break;
                     }
 
                     if (slot->is_processing()) {
                         // if requested slot is unavailable, we defer this task for processing later
                         SRV_DBG("requested slot is unavailable, defer task, id_task = %d\n", id_task);
-                        queue_tasks.defer(std::move(task));
+                        defer_task(std::move(task), SERVER_DEFER_NO_SLOT);
                         break;
                     }
 
@@ -3525,7 +3541,7 @@ private:
 
                         if (n_rs_cells_held() + n_rs_new > n_rs_cells) {
                             SRV_DBG("no free recurrent-state cell, defer task, id_task = %d\n", id_task);
-                            queue_tasks.defer(std::move(task));
+                            defer_task(std::move(task), SERVER_DEFER_RECURRENT_CELL);
                             break;
                         }
                     }
@@ -3536,7 +3552,7 @@ private:
                     if (kv_preemption_enabled()) {
                         if (any_slot_preempted()) {
                             SRV_DBG("preempted slots are waiting, defer task, id_task = %d\n", id_task);
-                            queue_tasks.defer(std::move(task));
+                            defer_task(std::move(task), SERVER_DEFER_PREEMPTED_AHEAD);
                             break;
                         }
 
@@ -3555,7 +3571,7 @@ private:
                         if (any_running && kv_cells_committed() + n_need > n_total) {
                             SRV_DBG("not enough free KV cells (committed = %d, prompt = %d, reused = %d, total = %d), defer task, id_task = %d\n",
                                     kv_cells_committed(), task.n_tokens(), n_reuse, n_total, id_task);
-                            queue_tasks.defer(std::move(task));
+                            defer_task(std::move(task), SERVER_DEFER_KV_CELLS);
                             break;
                         }
                     }
@@ -3566,7 +3582,7 @@ private:
                         std::vector<server_slot *> child_slots = get_free_slots(n_child_tasks, slot->id);
                         if (child_slots.size() < n_child_tasks) {
                             SRV_DBG("not enough free slots for child tasks, n_free = %zu, n_children = %zu, defer task, id_task = %d\n", child_slots.size(), n_child_tasks, id_task);
-                            queue_tasks.defer(std::move(task));
+                            defer_task(std::move(task), SERVER_DEFER_CHILD_SLOTS);
                             break;
                         }
                         if (!launch_slots_with_parent_task(*slot, child_slots, std::move(task))) {

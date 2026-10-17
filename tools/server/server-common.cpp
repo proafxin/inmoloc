@@ -1979,3 +1979,14 @@ void server_subproc::waiter::wait(const std::vector<server_subproc *> & procs, s
     }
 #endif
 }
+
+const char * server_defer_reason_name(server_defer_reason reason) {
+    switch (reason) {
+        case SERVER_DEFER_NO_SLOT:         return "no_slot";
+        case SERVER_DEFER_RECURRENT_CELL:  return "recurrent_cell";
+        case SERVER_DEFER_PREEMPTED_AHEAD: return "preempted_ahead";
+        case SERVER_DEFER_KV_CELLS:        return "kv_cells";
+        case SERVER_DEFER_CHILD_SLOTS:     return "child_slots";
+        default:                           return "unknown";
+    }
+}

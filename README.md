@@ -23,7 +23,7 @@ inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps
 - **Asynchronous vision encoder**: images are encoded on their own thread and lower-priority GPU stream while other requests generate.
 - **Replay rollback for speculative decoding**: on hybrid gated delta-net models such as Qwen3.5, memory per request stays nearly the same at any draft depth.
 - **Low CPU load while waiting for the GPU** (CUDA): with `--gpu-wait block` the server thread sleeps instead of spinning a CPU core.
-- **Observability**: the startup log shows the memory projection and what fills it; Prometheus metrics cover KV cells, preemptions and the tokens restored after them, prefix sharing, attention cost and free device memory; `--slow-loop-ms` logs slow server iterations.
+- **Observability**: the startup log shows the memory projection and what fills it; Prometheus metrics cover KV cells, why requests wait before they get a slot, preemptions and the tokens restored after them, prefix sharing, attention cost and free device memory; `--slow-loop-ms` logs slow server iterations.
 
 ## Quick start
 

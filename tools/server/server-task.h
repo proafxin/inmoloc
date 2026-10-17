@@ -156,6 +156,9 @@ struct server_task {
     // set when the task is first posted to the queue, kept when it is deferred, used for latency metrics
     int64_t t_arrival_us = 0;
 
+    // why the task was last held back before it got a slot (server_defer_reason), -1 = never
+    int32_t defer_reason = -1;
+
     // only used by CLI, this allow tokenizing CLI inputs on server side
     // we need this because mtmd_context and vocab are not accessible outside of server_context
     bool                    cli = false;

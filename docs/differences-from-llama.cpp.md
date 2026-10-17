@@ -39,7 +39,7 @@ inmoloc started from llama.cpp at commit 56381e407 (2026-09-12) and is maintaine
 | Area | llama.cpp | inmoloc |
 | --- | --- | --- |
 | Startup memory | Buffer sizes | The projection, what fills it, and the device memory in use after each stage |
-| Metrics | Throughput and request counts | Also preemptions and the tokens restored after them, KV cells read against cells owned, idle cached tokens, lowest free device memory, the time graph re-plans wait for the GPU |
+| Metrics | Throughput and request counts | Also why requests wait before they get a slot (with the time per reason), preemptions and the tokens restored after them, KV cells read against cells owned, idle cached tokens, lowest free device memory, the time graph re-plans wait for the GPU |
 | Stalls | - | `--slow-loop-ms` logs a time breakdown of slow server iterations |
 
 ## Options
