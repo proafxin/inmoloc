@@ -1761,10 +1761,12 @@ private:
                 return process_single_task(std::move(task), is_yielding);
             }
             const bool    is_launch  = task.type == SERVER_TASK_TYPE_COMPLETION || task.type == SERVER_TASK_TYPE_INFILL;
+            const bool    is_retry   = is_launch && task.defer_reason >= 0; // deferred before
             const int64_t t_start_us = ggml_time_us();
             const bool    res        = process_single_task(std::move(task), is_yielding);
             loop_t.t_tasks_us += ggml_time_us() - t_start_us;
-            loop_t.n_launches += is_launch;
+            loop_t.n_launches += is_launch && !is_retry;
+            loop_t.n_retries  += is_retry;
             return res;
         });
         queue_tasks.on_update_slots([this]() {
@@ -1903,10 +1905,12 @@ private:
         return nullptr;
     }
 
-    server_slot * get_available_slot(const server_task & task) {
+    // the slot for the task, without changing any memory: the task may still wait; update_cache tells whether the prompt
+    // cache is updated for it when the task is launched, see slot_update_prompt_cache()
+    server_slot * get_available_slot(const server_task & task, bool & update_cache) {
         server_slot * ret = nullptr;
 
-        bool update_cache = false;
+        update_cache = false;
 
         // if a specific slot is requested, use it (still goes through cache update logic below)
         if (task.id_slot != -1) {
@@ -2000,56 +2004,53 @@ private:
             }
         }
 
-        if (ret) {
-            update_cache = update_cache && prompt_cache;
+        // cache prompts only for completion tasks
+        update_cache = ret && update_cache && prompt_cache && task.type == SERVER_TASK_TYPE_COMPLETION;
 
-            // cache prompts only for completion tasks
-            update_cache = update_cache && task.type == SERVER_TASK_TYPE_COMPLETION;
+        return ret;
+    }
 
-            if (update_cache) {
-                SRV_TRC("%s", "updating prompt cache\n");
+    // save the prompt of the slot to the prompt cache, and load the cached prompt that is best for the task instead
+    void slot_update_prompt_cache(server_slot * ret, const server_task & task) {
+        SRV_TRC("%s", "updating prompt cache\n");
 
-                const int64_t t_start = ggml_time_us();
+        const int64_t t_start = ggml_time_us();
 
-                ret->prompt_save(*prompt_cache);
+        ret->prompt_save(*prompt_cache);
 
-                // a slot in memory that can share a long enough prefix makes the copy from the RAM cache unnecessary,
-                // and sharing keeps a single copy of the prefix in the KV cache; a lora in the task could make the
-                // other slot's cells unusable, so only skip the copy for tasks without one
-                bool from_memory = false;
-                if (prefix_share_allowed(task.type) && task.params.lora.empty()) {
-                    prefix_share share;
-                    const int32_t n_own = ret->prompt.tokens.get_common_prefix(task.tokens);
-                    from_memory = prefix_share_find(ret, task.tokens, n_own, share) != nullptr;
+        // a slot in memory that can share a long enough prefix makes the copy from the RAM cache unnecessary,
+        // and sharing keeps a single copy of the prefix in the KV cache; a lora in the task could make the
+        // other slot's cells unusable, so only skip the copy for tasks without one
+        bool from_memory = false;
+        if (prefix_share_allowed(task.type) && task.params.lora.empty()) {
+            prefix_share share;
+            const int32_t n_own = ret->prompt.tokens.get_common_prefix(task.tokens);
+            from_memory = prefix_share_find(ret, task.tokens, n_own, share) != nullptr;
+        }
+
+        if (from_memory) {
+            SLT_DBG(*ret, "%s", "not loading from the prompt cache, a slot in memory can share the prefix\n");
+        } else {
+            // idle slots in memory give up room for the load: its cells replace the ones of this slot
+            if (kv_preemption_enabled()) {
+                while (kv_cells_committed() - ret->prompt.n_tokens() + task.n_tokens() > kv_cells_total() &&
+                       try_clear_idle_slot_rs(ret, "KV cells for a prompt cache load")) {
                 }
-
-                if (from_memory) {
-                    SLT_DBG(*ret, "%s", "not loading from the prompt cache, a slot in memory can share the prefix\n");
-                } else {
-                    // idle slots in memory give up room for the load: its cells replace the ones of this slot
-                    if (kv_preemption_enabled()) {
-                        while (kv_cells_committed() - ret->prompt.n_tokens() + task.n_tokens() > kv_cells_total() &&
-                               try_clear_idle_slot_rs(ret, "KV cells for a prompt cache load")) {
-                        }
-                    }
-                    if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
-                        const uint32_t n_new = ret->prompt.n_tokens() > 0 ? 0 : 1;
-                        while (n_rs_cells_held() + n_new > llama_n_rs_cells(ctx_tgt) && try_clear_idle_slot_rs(ret)) {
-                        }
-                    }
-
-                    if (!ret->prompt_load(*prompt_cache, task.tokens)) {
-                        ret->prompt_clear();
-                    }
+            }
+            if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
+                const uint32_t n_new = ret->prompt.n_tokens() > 0 ? 0 : 1;
+                while (n_rs_cells_held() + n_new > llama_n_rs_cells(ctx_tgt) && try_clear_idle_slot_rs(ret)) {
                 }
+            }
 
-                prompt_cache->update();
-
-                SRV_TRC("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
+            if (!ret->prompt_load(*prompt_cache, task.tokens)) {
+                ret->prompt_clear();
             }
         }
 
-        return ret;
+        prompt_cache->update();
+
+        SRV_TRC("prompt cache update took %.2f ms\n", (ggml_time_us() - t_start) / 1000.0);
     }
 
     // return true if at least one slot has been cleared
@@ -2064,7 +2065,7 @@ private:
     // recurrent/hybrid models hold one recurrent-state cell per sequence still in memory:
     // a slot holds one while processing, and afterwards for as long as its prompt stays loaded
     // a preempted slot holds no memory until it is resumed
-    uint32_t n_rs_cells_held() {
+    uint32_t n_rs_cells_held() const {
         uint32_t n = 0;
         for (auto & slot : slots) {
             if ((slot.is_processing() && slot.state != SLOT_STATE_PREEMPTED) || slot.prompt.n_tokens() > 0) {
@@ -2144,6 +2145,73 @@ private:
         victim->prompt_clear();
 
         return true;
+    }
+
+    // the most KV cells that try_clear_idle_slot_rs() can free while it spares `keep` and `keep_donor`: a cell shared
+    // by several slots is counted in each of them, but freed only with the last one
+    int32_t kv_cells_evictable(const server_slot * keep, const server_slot * keep_donor) const {
+        int32_t n = 0;
+        for (const auto & slot : slots) {
+            if (&slot != keep && &slot != keep_donor && !slot.is_processing()) {
+                n += slot.prompt.n_tokens();
+            }
+        }
+        return n;
+    }
+
+    // the free KV cells, counting what evicting idle slots frees: evicting does not change it
+    int32_t kv_cells_avail() const {
+        return kv_cells_total() - kv_cells_committed() + kv_cells_evictable(nullptr, nullptr);
+    }
+
+    // the recurrent-state cells that try_clear_idle_slot_rs() can free while it spares `keep` and `keep_donor`
+    uint32_t n_rs_cells_evictable(const server_slot * keep, const server_slot * keep_donor) const {
+        uint32_t n = 0;
+        for (const auto & slot : slots) {
+            if (&slot != keep && &slot != keep_donor && !slot.is_processing() && slot.prompt.n_tokens() > 0) {
+                n++;
+            }
+        }
+        return n;
+    }
+
+    // the free recurrent-state cells, counting what evicting idle slots frees
+    uint32_t n_rs_cells_avail() const {
+        const uint32_t n_rs_cells = llama_n_rs_cells(ctx_tgt);
+        return n_rs_cells - std::min(n_rs_cells, n_rs_cells_held()) + n_rs_cells_evictable(nullptr, nullptr);
+    }
+
+    // offer the tasks that wait for memory again once the KV cells and the recurrent-state cells they take are free:
+    // the smallest first, every one that fits: this starts the most requests the memory holds, see kv_schedule() for the
+    // same with preempted slots
+    // with no slot at work, all of them are offered: the first one is admitted whatever its size
+    void mem_offer_waiting(bool all) {
+        const bool is_rs = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
+
+        auto waiting = queue_tasks.get_deferred_mem_tasks();
+        std::stable_sort(waiting.begin(), waiting.end(), [](const server_queue::mem_wait & a, const server_queue::mem_wait & b) {
+            return a.n_kv_need < b.n_kv_need;
+        });
+
+        int32_t  n_kv_offered = 0;
+        uint32_t n_rs_offered = 0;
+
+        std::vector<int> offer;
+        for (const auto & w : waiting) {
+            if (!all) {
+                if (kv_preemption_enabled() && kv_cells_avail() - n_kv_offered < w.n_kv_wait_at) {
+                    continue;
+                }
+                if (is_rs && n_rs_cells_avail() < n_rs_offered + w.n_rs_need) {
+                    continue;
+                }
+            }
+            n_kv_offered += std::max(0, w.n_kv_need);
+            n_rs_offered += w.n_rs_need;
+            offer.push_back(w.id);
+        }
+
+        queue_tasks.pop_deferred_tasks(offer);
     }
 
     //
@@ -2588,6 +2656,7 @@ private:
         kv_budget_prompt = -1;
 
         if (!kv_preemption_enabled()) {
+            mem_offer_waiting(false);
             return;
         }
 
@@ -2619,29 +2688,77 @@ private:
             return n;
         };
 
-        // resume preempted slots oldest first, once their whole recompute fits next to the running slots
-        // a younger preempted slot never jumps ahead of an older one
+        // every request that waits for memory starts as soon as the pool holds it, the smallest first, so that the most
+        // requests run at once (one token per request in each generation step): a preempted slot
+        // when its whole recompute fits next to the running slots, a deferred task when its prompt fits (see
+        // defer_task_mem()); the preempted slots resume now, the deferred tasks are offered again after the reservation
+        // below, and the memory they take is counted from here on
         const bool is_rs = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
 
         // the recompute plus the first generation step after it
         const int32_t n_step_resume = 1 + (spec ? common_speculative_n_max(spec.get()) : 0);
 
+        struct waiting {
+            server_slot * slot; // a preempted slot, else a deferred task
+            int32_t       n_kv;
+            server_queue::mem_wait task;
+        };
+
+        std::vector<waiting> waiting_all;
         for (auto * slot : preempted) {
-            const int32_t need = slot->n_input_tokens() + n_step_resume;
+            waiting_all.push_back({ slot, slot->n_input_tokens() + n_step_resume, {} });
+        }
+        for (const auto & task : queue_tasks.get_deferred_mem_tasks()) {
+            waiting_all.push_back({ nullptr, task.n_kv_need, task });
+        }
+        std::stable_sort(waiting_all.begin(), waiting_all.end(), [](const waiting & a, const waiting & b) {
+            return a.n_kv < b.n_kv;
+        });
+
+        int32_t  n_kv_offered = 0;
+        uint32_t n_rs_offered = 0;
+
+        std::vector<int> offer;
+
+        for (const auto & w : waiting_all) {
+            if (w.slot == nullptr) {
+                if (kv_cells_avail() - n_kv_offered < w.task.n_kv_wait_at) {
+                    continue;
+                }
+                if (is_rs && n_rs_cells_avail() < n_rs_offered + w.task.n_rs_need) {
+                    continue;
+                }
+                n_kv_offered += std::max(0, w.task.n_kv_need);
+                n_rs_offered += w.task.n_rs_need;
+                offer.push_back(w.task.id);
+                continue;
+            }
+
+            server_slot * slot = w.slot;
+
+            const int32_t need = w.n_kv + n_kv_offered;
+
+            // nothing is evicted for a slot that does not fit even then
+            if (kv_cells_committed() + cells_step_running() + need > n_total + kv_cells_evictable(nullptr, nullptr)) {
+                continue;
+            }
+            if (is_rs && n_rs_cells_avail() < n_rs_offered + 1) {
+                continue;
+            }
 
             while (kv_cells_committed() + cells_step_running() + need > n_total && try_clear_idle_slot_rs(nullptr, "KV cells")) {
             }
 
             if (kv_cells_committed() + cells_step_running() + need > n_total) {
-                break;
+                continue;
             }
 
             if (is_rs) {
-                while (n_rs_cells_held() >= llama_n_rs_cells(ctx_tgt) && try_clear_idle_slot_rs(nullptr)) {
+                while (n_rs_cells_held() + n_rs_offered >= llama_n_rs_cells(ctx_tgt) && try_clear_idle_slot_rs(nullptr)) {
                 }
 
-                if (n_rs_cells_held() >= llama_n_rs_cells(ctx_tgt)) {
-                    break;
+                if (n_rs_cells_held() + n_rs_offered >= llama_n_rs_cells(ctx_tgt)) {
+                    continue;
                 }
             }
 
@@ -2665,62 +2782,41 @@ private:
             std::sort(running.begin(), running.end(), by_launch);
         }
 
-        // new tasks were deferred while slots were preempted, and a release only re-offers one of them:
-        // once the last preempted slot resumes, re-offer as many as there are idle slots
-        if (!preempted.empty() && !any_slot_preempted()) {
-            size_t n_idle = 0;
-            for (const auto & slot : slots) {
-                n_idle += slot.is_processing() ? 0 : 1;
+        // reserve the next step of every running slot; when the cache cannot hold them all, preempt the slots that hold the
+        // most cells first: each preemption then frees the most room for the one request it stops, so that the most
+        // requests keep running (see mem_offer_waiting()); the last running slot is never preempted, so it always advances
+        int32_t reserved = 0;
+        for (const auto * slot : running) {
+            if (slot->state != SLOT_STATE_PREEMPTED) {
+                reserved += kv_cells_step(*slot);
             }
-
-            queue_tasks.pop_deferred_tasks(n_idle);
         }
 
-        // reserve the next step of every running slot, oldest first, preempting the newest slots when needed
-        int32_t reserved = 0;
-
-        for (size_t i = 0; i < running.size(); ++i) {
-            server_slot * cur = running[i];
-
-            if (cur->state == SLOT_STATE_PREEMPTED) {
+        while (kv_cells_held() + reserved > n_total) {
+            if (try_clear_idle_slot_rs(nullptr, "KV cells")) {
                 continue;
             }
 
-            const int32_t need = kv_cells_step(*cur);
-
-            while (kv_cells_held() + reserved + need > n_total) {
-                if (try_clear_idle_slot_rs(nullptr, "KV cells")) {
+            server_slot * victim = nullptr;
+            int32_t       n_active = 0;
+            for (auto * slot : running) {
+                if (slot->state == SLOT_STATE_PREEMPTED) {
                     continue;
                 }
-
-                server_slot * victim = nullptr;
-                for (size_t j = running.size(); j-- > i + 1;) {
-                    if (running[j]->state != SLOT_STATE_PREEMPTED && kv_can_preempt(*running[j])) {
-                        victim = running[j];
-                        break;
-                    }
-                }
-
-                // the current slot is the newest one left: preempt it, unless it is the oldest running slot
-                if (victim == nullptr && i > 0 && kv_can_preempt(*cur)) {
-                    victim = cur;
-                }
-
-                if (victim == nullptr) {
-                    // nothing left to preempt, the decode falls back to retrying with smaller batches
-                    break;
-                }
-
-                kv_preempt(*victim);
-
-                if (victim == cur) {
-                    break;
+                n_active++;
+                if (kv_can_preempt(*slot) && (victim == nullptr || slot->prompt.n_tokens() > victim->prompt.n_tokens())) {
+                    victim = slot;
                 }
             }
 
-            if (cur->state != SLOT_STATE_PREEMPTED) {
-                reserved += need;
+            if (victim == nullptr || n_active <= 1) {
+                // nothing left to preempt, the decode falls back to retrying with smaller batches
+                break;
             }
+
+            reserved -= kv_cells_step(*victim);
+
+            kv_preempt(*victim);
         }
 
         // prompt tokens may use what is left after the generation steps
@@ -2746,6 +2842,8 @@ private:
         while (kv_budget_prompt < n_prompt_want && try_clear_idle_slot_rs(nullptr, "KV cells for prompts")) {
             kv_budget_prompt = std::max(0, n_total - kv_cells_held() - n_step_gen);
         }
+
+        queue_tasks.pop_deferred_tasks(offer);
     }
 
     std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
@@ -3467,6 +3565,15 @@ private:
         queue_tasks.defer(std::move(task));
     }
 
+    // holds a task back until the memory it takes is free, see mem_offer_waiting(): n_kv_missing more KV cells than
+    // now (counting what evicting idle slots frees), and n_rs_need recurrent-state cells
+    void defer_task_mem(server_task && task, server_defer_reason reason, int32_t n_kv_need, int32_t n_kv_missing, uint32_t n_rs_need) {
+        task.n_kv_need    = n_kv_need;
+        task.n_kv_wait_at = kv_preemption_enabled() ? kv_cells_avail() + std::max(0, n_kv_missing) : 0;
+        task.n_rs_need    = n_rs_need;
+        defer_task(std::move(task), reason);
+    }
+
     // returns false to decline the task, it is offered again after the decode is done
     bool process_single_task(server_task && task, bool is_yielding) {
         // while yielding, an encode / decode is running and only reading the server state is safe
@@ -3491,11 +3598,15 @@ private:
 
                     const int id_task = task.id;
 
-                    server_slot * slot = get_available_slot(task);
+                    bool update_cache = false;
+
+                    server_slot * slot = get_available_slot(task, update_cache);
 
                     //
                     // slot scheduling logic
                     //
+                    // the checks come first and change nothing: a task that waits costs no memory and no copies,
+                    // then idle slots are evicted to make room, then the prompt cache is updated for the slot
 
                     if (slot == nullptr) {
                         // if no slot is available, we defer this task for processing later
@@ -3513,7 +3624,9 @@ private:
 
                     // the prompt needs no new cells for what the slot already holds or can share from another slot,
                     // and that other slot must not be evicted to make room
-                    int32_t n_reuse = slot->prompt.tokens.get_common_prefix(task.tokens);
+                    const int32_t n_own = slot->prompt.tokens.get_common_prefix(task.tokens);
+
+                    int32_t n_reuse = n_own;
 
                     const server_slot * donor = nullptr;
                     if (params_base.kv_unified && prefix_share_allowed(task.type) && task.params.lora.empty()) {
@@ -3524,67 +3637,86 @@ private:
                         }
                     }
 
-                    // wait for a free recurrent-state cell here, because a decode that cannot get one errors every active slot
-                    if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
-                        const uint32_t n_rs_cells = llama_n_rs_cells(ctx_tgt);
-                        const uint32_t n_rs_new   = (slot->prompt.n_tokens() > 0 ? 0 : 1)
-                                                  + (task.is_parent() ? (uint32_t) task.child_tasks.size() : 0);
-
-                        if (n_rs_new > n_rs_cells) {
-                            SRV_ERR("task needs %u recurrent-state cells but only %u exist, id_task = %d\n", n_rs_new, n_rs_cells, id_task);
-                            send_error(task, "Request needs more parallel sequences than the server processes at once.", ERROR_TYPE_INVALID_REQUEST);
-                            break;
-                        }
-
-                        while (n_rs_cells_held() + n_rs_new > n_rs_cells && try_clear_idle_slot_rs(slot, "a recurrent-state cell", donor)) {
-                        }
-
-                        if (n_rs_cells_held() + n_rs_new > n_rs_cells) {
-                            SRV_DBG("no free recurrent-state cell, defer task, id_task = %d\n", id_task);
-                            defer_task(std::move(task), SERVER_DEFER_RECURRENT_CELL);
-                            break;
-                        }
-                    }
-
+                    // a task waits until the memory pool holds it: KV cells and recurrent-state cells
                     // with a unified KV cache, admit a task only when its whole prompt fits next to the memory already
-                    // held, and never ahead of a preempted slot; a task that cannot fit even alone is admitted when
-                    // nothing else runs, so that it fails with the usual context size error
-                    if (kv_preemption_enabled()) {
-                        if (any_slot_preempted()) {
-                            SRV_DBG("preempted slots are waiting, defer task, id_task = %d\n", id_task);
-                            defer_task(std::move(task), SERVER_DEFER_PREEMPTED_AHEAD);
-                            break;
-                        }
+                    // held, also while preempted slots wait for room; a task that cannot fit even alone is admitted
+                    // when nothing else runs, so that it fails with the usual context size error
+                    // wait for a free recurrent-state cell here, because a decode that cannot get one errors every active slot
+                    const bool     is_rs      = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
+                    const uint32_t n_rs_cells = is_rs ? llama_n_rs_cells(ctx_tgt) : 0;
+                    const uint32_t n_rs_new   = !is_rs ? 0 : (slot->prompt.n_tokens() > 0 ? 0 : 1)
+                                                               + (task.is_parent() ? (uint32_t) task.child_tasks.size() : 0);
 
-                        const int32_t n_total = kv_cells_total();
+                    if (is_rs && n_rs_new > n_rs_cells) {
+                        SRV_ERR("task needs %u recurrent-state cells but only %u exist, id_task = %d\n", n_rs_new, n_rs_cells, id_task);
+                        send_error(task, "Request needs more parallel sequences than the server processes at once.", ERROR_TYPE_INVALID_REQUEST);
+                        break;
+                    }
 
-                        const int32_t n_need = std::max(0, task.n_tokens() - n_reuse);
+                    const int32_t n_total = kv_cells_total();
 
-                        while (kv_cells_committed() + n_need > n_total && try_clear_idle_slot_rs(slot, "KV cells", donor)) {
-                        }
+                    // the cells of the slot past what it provides are freed when the task replaces its prompt
+                    const int32_t n_need = std::max(0, task.n_tokens() - n_reuse) - (slot->prompt.n_tokens() - n_own);
 
-                        bool any_running = false;
-                        for (const auto & other : slots) {
-                            any_running = any_running || other.is_processing();
-                        }
+                    bool any_running = false;
+                    for (const auto & other : slots) {
+                        any_running = any_running || other.is_processing();
+                    }
 
-                        if (any_running && kv_cells_committed() + n_need > n_total) {
-                            SRV_DBG("not enough free KV cells (committed = %d, prompt = %d, reused = %d, total = %d), defer task, id_task = %d\n",
-                                    kv_cells_committed(), task.n_tokens(), n_reuse, n_total, id_task);
-                            defer_task(std::move(task), SERVER_DEFER_KV_CELLS);
+                    // nothing is evicted for a task that does not fit even then
+                    {
+                        const int32_t n_kv_missing = !kv_preemption_enabled() || !any_running ? 0 :
+                            kv_cells_committed() + n_need - n_total - kv_cells_evictable(slot, donor);
+                        const bool rs_missing = is_rs && n_rs_cells_held() + n_rs_new > n_rs_cells + n_rs_cells_evictable(slot, donor);
+
+                        if (rs_missing || n_kv_missing > 0) {
+                            SRV_DBG("not enough free memory (committed = %d, prompt = %d, reused = %d, total = %d, rs cell missing = %d), defer task, id_task = %d\n",
+                                    kv_cells_committed(), task.n_tokens(), n_reuse, n_total, (int) rs_missing, id_task);
+                            defer_task_mem(std::move(task), rs_missing ? SERVER_DEFER_RECURRENT_CELL : SERVER_DEFER_KV_CELLS, n_need, n_kv_missing, n_rs_new);
                             break;
                         }
                     }
 
+                    // try getting free slots for all child tasks
+                    std::vector<server_slot *> child_slots;
                     if (task.is_parent()) {
-                        // try getting free slots for all child tasks
                         size_t n_child_tasks = task.child_tasks.size();
-                        std::vector<server_slot *> child_slots = get_free_slots(n_child_tasks, slot->id);
+                        child_slots = get_free_slots(n_child_tasks, slot->id);
                         if (child_slots.size() < n_child_tasks) {
                             SRV_DBG("not enough free slots for child tasks, n_free = %zu, n_children = %zu, defer task, id_task = %d\n", child_slots.size(), n_child_tasks, id_task);
                             defer_task(std::move(task), SERVER_DEFER_CHILD_SLOTS);
                             break;
                         }
+                    }
+
+                    // the task fits once idle slots give up their memory
+                    if (is_rs) {
+                        while (n_rs_cells_held() + n_rs_new > n_rs_cells && try_clear_idle_slot_rs(slot, "a recurrent-state cell", donor)) {
+                        }
+                    }
+                    if (kv_preemption_enabled()) {
+                        while (kv_cells_committed() + n_need > n_total && try_clear_idle_slot_rs(slot, "KV cells", donor)) {
+                        }
+                    }
+
+                    // a cell held by several idle slots is freed only with the last one
+                    {
+                        const int32_t n_kv_missing = !kv_preemption_enabled() || !any_running ? 0 : kv_cells_committed() + n_need - n_total;
+                        const bool rs_missing = is_rs && n_rs_cells_held() + n_rs_new > n_rs_cells;
+
+                        if (rs_missing || n_kv_missing > 0) {
+                            SRV_DBG("not enough free memory after evicting idle slots (committed = %d, prompt = %d, reused = %d, total = %d), defer task, id_task = %d\n",
+                                    kv_cells_committed(), task.n_tokens(), n_reuse, n_total, id_task);
+                            defer_task_mem(std::move(task), rs_missing ? SERVER_DEFER_RECURRENT_CELL : SERVER_DEFER_KV_CELLS, n_need, n_kv_missing, n_rs_new);
+                            break;
+                        }
+                    }
+
+                    if (update_cache) {
+                        slot_update_prompt_cache(slot, task);
+                    }
+
+                    if (task.is_parent()) {
                         if (!launch_slots_with_parent_task(*slot, child_slots, std::move(task))) {
                             SRV_ERR("failed to launch slot with parent task, id_task = %d\n", id_task);
                             break; // drop the task
@@ -3923,7 +4055,8 @@ private:
         int64_t t_media_us  = 0; // decoding media embeddings through the model
         int64_t t_decode_us = 0; // submitting the batch
         int64_t t_post_us   = 0; // post_decode(), including sampling
-        int32_t n_launches  = 0;
+        int32_t n_launches  = 0; // new completion tasks handled
+        int32_t n_retries   = 0; // completion tasks handled again after they were deferred
         int32_t n_media     = 0; // media tokens decoded
     } loop_t;
 
@@ -3978,10 +4111,10 @@ private:
         // or when handling the tasks alone is slow
         const int64_t t_slow_us = slow_loop_ms() * 1000;
         if (slow_loop_ms() > 0 && ((n_generating > 0 && t_iter_us >= t_slow_us) || loop_t.t_tasks_us >= t_slow_us)) {
-            SRV_INF("slow iteration: %.0f ms = tasks %.0f ms (%d launches) + pre_decode %.0f ms (media %.0f ms / %d tokens) + decode %.0f ms + post_decode %.0f ms; "
+            SRV_INF("slow iteration: %.0f ms = tasks %.0f ms (%d new, %d retried) + pre_decode %.0f ms (media %.0f ms / %d tokens) + decode %.0f ms + post_decode %.0f ms; "
                     "batch = %d tokens, generating = %d, since previous iteration = %.0f ms, prompt token cost doubles at depth %.0f "
                     "(fit: %.1f ms + %.3f ms/prompt token + %.3f ms/(prompt token*1e6 positions) + %.3f ms/generated token + %.3f ms/(generated token*1e6 positions))\n",
-                    t_iter_us / 1e3, loop_t.t_tasks_us / 1e3, loop_t.n_launches, loop_t.t_pre_us / 1e3, loop_t.t_media_us / 1e3, loop_t.n_media,
+                    t_iter_us / 1e3, loop_t.t_tasks_us / 1e3, loop_t.n_launches, loop_t.n_retries, loop_t.t_pre_us / 1e3, loop_t.t_media_us / 1e3, loop_t.n_media,
                     loop_t.t_decode_us / 1e3, loop_t.t_post_us / 1e3, n_batch_tokens, n_generating,
                     t_loop_end_us > 0 ? (t_now - t_loop_end_us) / 1e3 : 0.0, prompt_cost.depth_twice(),
                     prompt_cost.w[0], prompt_cost.w[1], prompt_cost.w[2], prompt_cost.w[3], prompt_cost.w[4]);
@@ -4045,6 +4178,9 @@ private:
 
                 loop_t = {};
                 t_loop_end_us = 0;
+
+                // kv_schedule() does not run without a slot at work
+                mem_offer_waiting(true);
 
                 return; // skip further processing
 

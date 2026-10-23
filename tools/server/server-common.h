@@ -445,7 +445,6 @@ struct server_slot_stats {
 enum server_defer_reason {
     SERVER_DEFER_NO_SLOT,          // all slots are busy, or the requested one
     SERVER_DEFER_RECURRENT_CELL,   // no free recurrent-state cell
-    SERVER_DEFER_PREEMPTED_AHEAD,  // a preempted request resumes first
     SERVER_DEFER_KV_CELLS,         // the prompt does not fit next to the KV cells held
     SERVER_DEFER_CHILD_SLOTS,      // not enough free slots for the child tasks
     SERVER_DEFER_REASON_COUNT,

@@ -11,7 +11,7 @@ N_PREDICT = 200
 def create_server():
     global server
     server = ServerPreset.tinyllama2()
-    # 4 requests of about 210 tokens do not fit 512 cells at once: the newest are preempted and resumed
+    # 4 requests of about 210 tokens do not fit 512 cells at once: some are preempted and resumed
     server.n_ctx = 512
     server.n_slots = N_REQUESTS
     server.n_predict = N_PREDICT

@@ -38,6 +38,9 @@ class llama_kv_cells {
 public:
     using seq_set_t = std::bitset<LLAMA_MAX_SEQ>;
 
+    // the used cells are also counted per chunk of this many cells, see chunk_n_used()
+    static constexpr uint32_t chunk_size = 64;
+
     void reset() {
         for (uint32_t i = 0; i < pos.size(); ++i) {
             pos[i]   = -1;
@@ -49,6 +52,7 @@ public:
         has_shift = false;
 
         used.clear();
+        chunk_used.assign((pos.size() + chunk_size - 1)/chunk_size, 0);
 
         for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
             seq_pos[s].clear();
@@ -85,6 +89,17 @@ public:
 
     uint32_t get_used() const {
         return used.size();
+    }
+
+    uint32_t n_chunks() const {
+        return chunk_used.size();
+    }
+
+    // the used cells in chunk c, the cells [c*chunk_size, (c + 1)*chunk_size)
+    uint32_t chunk_n_used(uint32_t c) const {
+        assert(c < chunk_used.size());
+
+        return chunk_used[c];
     }
 
     // the index of the first cell that is used
@@ -171,11 +186,11 @@ public:
             const auto idx = i + j;
 
             if (pos[idx] == -1 && other.pos[j] != -1) {
-                used.insert(i + j);
+                used_insert(i + j);
             }
 
             if (pos[idx] != -1 && other.pos[j] == -1) {
-                used.erase(i + j);
+                used_erase(i + j);
             }
 
             if (pos[idx] != -1) {
@@ -202,11 +217,11 @@ public:
             const auto idx = idxs[j];
 
             if (pos[idx] == -1 && other.pos[j] != -1) {
-                used.insert(idx);
+                used_insert(idx);
             }
 
             if (pos[idx] != -1 && other.pos[j] == -1) {
-                used.erase(idx);
+                used_erase(idx);
             }
 
             if (pos[idx] != -1) {
@@ -237,7 +252,7 @@ public:
         ext[i].reset();
         shift[i] = 0;
 
-        used.erase(i);
+        used_erase(i);
     }
 
     // note: call only if the cell has seq_id
@@ -256,7 +271,7 @@ public:
             ext[i].reset();
             shift[i] = 0;
 
-            used.erase(i);
+            used_erase(i);
 
             return true;
         }
@@ -286,7 +301,7 @@ public:
             ext[i].reset();
             shift[i] = 0;
 
-            used.erase(i);
+            used_erase(i);
 
             return true;
         }
@@ -474,7 +489,7 @@ public:
 
         pos[i] = p;
 
-        used.insert(i);
+        used_insert(i);
     }
 
     void ext_set(uint32_t i, llama_kv_cell_ext p) {
@@ -501,7 +516,7 @@ public:
             pos[i] = -1;
             shift[i] = 0;
 
-            used.erase(i);
+            used_erase(i);
 
             return true;
         }
@@ -535,6 +550,20 @@ private:
 
     // set of indices of used cells (i.e. pos[i] != -1, allowed to not have any seq_id)
     std::set<uint32_t> used;
+
+    // the number of used cells in each chunk of chunk_size cells
+    std::vector<uint32_t> chunk_used;
+
+    // call only when cell i changes from empty to used, or back
+    void used_insert(uint32_t i) {
+        used.insert(i);
+        chunk_used[i/chunk_size]++;
+    }
+
+    void used_erase(uint32_t i) {
+        used.erase(i);
+        chunk_used[i/chunk_size]--;
+    }
 
     std::vector<llama_pos> pos;
 

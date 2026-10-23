@@ -159,6 +159,13 @@ struct server_task {
     // why the task was last held back before it got a slot (server_defer_reason), -1 = never
     int32_t defer_reason = -1;
 
+    // set when the task waits for memory (SERVER_DEFER_KV_CELLS, SERVER_DEFER_RECURRENT_CELL): the KV cells and the
+    // recurrent-state cells it takes, and the free KV cells (counting what evicting idle slots frees) at which it is
+    // offered again
+    int32_t  n_kv_need    = 0;
+    int32_t  n_kv_wait_at = 0;
+    uint32_t n_rs_need    = 0;
+
     // only used by CLI, this allow tokenizing CLI inputs on server side
     // we need this because mtmd_context and vocab are not accessible outside of server_context
     bool                    cli = false;

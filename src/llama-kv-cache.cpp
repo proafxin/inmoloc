@@ -15,6 +15,7 @@
 #include <map>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 static bool ggml_is_power_of_2(int n) {
     return (n & (n - 1)) == 0;
@@ -897,6 +898,81 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
     return updated;
 }
 
+// places the tokens of the ubatch so that the cells of each sequence form runs: a token takes the cell after the last cell
+// of its sequence, else the first cell of the next empty chunk; a sequence holds the rest of its chunk this way, until no
+// chunk is empty: then a token takes any empty cell from head_cur, also in the rest of the chunk of another sequence
+// returns false when the cells cannot hold the ubatch
+static bool find_slot_chunked(const llama_ubatch & ubatch, const llama_kv_cells & cells, uint32_t head_cur, std::vector<uint32_t> & idxs) {
+    constexpr uint32_t chunk_size = llama_kv_cells::chunk_size;
+
+    const uint32_t n_cells = cells.size();
+
+    // the cells and the chunks taken by the tokens before, and the last cell of each sequence
+    std::unordered_set<uint32_t> taken;
+    std::unordered_set<uint32_t> chunks_taken;
+    std::unordered_map<llama_seq_id, uint32_t> last;
+
+    const auto is_free = [&](uint32_t i) {
+        return cells.is_empty(i) && taken.find(i) == taken.end();
+    };
+    const auto chunk_empty = [&](uint32_t c) {
+        return cells.chunk_n_used(c) == 0 && chunks_taken.find(c) == chunks_taken.end();
+    };
+
+    // the empty chunks are taken in order
+    uint32_t chunk_next = 0;
+    uint32_t n_tested   = 0;
+
+    for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+        const llama_seq_id seq_id = ubatch.seq_id[i][0];
+
+        int64_t idx = -1;
+
+        auto it = last.find(seq_id);
+        if (it == last.end() && cells.seq_n_cells(seq_id) > 0) {
+            it = last.emplace(seq_id, cells.seq_pos_cells(seq_id).rbegin()->second).first;
+        }
+        if (it != last.end()) {
+            const uint32_t next = it->second + 1;
+            if (next < n_cells && is_free(next) && (next/chunk_size == it->second/chunk_size || chunk_empty(next/chunk_size))) {
+                idx = next;
+            }
+        }
+
+        if (idx < 0) {
+            while (chunk_next < cells.n_chunks() && !chunk_empty(chunk_next)) {
+                chunk_next++;
+            }
+            if (chunk_next < cells.n_chunks()) {
+                idx = chunk_next*chunk_size;
+            }
+        }
+
+        while (idx < 0 && n_tested < n_cells) {
+            if (head_cur >= n_cells) {
+                head_cur = 0;
+            }
+            if (is_free(head_cur)) {
+                idx = head_cur;
+            }
+            head_cur++;
+            n_tested++;
+        }
+
+        if (idx < 0) {
+            return false;
+        }
+
+        taken.insert(idx);
+        chunks_taken.insert(idx/chunk_size);
+        last[seq_id] = idx;
+
+        idxs.push_back(idx);
+    }
+
+    return true;
+}
+
 llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch, bool cont) const {
 
     if (debug > 0) {
@@ -1011,6 +1087,15 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
         if (n_tokens > cells.size()) {
             LLAMA_LOG_ERROR("%s: n_tokens = %d > size = %u\n", __func__, n_tokens, cells.size());
             return { };
+        }
+
+        // a single stream holds the cells of all sequences: keep the cells of each one together
+        // a SWA cache reuses the masked cells of a sequence in place
+        if (!cont && n_stream == 1 && swa_type == LLAMA_SWA_TYPE_NONE) {
+            if (!find_slot_chunked(ubatch, cells, head_cur, res.idxs[s])) {
+                return { };
+            }
+            continue;
         }
 
         uint32_t n_tested = 0;

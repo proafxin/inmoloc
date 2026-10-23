@@ -69,7 +69,7 @@ struct llama_context {
     uint32_t n_seq_max() const;
 
     // max seqs a single ubatch can hold: on models with recurrent state this is the number of
-    // recurrent-state cells, since each seq in a ubatch needs its own cell
+    // recurrent-state cells, since each seq in a ubatch needs its own cell; never more than the tokens of a ubatch
     uint32_t n_seq_max_ubatch() const;
 
     uint32_t n_threads()       const;

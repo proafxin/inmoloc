@@ -946,7 +946,10 @@ uint32_t llama_context::n_seq_max_ubatch() const {
         dynamic_cast<const llama_memory_hybrid *>(mem)      != nullptr ||
         dynamic_cast<const llama_memory_hybrid_iswa *>(mem) != nullptr;
 
-    return has_rs ? cparams.n_rs_cells : cparams.n_seq_max;
+    // each seq of a ubatch has at least one token in it
+    const uint32_t n_tokens_max = std::min(cparams.n_ctx, cparams.n_ubatch);
+
+    return std::min(has_rs ? cparams.n_rs_cells : cparams.n_seq_max, n_tokens_max);
 }
 
 uint32_t llama_context::n_threads() const {

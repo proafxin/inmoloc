@@ -63,10 +63,22 @@ public:
 
     // Call when the state of one slot is changed, it will move one task from deferred to main queue
     // prioritize tasks that use the specified slot (otherwise, pop the first deferred task)
+    // skips the tasks that wait for memory (SERVER_DEFER_KV_CELLS, SERVER_DEFER_RECURRENT_CELL)
     void pop_deferred_task(int id_slot);
 
-    // move up to n deferred tasks, oldest first, to the front of the main queue, keeping their order
-    void pop_deferred_tasks(size_t n);
+    // a deferred task that waits for memory, see server_task::n_kv_need
+    struct mem_wait {
+        int      id;
+        int32_t  n_kv_need;
+        int32_t  n_kv_wait_at;
+        uint32_t n_rs_need;
+    };
+
+    // the deferred tasks that wait for memory, oldest first
+    std::vector<mem_wait> get_deferred_mem_tasks();
+
+    // move the deferred tasks with these ids to the front of the main queue, in this order
+    void pop_deferred_tasks(const std::vector<int> & ids);
 
     // if sleeping, request exiting sleep state and wait until it is done
     // returns immediately if not sleeping
