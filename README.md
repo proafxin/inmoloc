@@ -84,6 +84,29 @@ On one RTX 5090 laptop GPU (24 GiB) with Qwen3.8-27B IQ4_XS, MTP speculative dec
 - **q8_0 cache quality**: at 32k, 64k and 110k tokens of context, the q8_0 cache answered retrieval questions at 10%, 50% and 90% depth exactly as the f16 cache did, token for token (`scripts/kv-quality.py`).
 - **CPU temperature with `--gpu-wait block`**: on an MSI Vector 16 HX AI, the CPU averaged below 65 degC while serving, against about 100 degC with the driver's default.
 
+### OCR throughput against llama.cpp at the same memory
+
+Both servers ran alone on the same RTX 5090 laptop GPU, one at a time, with the same model and settings:
+
+- **Model**: PaddleOCR-VL 1.6, Q8_0 weights with its vision encoder (mmproj).
+- **Common settings**: bf16 KV cache (`-ctk bf16 -ctv bf16`), `--flash-attn on`, all layers on the GPU, no prompt cache in host memory (`--cache-ram 0`).
+- **Memory**: about 5 GiB of device memory each. llama.cpp (b11804, the `server-cuda` image of 2026-10-22) has no memory budget, so its cache was set by hand to the largest that fits: 45 slots of 4096 tokens (`-c 184320 --parallel 45`). inmoloc was given `--vram-budget 5G` and sized its cache and concurrency itself.
+- **Requests**: pages of scanned documents rendered at 300 dpi, about 1,250 image tokens each, sent to `/v1/chat/completions` with the prompt `OCR:`, temperature 0 and at most 1024 output tokens. At N requests at once, N clients send 3N requests in total, each client one request after another.
+- **Tokens/s** counts the output tokens of all requests over the wall time of the level.
+
+| Requests at once | llama.cpp tokens/s | inmoloc tokens/s | llama.cpp median latency | inmoloc median latency |
+| --- | --- | --- | --- | --- |
+| 1 | 421 | 400 | 0.8 s | 0.8 s |
+| 8 | 741 | 938 | 3.5 s | 3.2 s |
+| 32 | 751 | 1,237 | 14.7 s | 9.3 s |
+| 64 | 750 | 1,047 | 31.7 s | 24.9 s |
+| 128 | 758 | 1,058 | 72.5 s | 42.4 s |
+| 256 | 767 | 1,065 | 158.5 s | 49.3 s |
+
+- From 64 requests at once, inmoloc is limited by the vision encoder: it encodes one image at a time and was busy 90 to 95% of the time, at about 0.45 s per page.
+- Every level starts from the first page, so a level that runs after lower ones on the same server can find some of its pages still cached. The inmoloc rows for 8 and 32 ran after the lower levels, and 32 includes such reuse; 64 and 128 each ran on a fresh server; 256 ran after 1 and 128, when the cache was full of running requests and almost none of its pages were still cached.
+- With 1 request at a time, inmoloc's throughput is about 5% lower than llama.cpp's: each generated token takes 1.45 ms against 1.20 ms, while the prompts take the same time.
+
 ## Compared with llama.cpp and vLLM
 
 llama.cpp at commit 56381e407 (2026-09-12); vLLM as of 2026-10-15.

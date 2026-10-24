@@ -1,17 +1,3 @@
-# OCR benchmark: llama.cpp vs inmoloc on the same model and the same VRAM (about 5 GiB each).
-#
-# One service at a time, with nothing else on the GPU:
-#   docker compose up -d ocrbench-llamacpp   ... benchmark ...   docker compose stop ocrbench-llamacpp
-#   docker compose up -d ocrbench-inmoloc    ... benchmark ...   docker compose stop ocrbench-inmoloc
-#
-# Same model (Q8_0 GGUF), same BF16 KV cache, same flash attention, and no host-RAM prompt cache
-# (--cache-ram 0) on either: every OCR page is unique, so nothing would be reused.
-# llama.cpp has no memory budget, so its cache is set by hand: OCR_CTX tokens over OCR_PARALLEL fixed
-# slots (184320 / 45 = 4096 tokens per slot, the largest that fits in 5 GiB).
-# inmoloc gets only --vram-budget (OCR_BUDGET) and works out the cache size and the concurrency itself.
-# LLAMACPP_IMAGE defaults to a floating tag: pin it, and record the image digest with the results.
-# MODELS_DIR is where the PaddleOCR-VL-1.6 folder lives.
-
 x-models: &models
   - ${MODELS_DIR:-/home/masterkenway/Projects/citadel/data/gguf_models}:/models:ro
 
@@ -47,7 +33,7 @@ services:
       - --parallel
       - "${OCR_PARALLEL:-45}"
       - --cache-ram
-      - "0"
+      - "4096"
       - --metrics
       - --cache-type-k
       - bf16
@@ -92,7 +78,7 @@ services:
       - --vram-budget
       - ${OCR_BUDGET:-5G}
       - --cache-ram
-      - "0"
+      - "4096"
       - --metrics
       - --cache-type-k
       - bf16
