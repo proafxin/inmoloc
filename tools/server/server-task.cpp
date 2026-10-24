@@ -1852,6 +1852,9 @@ size_t server_prompt_cache::size_spare() const {
     for (const auto & buf : spare) {
         res += buf.capacity();
     }
+    for (const auto & buf : spare_pending) {
+        res += buf.capacity();
+    }
 
     return res;
 }
@@ -1859,7 +1862,7 @@ size_t server_prompt_cache::size_spare() const {
 std::list<server_prompt_cache_state>::iterator server_prompt_cache::remove(std::list<server_prompt_cache_state>::iterator it) {
     for (auto * buf : { &it->data.main, &it->data.drft }) {
         if (buf->capacity() > 0) {
-            spare.push_back(std::move(*buf));
+            (it->pending ? spare_pending : spare).push_back(std::move(*buf));
         }
     }
 
@@ -1882,6 +1885,30 @@ common_state_buffer server_prompt_cache::take_spare(size_t n) {
     spare.erase(best);
 
     return res;
+}
+
+void server_prompt_cache::synced() {
+    if (!pending) {
+        return;
+    }
+    pending = false;
+
+    for (auto & state : states) {
+        state.pending = false;
+    }
+    for (auto & buf : spare_pending) {
+        spare.push_back(std::move(buf));
+    }
+    spare_pending.clear();
+
+    trim_spare();
+}
+
+void server_prompt_cache::sync(llama_context * ctx_tgt) {
+    if (pending) {
+        llama_synchronize(ctx_tgt);
+        synced();
+    }
 }
 
 void server_prompt_cache::trim_spare() {
@@ -1968,6 +1995,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
     // the buffers of removed entries, where one holds the state
     common_state_buffer state_data_tgt = take_spare(state_size_tgt);
     common_state_buffer state_data_dft = take_spare(state_size_dft);
+    state_data_tgt.buft = buft;
 
     // the spares that are not reused make room for the new buffers
     trim_spare();
@@ -2003,6 +2031,8 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
 }
 
 bool server_prompt_cache::load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot) {
+    sync(ctx_tgt);
+
     const int lcp_best = prompt.tokens.get_common_prefix(tokens_new);
 
     float f_keep_best = prompt.tokens.size() > 0 ? float(lcp_best) / prompt.tokens.size() : -1.0f; // empty slot: any cache entry wins

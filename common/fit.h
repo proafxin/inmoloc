@@ -68,6 +68,10 @@ bool common_budget_params(
 // the free device memory of the devices a model runs on, summed
 size_t common_device_memory_free(const llama_model * model);
 
+// the pinned host memory of the first device a model runs on, into which copies from that device do not block;
+// nullptr when the model runs on the host alone or the device has none
+ggml_backend_buffer_type_t common_device_host_buffer_type(const llama_model * model);
+
 // the device memory this process holds on the devices a model runs on, the CUDA context and libraries included;
 // false when a device cannot tell (see ggml_backend_dev_process_memory_t)
 bool common_device_memory_own(const llama_model * model, size_t & used);

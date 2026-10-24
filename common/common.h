@@ -1192,6 +1192,10 @@ struct common_state_buffer {
     size_t n   = 0; // bytes of the state
     size_t cap = 0; // bytes allocated, the buffer can be reused for a smaller state
 
+    // when set, the memory is allocated from this buffer type, e.g. the pinned host memory of a GPU, into which the
+    // copies from the device do not block (LLAMA_STATE_SEQ_FLAGS_ASYNC)
+    ggml_backend_buffer_type_t buft = nullptr;
+
     size_t size()     const { return n; }
     size_t capacity() const { return cap; }
     bool   empty()    const { return n == 0; }

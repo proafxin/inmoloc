@@ -2333,7 +2333,15 @@ bool common_prompt_batch_decode(
 
 uint8_t * common_state_buffer::alloc(size_t n_new) {
     if (!buf || buf.use_count() > 1 || cap < n_new) {
-        buf.reset(new uint8_t[n_new]); // default-initialized: the state overwrites every byte
+        if (buft != nullptr) {
+            ggml_backend_buffer_t b = ggml_backend_buft_alloc_buffer(buft, n_new);
+            if (b == nullptr) {
+                throw std::bad_alloc();
+            }
+            buf = std::shared_ptr<uint8_t[]>((uint8_t *) ggml_backend_buffer_get_base(b), [b](uint8_t *) { ggml_backend_buffer_free(b); });
+        } else {
+            buf.reset(new uint8_t[n_new]); // default-initialized: the state overwrites every byte
+        }
         cap = n_new;
     }
     n = n_new;

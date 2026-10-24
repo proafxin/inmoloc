@@ -1588,3 +1588,11 @@ size_t common_device_memory_free(const llama_model * model) {
 
     return res;
 }
+
+ggml_backend_buffer_type_t common_device_host_buffer_type(const llama_model * model) {
+    if (llama_model_n_devices(model) == 0) {
+        return nullptr;
+    }
+
+    return ggml_backend_dev_host_buffer_type(llama_model_get_device(model, 0));
+}

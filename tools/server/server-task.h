@@ -625,6 +625,9 @@ struct server_prompt_cache_state {
     server_prompt prompt;
     server_prompt_data data;
 
+    // saved with LLAMA_STATE_SEQ_FLAGS_ASYNC since the context was last synchronized, see server_prompt_cache::buft
+    bool pending = false;
+
     size_t size() const {
         size_t res = data.size();
 
@@ -648,11 +651,20 @@ struct server_prompt_cache {
     // and zeroing by the kernel, and freeing it returns the memory to the system; within the size limit with the entries
     std::vector<common_state_buffer> spare;
 
+    // the buffers of entries removed while their state was still on its way: spares once the context is synchronized
+    std::vector<common_state_buffer> spare_pending;
+
     // in bytes, 0 = no limit
     size_t limit_size = 0;
 
     // in tokens, 0 = no limit
     size_t limit_tokens = 0;
+
+    // the main states are allocated from this buffer type when set (pinned host memory) and saved with
+    // LLAMA_STATE_SEQ_FLAGS_ASYNC: until the context is synchronized, a saved state may still be on its way, so it is
+    // not loaded and its buffer is neither reused nor freed
+    ggml_backend_buffer_type_t buft = nullptr;
+    bool pending = false; // any state is on its way
 
     size_t size() const;
 
@@ -663,6 +675,12 @@ struct server_prompt_cache {
     bool load(server_prompt & prompt, const server_tokens & tokens_new, llama_context * ctx_tgt, llama_context * ctx_dft, int32_t id_slot);
 
     void update();
+
+    // the context has been synchronized since the last save: every saved state is complete
+    void synced();
+
+    // waits for the saved states that are still on their way
+    void sync(llama_context * ctx_tgt);
 
 private:
     // removes an entry, keeping its state buffers as spares

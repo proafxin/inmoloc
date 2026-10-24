@@ -947,6 +947,12 @@ extern "C" {
 // Getting the state for a seq_id with this flag invalidates all prior states gotten for that seq_id with this flag.
 #define LLAMA_STATE_SEQ_FLAGS_ON_DEVICE 2
 
+// Queues the copies of the tensor data from the device on the context's backends instead of waiting for them: the
+// data in dst is complete only once the context is synchronized (llama_synchronize(), or anything that waits for the
+// results, e.g. reading the logits). dst must stay allocated until then, and should be pinned host memory, else the
+// copies may wait as without the flag.
+#define LLAMA_STATE_SEQ_FLAGS_ASYNC 4
+
     typedef uint32_t llama_state_seq_flags;
 
     LLAMA_API size_t llama_state_seq_get_size_ext(
