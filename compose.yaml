@@ -1,0 +1,120 @@
+# OCR benchmark: llama.cpp vs inmoloc on the same model and the same VRAM (about 5 GiB each).
+#
+# One service at a time, with nothing else on the GPU:
+#   docker compose up -d ocrbench-llamacpp   ... benchmark ...   docker compose stop ocrbench-llamacpp
+#   docker compose up -d ocrbench-inmoloc    ... benchmark ...   docker compose stop ocrbench-inmoloc
+#
+# Same model (Q8_0 GGUF), same BF16 KV cache, same flash attention, and no host-RAM prompt cache
+# (--cache-ram 0) on either: every OCR page is unique, so nothing would be reused.
+# llama.cpp has no memory budget, so its cache is set by hand: OCR_CTX tokens over OCR_PARALLEL fixed
+# slots (184320 / 45 = 4096 tokens per slot, the largest that fits in 5 GiB).
+# inmoloc gets only --vram-budget (OCR_BUDGET) and works out the cache size and the concurrency itself.
+# LLAMACPP_IMAGE defaults to a floating tag: pin it, and record the image digest with the results.
+# MODELS_DIR is where the PaddleOCR-VL-1.6 folder lives.
+
+x-models: &models
+  - ${MODELS_DIR:-/home/masterkenway/Projects/citadel/data/gguf_models}:/models:ro
+
+x-gpu: &gpu
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
+
+services:
+  ocrbench-llamacpp:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    container_name: ocrbench-llamacpp
+    restart: "no"
+    ipc: host
+    command:
+      - --model
+      - /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-Q8_0.gguf
+      - --mmproj
+      - /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-GGUF-mmproj.gguf
+      - --chat-template-file
+      - /models/PaddleOCR-VL-1.6/chat_template.jinja
+      - -ngl
+      - "999"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8110"
+      - -c
+      - "${OCR_CTX:-184320}"
+      - --parallel
+      - "${OCR_PARALLEL:-45}"
+      - --cache-ram
+      - "0"
+      - --metrics
+      - --cache-type-k
+      - bf16
+      - --cache-type-v
+      - bf16
+      - --flash-attn
+      - "on"
+      - --alias
+      - ocrt
+    ports:
+      - "8110:8110"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8110/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  ocrbench-inmoloc:
+    image: ${INMOLOC_IMAGE:-inmoloc:sched6}
+    container_name: ocrbench-inmoloc
+    restart: "no"
+    ipc: host
+    command:
+      - --model
+      - /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-Q8_0.gguf
+      - --mmproj
+      - /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-GGUF-mmproj.gguf
+      - --chat-template-file
+      - /models/PaddleOCR-VL-1.6/chat_template.jinja
+      - -ngl
+      - "999"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8111"
+      - --vram-budget
+      - ${OCR_BUDGET:-5G}
+      - --cache-ram
+      - "0"
+      - --metrics
+      - --cache-type-k
+      - bf16
+      - --cache-type-v
+      - bf16
+      - --flash-attn
+      - "on"
+      - --alias
+      - ocrt
+      # diagnostics: log a time breakdown of every main-loop iteration slower than 30 ms
+      - --slow-loop-ms
+      - "30"
+    ports:
+      - "8111:8111"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8111/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu

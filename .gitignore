@@ -152,3 +152,8 @@ a.out.*
 # AGENTS
 
 AGENTS.local.md
+bench_out/*
+
+# core dumps
+core
+core.[0-9]*

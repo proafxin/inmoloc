@@ -1232,6 +1232,10 @@ private:
     uint64_t n_launch_next    = 0;
     int32_t  kv_budget_prompt = -1; // KV cells left for prompt tokens in the current batch, -1 = unlimited
 
+    // the tokens a finished request generated, a running mean over the recent ones, see kv_gen_expected()
+    double   gen_mean   = 0.0;
+    uint64_t n_gen_seen = 0;
+
     std::unique_ptr<server_prompt_cache> prompt_cache;
 
     server_metrics metrics;
@@ -1442,6 +1446,7 @@ private:
                 }
             }
         }
+
 
         // the media encoder runs on its own thread next to the decodes (see server_media_encoder): the contexts that
         // generate go first on the GPU, so that encoding an image does not stall the slots that are generating
@@ -1658,6 +1663,9 @@ private:
                 // flush the generated token stats before reset()
                 if (slot.stats.n_gen > 0) {
                     metrics_on_prediction(slot);
+
+                    n_gen_seen++;
+                    gen_mean += (slot.stats.n_gen - gen_mean)/std::min<uint64_t>(n_gen_seen, 64);
                 }
             };
 
@@ -2159,9 +2167,33 @@ private:
         return n;
     }
 
-    // the free KV cells, counting what evicting idle slots frees: evicting does not change it
+    // the tokens a request with the limit n_predict (-1 = none) is expected to generate: the mean of the finished
+    // requests, at most the limit; 0 until a request has finished
+    int32_t kv_gen_expected(int32_t n_predict) const {
+        if (n_gen_seen == 0) {
+            return 0;
+        }
+        const int32_t n = (int32_t) std::lround(gen_mean);
+        return n_predict >= 0 ? std::min(n, n_predict) : n;
+    }
+
+    // the KV cells the running slots still take as they generate: the rest of what each one is expected to generate,
+    // at least its next step; admitting next to this keeps the running slots from being preempted
+    int32_t kv_cells_growth() const {
+        int32_t n = 0;
+        for (const auto & slot : slots) {
+            if (!slot.is_processing() || slot.state == SLOT_STATE_PREEMPTED || slot.state == SLOT_STATE_WAIT_OTHER) {
+                continue;
+            }
+            n += std::max(kv_cells_step(slot), kv_gen_expected(slot.n_predict_max) - (int32_t) slot.stats.n_gen);
+        }
+        return n;
+    }
+
+    // the free KV cells, counting what evicting idle slots frees and what the running slots take as they generate:
+    // evicting does not change it
     int32_t kv_cells_avail() const {
-        return kv_cells_total() - kv_cells_committed() + kv_cells_evictable(nullptr, nullptr);
+        return kv_cells_total() - kv_cells_committed() - kv_cells_growth() + kv_cells_evictable(nullptr, nullptr);
     }
 
     // the recurrent-state cells that try_clear_idle_slot_rs() can free while it spares `keep` and `keep_donor`
@@ -2196,13 +2228,16 @@ private:
         int32_t  n_kv_offered = 0;
         uint32_t n_rs_offered = 0;
 
+        const int32_t  n_kv_avail = kv_preemption_enabled() ? kv_cells_avail() : 0;
+        const uint32_t n_rs_avail = is_rs ? n_rs_cells_avail() : 0;
+
         std::vector<int> offer;
         for (const auto & w : waiting) {
             if (!all) {
-                if (kv_preemption_enabled() && kv_cells_avail() - n_kv_offered < w.n_kv_wait_at) {
+                if (kv_preemption_enabled() && n_kv_avail - n_kv_offered < w.n_kv_wait_at) {
                     continue;
                 }
-                if (is_rs && n_rs_cells_avail() < n_rs_offered + w.n_rs_need) {
+                if (is_rs && n_rs_avail < n_rs_offered + w.n_rs_need) {
                     continue;
                 }
             }
@@ -2680,22 +2715,15 @@ private:
         std::sort(running.begin(),   running.end(),   by_launch);
         std::sort(preempted.begin(), preempted.end(), by_launch);
 
-        const auto cells_step_running = [&]() {
-            int32_t n = 0;
-            for (const auto * slot : running) {
-                n += kv_cells_step(*slot);
-            }
-            return n;
-        };
-
         // every request that waits for memory starts as soon as the pool holds it, the smallest first, so that the most
-        // requests run at once (one token per request in each generation step): a preempted slot
-        // when its whole recompute fits next to the running slots, a deferred task when its prompt fits (see
+        // requests run at once (one token per request in each generation step): a preempted slot when its whole
+        // recompute and what it is expected to generate fit next to the running slots and the room they generate into
+        // (see kv_cells_growth()), a deferred task when its prompt fits (see
         // defer_task_mem()); the preempted slots resume now, the deferred tasks are offered again after the reservation
         // below, and the memory they take is counted from here on
         const bool is_rs = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
 
-        // the recompute plus the first generation step after it
+        // the recompute plus the first generation step after it, or the rest of what the slot is expected to generate
         const int32_t n_step_resume = 1 + (spec ? common_speculative_n_max(spec.get()) : 0);
 
         struct waiting {
@@ -2706,7 +2734,8 @@ private:
 
         std::vector<waiting> waiting_all;
         for (auto * slot : preempted) {
-            waiting_all.push_back({ slot, slot->n_input_tokens() + n_step_resume, {} });
+            const int32_t n_gen_left = kv_gen_expected(slot->n_predict_max) - (int32_t) slot->stats.n_gen;
+            waiting_all.push_back({ slot, slot->n_input_tokens() + std::max(n_step_resume, n_gen_left), {} });
         }
         for (const auto & task : queue_tasks.get_deferred_mem_tasks()) {
             waiting_all.push_back({ nullptr, task.n_kv_need, task });
@@ -2718,14 +2747,18 @@ private:
         int32_t  n_kv_offered = 0;
         uint32_t n_rs_offered = 0;
 
+        // the free memory, which changes only when a preempted slot resumes below
+        int32_t  n_kv_avail = kv_cells_avail();
+        uint32_t n_rs_avail = is_rs ? n_rs_cells_avail() : 0;
+
         std::vector<int> offer;
 
         for (const auto & w : waiting_all) {
             if (w.slot == nullptr) {
-                if (kv_cells_avail() - n_kv_offered < w.task.n_kv_wait_at) {
+                if (n_kv_avail - n_kv_offered < w.task.n_kv_wait_at) {
                     continue;
                 }
-                if (is_rs && n_rs_cells_avail() < n_rs_offered + w.task.n_rs_need) {
+                if (is_rs && n_rs_avail < n_rs_offered + w.task.n_rs_need) {
                     continue;
                 }
                 n_kv_offered += std::max(0, w.task.n_kv_need);
@@ -2739,17 +2772,17 @@ private:
             const int32_t need = w.n_kv + n_kv_offered;
 
             // nothing is evicted for a slot that does not fit even then
-            if (kv_cells_committed() + cells_step_running() + need > n_total + kv_cells_evictable(nullptr, nullptr)) {
+            if (kv_cells_committed() + kv_cells_growth() + need > n_total + kv_cells_evictable(nullptr, nullptr)) {
                 continue;
             }
-            if (is_rs && n_rs_cells_avail() < n_rs_offered + 1) {
+            if (is_rs && n_rs_avail < n_rs_offered + 1) {
                 continue;
             }
 
-            while (kv_cells_committed() + cells_step_running() + need > n_total && try_clear_idle_slot_rs(nullptr, "KV cells")) {
+            while (kv_cells_committed() + kv_cells_growth() + need > n_total && try_clear_idle_slot_rs(nullptr, "KV cells")) {
             }
 
-            if (kv_cells_committed() + cells_step_running() + need > n_total) {
+            if (kv_cells_committed() + kv_cells_growth() + need > n_total) {
                 continue;
             }
 
@@ -2780,11 +2813,14 @@ private:
 
             running.push_back(slot);
             std::sort(running.begin(), running.end(), by_launch);
+
+            n_kv_avail = kv_cells_avail();
+            n_rs_avail = is_rs ? n_rs_cells_avail() : 0;
         }
 
         // reserve the next step of every running slot; when the cache cannot hold them all, preempt the slots that hold the
-        // most cells first: each preemption then frees the most room for the one request it stops, so that the most
-        // requests keep running (see mem_offer_waiting()); the last running slot is never preempted, so it always advances
+        // fewest cells first: they have done the least work, which the resume computes again, and are the furthest from
+        // finishing and freeing their cells; the last running slot is never preempted, so it always advances
         int32_t reserved = 0;
         for (const auto * slot : running) {
             if (slot->state != SLOT_STATE_PREEMPTED) {
@@ -2804,7 +2840,7 @@ private:
                     continue;
                 }
                 n_active++;
-                if (kv_can_preempt(*slot) && (victim == nullptr || slot->prompt.n_tokens() > victim->prompt.n_tokens())) {
+                if (kv_can_preempt(*slot) && (victim == nullptr || slot->prompt.n_tokens() < victim->prompt.n_tokens())) {
                     victim = slot;
                 }
             }
@@ -3655,8 +3691,13 @@ private:
 
                     const int32_t n_total = kv_cells_total();
 
-                    // the cells of the slot past what it provides are freed when the task replaces its prompt
-                    const int32_t n_need = std::max(0, task.n_tokens() - n_reuse) - (slot->prompt.n_tokens() - n_own);
+                    // the prompt and what the task is expected to generate; the cells of the slot past what it provides are
+                    // freed when the task replaces its prompt
+                    const int32_t n_gen  = kv_gen_expected(task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict);
+                    const int32_t n_need = std::max(0, task.n_tokens() - n_reuse) + n_gen - (slot->prompt.n_tokens() - n_own);
+
+                    // the running slots keep the room they are expected to generate into, see kv_cells_growth()
+                    const int32_t n_growth = kv_cells_growth();
 
                     bool any_running = false;
                     for (const auto & other : slots) {
@@ -3666,7 +3707,7 @@ private:
                     // nothing is evicted for a task that does not fit even then
                     {
                         const int32_t n_kv_missing = !kv_preemption_enabled() || !any_running ? 0 :
-                            kv_cells_committed() + n_need - n_total - kv_cells_evictable(slot, donor);
+                            kv_cells_committed() + n_growth + n_need - n_total - kv_cells_evictable(slot, donor);
                         const bool rs_missing = is_rs && n_rs_cells_held() + n_rs_new > n_rs_cells + n_rs_cells_evictable(slot, donor);
 
                         if (rs_missing || n_kv_missing > 0) {
@@ -3695,13 +3736,13 @@ private:
                         }
                     }
                     if (kv_preemption_enabled()) {
-                        while (kv_cells_committed() + n_need > n_total && try_clear_idle_slot_rs(slot, "KV cells", donor)) {
+                        while (kv_cells_committed() + n_growth + n_need > n_total && try_clear_idle_slot_rs(slot, "KV cells", donor)) {
                         }
                     }
 
                     // a cell held by several idle slots is freed only with the last one
                     {
-                        const int32_t n_kv_missing = !kv_preemption_enabled() || !any_running ? 0 : kv_cells_committed() + n_need - n_total;
+                        const int32_t n_kv_missing = !kv_preemption_enabled() || !any_running ? 0 : kv_cells_committed() + n_growth + n_need - n_total;
                         const bool rs_missing = is_rs && n_rs_cells_held() + n_rs_new > n_rs_cells;
 
                         if (rs_missing || n_kv_missing > 0) {
