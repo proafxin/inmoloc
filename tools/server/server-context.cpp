@@ -384,7 +384,15 @@ struct server_slot {
         const int64_t t_alloc_us = ggml_time_us();
 
         // the buffers the entry allocated (alloc() returns them again, they are not shared)
-        llama_state_seq_get_data_ext(ctx_tgt, cur->data.main.alloc(cur_size_tgt), cur_size_tgt, id, LLAMA_STATE_SEQ_FLAGS_NONE);
+        // in pinned memory the state is copied while the loop goes on, see server_prompt_cache::buft; the draft context
+        // is not synchronized with the target one, so its state is copied now
+        const bool async = prompt_cache.buft != nullptr;
+        llama_state_seq_get_data_ext(ctx_tgt, cur->data.main.alloc(cur_size_tgt), cur_size_tgt, id,
+                async ? LLAMA_STATE_SEQ_FLAGS_ASYNC : LLAMA_STATE_SEQ_FLAGS_NONE);
+        if (async) {
+            cur->pending        = true;
+            prompt_cache.pending = true;
+        }
         if (ctx_dft) {
             llama_state_seq_get_data_ext(ctx_dft, cur->data.drft.alloc(cur_size_dft), cur_size_dft, id, LLAMA_STATE_SEQ_FLAGS_NONE);
         }
@@ -1277,6 +1285,11 @@ private:
         ctx_dft   = nullptr;
         model_dft = nullptr;
 
+        // the states still on their way are copied by the context about to be freed
+        if (prompt_cache && ctx_tgt) {
+            prompt_cache->sync(ctx_tgt);
+        }
+
         llama_init.reset();
 
         ctx_tgt = nullptr;
@@ -1716,6 +1729,7 @@ private:
             SRV_TRC("%s", "use `--cache-ram 0` to disable the prompt cache\n");
 
             prompt_cache = std::make_unique<server_prompt_cache>(params_base.cache_ram_mib, n_ctx);
+            prompt_cache->buft = common_device_host_buffer_type(model_tgt);
         } else {
             SRV_TRC("%s", "prompt cache is disabled - use `--cache-ram N` to enable it\n");
         }
@@ -4338,6 +4352,11 @@ private:
                 const int64_t t_post_start_us = ggml_time_us();
                 post_decode(n_tokens, off, batch_view);
                 loop_t.t_post_us += ggml_time_us() - t_post_start_us;
+
+                // reading the outputs waited for the decode, and so for the states saved before it
+                if (prompt_cache && n_tokens > n_view_prompt) {
+                    prompt_cache->synced();
+                }
 
                 if (!view_shared && !media_encode_pending()) {
                     prompt_cost.update(n_view_prompt, s_view_prompt, n_tokens - n_view_prompt, s_view_gen,

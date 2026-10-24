@@ -4505,7 +4505,10 @@ size_t llama_state_seq_get_size_ext(llama_context * ctx, llama_seq_id seq_id, ll
 }
 
 size_t llama_state_seq_get_data_ext(llama_context * ctx, uint8_t * dst, size_t size, llama_seq_id seq_id, llama_state_seq_flags flags) {
-    ctx->synchronize();
+    // queued copies run after the work already queued on the same backends, see LLAMA_STATE_SEQ_FLAGS_ASYNC
+    if (!(flags & LLAMA_STATE_SEQ_FLAGS_ASYNC)) {
+        ctx->synchronize();
+    }
 
     return ctx->state_seq_get_data(seq_id, dst, size, flags);
 }

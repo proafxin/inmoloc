@@ -2331,18 +2331,35 @@ bool common_prompt_batch_decode(
     return true;
 }
 
+// a buffer type such as pinned host memory is slow to allocate and to free: its buffers come in size classes, four
+// per doubling, so that the buffer of one state is reused by the next state of about the same size
+static size_t common_state_buffer_size_class(size_t n) {
+    size_t c = 1u << 20;
+    while (c < n) {
+        c *= 2;
+    }
+    for (size_t i = 5; i < 8; ++i) {
+        if (c/8*i >= n) {
+            return c/8*i;
+        }
+    }
+    return c;
+}
+
 uint8_t * common_state_buffer::alloc(size_t n_new) {
     if (!buf || buf.use_count() > 1 || cap < n_new) {
         if (buft != nullptr) {
-            ggml_backend_buffer_t b = ggml_backend_buft_alloc_buffer(buft, n_new);
+            const size_t n_alloc = common_state_buffer_size_class(n_new);
+            ggml_backend_buffer_t b = ggml_backend_buft_alloc_buffer(buft, n_alloc);
             if (b == nullptr) {
                 throw std::bad_alloc();
             }
             buf = std::shared_ptr<uint8_t[]>((uint8_t *) ggml_backend_buffer_get_base(b), [b](uint8_t *) { ggml_backend_buffer_free(b); });
+            cap = n_alloc;
         } else {
             buf.reset(new uint8_t[n_new]); // default-initialized: the state overwrites every byte
+            cap = n_new;
         }
-        cap = n_new;
     }
     n = n_new;
 

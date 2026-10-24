@@ -1983,6 +1983,26 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
     }
 
     if (limit_size > 0) {
+        // a buffer type that is slow to allocate and to free (pinned memory): with no spare that holds the new state,
+        // room is made first with one of the oldest entries whose buffer holds it, which the new state then reuses
+        if (buft != nullptr && size() + state_size_new > limit_size) {
+            const bool fits = std::any_of(spare.begin(), spare.end(), [&](const common_state_buffer & buf) {
+                return buf.capacity() >= state_size_tgt;
+            });
+            if (!fits) {
+                const size_t n_oldest = std::max<size_t>(1, states.size()/4);
+                auto it = states.begin();
+                for (size_t i = 0; i < n_oldest && it != states.end(); ++i, ++it) {
+                    if (!it->pending && it->data.main.capacity() >= state_size_tgt) {
+                        SRV_TRC(" - making room for prompt cache entry, removing an old entry whose buffer holds it (size = %.3f MiB)\n",
+                                it->size() / (1024.0 * 1024.0));
+                        remove(it);
+                        break;
+                    }
+                }
+            }
+        }
+
         // make room before allocating the new buffers to avoid breaching the limit
         while (!states.empty() && size() + state_size_new > limit_size) {
             SRV_WRN(" - making room for prompt cache entry, removing oldest entry (size = %.3f MiB)\n",
