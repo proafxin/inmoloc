@@ -103,9 +103,22 @@ Both servers ran alone on the same RTX 5090 laptop GPU, one at a time, with the 
 | 128 | 758 | 1,058 | 72.5 s | 42.4 s |
 | 256 | 767 | 1,065 | 158.5 s | 49.3 s |
 
-- From 64 requests at once, inmoloc is limited by the vision encoder: it encodes one image at a time and was busy 90 to 95% of the time, at about 0.45 s per page.
+- From 64 requests at once, the vision encoder is the limit: every page is encoded once, one at a time, and the encoder was busy 90 to 95% of the time, at about 0.45 s per page while sharing the GPU with the generating requests (about 0.19 s with the GPU to itself). More requests at once then wait for the encoder without adding throughput. Encoding first and generating after, or giving the encoder the higher GPU priority, measured slower, as the GPU is already busy with both. Where this limit sets in depends on the GPU and the vision model.
 - Every level starts from the first page, so a level that runs after lower ones on the same server can find some of its pages still cached. The inmoloc rows for 8 and 32 ran after the lower levels, and 32 includes such reuse; 64 and 128 each ran on a fresh server; 256 ran after 1 and 128, when the cache was full of running requests and almost none of its pages were still cached.
 - With 1 request at a time, inmoloc's throughput is about 5% lower than llama.cpp's: each generated token takes 1.45 ms against 1.20 ms, while the prompts take the same time.
+
+With a prompt cache in host memory on both servers (`--cache-ram 4096`), each running the levels 1 to 256 one after another on a fresh server, the pages seen in a lower level can be served from a cached prompt without encoding the image again:
+
+| Requests at once | llama.cpp tokens/s | inmoloc tokens/s | llama.cpp median latency | inmoloc median latency | Requests from a cached prompt, llama.cpp | inmoloc |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 431 | 406 | 0.8 s | 0.8 s | 2 of 8 | 2 of 8 |
+| 8 | 722 | 975 | 3.7 s | 3.3 s | 8 of 24 | 8 of 24 |
+| 32 | 726 | 1,277 | 15.0 s | 8.9 s | 24 of 96 | 24 of 96 |
+| 64 | 1,030 | 1,504 | 25.0 s | 16.1 s | 96 of 192 | 96 of 192 |
+| 128 | 823 | 1,025 | 65.6 s | 41.7 s | 60 of 384 | 119 of 384 |
+| 256 | 788 | 924 | 154.5 s | 53.4 s | 0 of 768 | 6 of 768 |
+
+At 128 requests at once, inmoloc served twice as many requests from a cached prompt: the prompts of finished requests stay in device memory, shared across requests, until their cells are needed, and then go to the host cache. At 256, the pages are new to both servers.
 
 ## Compared with llama.cpp and vLLM
 
