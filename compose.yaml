@@ -1,5 +1,5 @@
 x-models: &models
-  - ${MODELS_DIR:-/home/masterkenway/Projects/citadel/data/gguf_models}:/models:ro
+  - ${MODELS_DIR:-/home/masterkenway/models}:/models:ro
 
 x-gpu: &gpu
   resources:
@@ -98,6 +98,109 @@ services:
       interval: 10s
       timeout: 5s
       start_period: 120s
+      retries: 3
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  # Text benchmark: Qwen3.8-27B with its MTP layer, on both servers with the same settings (q8_0 KV cache, flash
+  # attention, MTP drafting 2 tokens, no host prompt cache). Run with scripts/bench-server-concurrency.py and
+  # --prompt-tokens, so that every request has its own text and nothing is reused from a cache.
+  # inmoloc sizes itself from TEXT_BUDGET; llama.cpp gets the cache by hand (TEXT_CTX over TEXT_PARALLEL slots), set
+  # to what inmoloc chose at the same budget.
+  textbench-llamacpp:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    container_name: textbench-llamacpp
+    restart: "no"
+    ipc: host
+    command:
+      - --model
+      - /models/Qwen3.8-27B-AP-Q4_K_XL.gguf
+      - -ngl
+      - "999"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8120"
+      - -c
+      - "${TEXT_CTX:-65536}"
+      - --parallel
+      - "${TEXT_PARALLEL:-8}"
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "2"
+      - --cache-ram
+      - "0"
+      - --metrics
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --flash-attn
+      - "on"
+      - --alias
+      - text
+    ports:
+      - "8120:8120"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8120/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 300s
+      retries: 3
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  textbench-inmoloc:
+    image: ${INMOLOC_IMAGE:-inmoloc:sched10}
+    container_name: textbench-inmoloc
+    restart: "no"
+    ipc: host
+    command:
+      - --model
+      - /models/Qwen3.8-27B-AP-Q4_K_XL.gguf
+      - -ngl
+      - "999"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8121"
+      - --vram-budget
+      - ${TEXT_BUDGET:-20G}
+      # Qwen3.8 holds recurrent state per request: the requests at once are sized for requests of this many tokens
+      # (prompt and output, e.g. --prompt-tokens 1000 and --max-tokens 512 of the benchmark)
+      - --ctx-typical
+      - "${TEXT_TYPICAL:-2048}"
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "2"
+      - --cache-ram
+      - "0"
+      - --metrics
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --flash-attn
+      - "on"
+      - --alias
+      - text
+      - --slow-loop-ms
+      - "100"
+    ports:
+      - "8121:8121"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8121/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 300s
       retries: 3
     ulimits:
       memlock: -1

@@ -355,8 +355,6 @@ llama_context::llama_context(
     LLAMA_LOG_INFO("%s: n_rs_seq              = %u\n",   __func__, cparams.n_rs_seq);
     LLAMA_LOG_INFO("%s: n_rs_cells            = %u\n",   __func__, cparams.n_rs_cells);
     LLAMA_LOG_INFO("%s: rs_rollback           = %s\n",   __func__, llama_rs_rollback_type_name(params.rs_rollback));
-    LLAMA_LOG_INFO("%s: backend_priority      = %s\n",   __func__,
-            params.backend_priority == GGML_BACKEND_PRIORITY_HIGH ? "high" : params.backend_priority == GGML_BACKEND_PRIORITY_LOW ? "low" : "normal");
     LLAMA_LOG_INFO("%s: n_outputs_max         = %u\n",   __func__, cparams.n_outputs_max);
     LLAMA_LOG_INFO("%s: n_outputs_max_per_seq = %u\n",   __func__, cparams.n_outputs_max_per_seq);
 
@@ -389,18 +387,6 @@ llama_context::llama_context(
                     throw std::runtime_error(format("failed to initialize %s backend", ggml_backend_dev_name(dev)));
                 }
                 backends.emplace_back(backend);
-            }
-        }
-
-        // the priority of the context's work, on the backends that support one
-        if (params.backend_priority != GGML_BACKEND_PRIORITY_NORMAL) {
-            for (auto & backend : backends) {
-                ggml_backend_dev_t dev = ggml_backend_get_device(backend.get());
-                ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : nullptr;
-                auto set_priority = reg ? (ggml_backend_set_priority_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_priority") : nullptr;
-                if (set_priority != nullptr) {
-                    set_priority(backend.get(), params.backend_priority);
-                }
             }
         }
 
@@ -696,8 +682,11 @@ void llama_context::sched_reserve() {
 
     LLAMA_LOG_DEBUG("%s: max_nodes = %zu\n", __func__, max_nodes);
 
-    gf_res_prev.reset(new llm_graph_result(max_nodes));
+    for (auto & res : gf_res_prev) {
+        res.reset();
+    }
     gf_res_reserve.reset(new llm_graph_result(max_nodes));
+    gf_res_prev_active = nullptr;
 
     sched.reset(ggml_backend_sched_new(backend_ptrs.data(), backend_buft.data(), backend_ptrs.size(), max_nodes, cparams.pipeline_parallel, cparams.op_offload));
 
@@ -989,10 +978,14 @@ bool llama_context::memory_update(bool optimize) {
                 }
         }
 
-        // reset the previous graph result to make sure that it won't be reused
-        // TODO: change the mctx->apply() to return information if a graph reserve is needed
-        //       reset the graph result only if the memory module did reset the scheduler
-        gf_res_prev->reset();
+        // reset the previous graph results to make sure that they won't be reused
+        // TODO: make mctx->apply() report if a graph reserve is needed, then reset graph results only if the memory module reset the scheduler
+        for (auto & res : gf_res_prev) {
+            if (res) {
+                res->reset();
+            }
+        }
+        gf_res_prev_active = nullptr;
 
         if (!mctx->apply()) {
             LLAMA_LOG_ERROR("%s: failed to apply memory update\n", __func__);
@@ -1515,7 +1508,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         return nullptr;
     }
 
-    auto * res = gf_res_prev.get();
+    auto * res = get_gf_res_prev();
     auto * gf  = res->get_gf();
 
     // the new graph parameters
@@ -1524,7 +1517,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
     n_graph_computes++;
 
-    if (!graph_reuse_disable && res->can_reuse(gparams)) {
+    if (!graph_reuse_disable && gf_res_prev_active == res && res->can_reuse(gparams)) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         // with pipeline parallelism, the previous graph_compute_async may still be running
@@ -1536,6 +1529,7 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
 
         n_reused++;
     } else {
+        gf_res_prev_active = nullptr;
         res->reset();
 
         ggml_backend_sched_reset(sched.get());
@@ -1559,6 +1553,8 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
             ret = GGML_STATUS_ALLOC_FAILED;
             return nullptr;
         }
+
+        gf_res_prev_active = res;
 
         // a re-plan first waits for the work already submitted, which is not time spent allocating
         const int64_t t_wait_us = ggml_backend_sched_get_t_realloc_sync_us(sched.get()) - t_sync_us;
@@ -2583,6 +2579,14 @@ llm_graph_result * llama_context::get_gf_res_reserve() const {
     return static_cast<llm_graph_result *>(gf_res_reserve.get());
 }
 
+llm_graph_result * llama_context::get_gf_res_prev() {
+    auto & res = gf_res_prev[n_outputs > 0];
+    if (!res) {
+        res.reset(new llm_graph_result(gf_res_reserve->get_max_nodes()));
+    }
+    return res.get();
+}
+
 // pack sampler outputs into as few sequences as possible before using sequences without samplers
 static void ubatch_prepare_reserve(
               llama_ubatch                            & ubatch,
@@ -2652,8 +2656,13 @@ ggml_cgraph * llama_context::graph_reserve(
 
     ggml_backend_sched_reset(sched.get());
 
-    // when the scheduler is reset, we cannot reuse the old graph, so we reset the previous graph result to prevent that
-    gf_res_prev->reset();
+    // when the scheduler is reset, we cannot reuse old graphs, so we reset the previous graph results
+    for (auto & res : gf_res_prev) {
+        if (res) {
+            res->reset();
+        }
+    }
+    gf_res_prev_active = nullptr;
 
     // store the n_outputs as it is, and restore it afterwards
     // TODO: not sure if needed, might simplify in the future by removing this
@@ -3777,10 +3786,12 @@ void llama_context::opt_epoch_iter(
                 break;
             }
 
-            auto * res = gf_res_prev.get();
+            auto * res = get_gf_res_prev();
 
             const auto gparams = graph_params(res, ubatch, mctx.get(), ctx_type_to_graph_type(cparams.ctx_type));
 
+            // the optimizer graph is allocated outside sched, so the next decode must rebuild
+            gf_res_prev_active = nullptr;
             res->reset();
 
             auto * gf = model.build_graph(gparams);
@@ -3915,7 +3926,6 @@ llama_context_params llama_context_default_params() {
         /*.ctx_other                   =*/ nullptr,
         /*.n_rs_cells                  =*/ 0,
         /*.rs_rollback                 =*/ LLAMA_RS_ROLLBACK_SNAPSHOT,
-        /*.backend_priority            =*/ GGML_BACKEND_PRIORITY_NORMAL,
     };
 
     return result;

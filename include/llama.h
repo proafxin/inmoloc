@@ -429,8 +429,6 @@ extern "C" {
         // inmoloc: after the fields of llama.cpp, so that those keep their offsets
         uint32_t n_rs_cells;            // recurrent-state cells shared by all sequences (0 = n_seq_max) [EXPERIMENTAL]
         enum llama_rs_rollback_type rs_rollback; // how the recurrent state rolls back, see llama_rs_rollback_type [EXPERIMENTAL]
-        enum ggml_backend_priority backend_priority; // priority of the context's work against other work on its devices,
-                                                     // e.g. a media encoder running at the same time [EXPERIMENTAL]
     };
 
     struct llama_model_tensor_override {

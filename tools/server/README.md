@@ -170,7 +170,6 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `-kvu, --kv-unified, -no-kvu, --no-kv-unified` | the requests processed at once always share one KV cache; accepted for compatibility<br/>(env: LOCAL_INFERENCE_ARG_KV_UNIFIED) |
 | `--prefix-share, --no-prefix-share` | let a new request start from the memory of another slot that holds the same prefix (default: enabled) |
 | `--prefix-share-min N` | the least gain in tokens worth sharing a prefix from another slot (default: 256) |
-| `--prompt-cap N` | prompt tokens processed per iteration while other requests generate, so their next token is not held up by<br/>a whole batch of prompt (default: -1 = what fills one ubatch next to the generated tokens, 0 = no cap) |
 | `--slow-loop-ms N` | log a time breakdown of server loop iterations that take longer than N ms (default: 1000, 0 = off) |
 | `--cache-idle-slots, --no-cache-idle-slots` | save an idle slot to the prompt cache when its memory is needed, by a new task or to free KV cells; until then it stays in the KV cache (default: enabled, requires cache-ram)<br/>(env: LOCAL_INFERENCE_ARG_CACHE_IDLE_SLOTS) |
 | `--context-shift, --no-context-shift` | whether to use context shift on infinite text generation (default: disabled)<br/>(env: LOCAL_INFERENCE_ARG_CONTEXT_SHIFT) |

@@ -456,7 +456,6 @@ struct common_params {
     int32_t n_parallel            =     1; // number of parallel sequences to decode
 
     enum llama_rs_rollback_type rs_rollback = LLAMA_RS_ROLLBACK_SNAPSHOT; // how the recurrent state rolls back drafts
-    enum ggml_backend_priority backend_priority = GGML_BACKEND_PRIORITY_NORMAL; // of the contexts against other work on the devices
     int32_t n_sequences           =     1; // number of sequences to decode
     int32_t n_outputs_max         =     0; // max outputs in a batch (0 = n_batch)
     int32_t n_outputs_max_per_seq =     1; // max outputs per sequence
@@ -647,7 +646,6 @@ struct common_params {
     bool    cache_idle_slots    = true;  // save idle slots to the prompt cache (unified KV: when evicted for memory, else upon starting a new task)
     bool    prefix_share        = true;  // a new request may start from the memory of another slot with the same prefix
     int32_t prefix_share_min    = 256;   // the least gain in tokens worth sharing a prefix
-    int32_t prompt_cap          = -1;    // prompt tokens per iteration while slots generate (-1 = one ubatch, 0 = no cap)
     int32_t slow_loop_ms        = 1000;  // log a breakdown of main-loop iterations slower than this (0 = off)
     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
     int32_t checkpoint_min_step = 8192;  // minimum spacing between context checkpoints

@@ -19,10 +19,9 @@ inmoloc started from llama.cpp at commit 56381e407 (2026-09-12) and is maintaine
 | KV cache per request | With `--parallel N`, by default the context is split into N fixed parts; with `--kv-unified`, one cache shared by all requests | Always one cache shared by all requests; a request takes cells for the tokens it holds |
 | Memory projection | Fits the model and context to free memory with a margin (`--fit`) | Measures every part (weights, KV cache, per-request state, compute, draft, vision encoder, backend scratch, and the CUDA context, kernels and libraries the process holds, through NVML on NVIDIA GPUs) with no margin, and sizes the KV cache and, for a model with memory per request, the number of requests from the typical request size (`--ctx-typical`); a model without it runs `--parallel` requests that share the cache |
 | Memory outside the buffers (CUDA pools, cuBLAS) | Grows while serving, when an operation first needs it | Sized from the worst-case graphs and reserved at startup |
-| KV cache full | Retries with smaller batches; when one token does not fit, every active request fails ("Context size has been exceeded.") and its cache is cleared | Admission keeps room for the output requests are expected to generate; when running requests still outgrow the cache, the requests that hold the fewest cells give them back (preemption) and the others continue; a preempted request is restored from the prompt cache in host memory (`--cache-ram`) when it resumes, else recomputed |
-| Prompt and generation in one batch | Prompt tokens fill the batch next to the generated tokens | Prompt tokens are admitted by their measured cost, which grows with depth (`--prompt-cap`) |
+| KV cache full | Retries with smaller batches; when one token does not fit, every active request fails ("Context size has been exceeded.") and its cache is cleared | Admission keeps room for the output requests are expected to generate; when running requests still outgrow the cache, the newest requests give their cells back (preemption) and the others continue; a preempted request is restored from the prompt cache in host memory (`--cache-ram`) when it resumes, else recomputed |
 | Shared prefixes | A request reuses the prefix its own slot holds | A request can also start from the cells of another request with the same prefix (`--prefix-share`) |
-| Images | Encoded on the server loop, while generation waits | Encoded on their own thread and GPU stream at a lower priority, while the other requests generate |
+| Images | Encoded on the server loop, while generation waits | Encoded on their own thread, while the other requests generate |
 | Waiting for the GPU (CUDA) | Chosen by the driver, usually a busy CPU core | Also `--gpu-wait block`: the thread sleeps until the GPU is done (`spin` and `yield` are the other values) |
 
 ## Attention and KV cache
@@ -52,7 +51,6 @@ Options of `local-inference-server` that are new, or that mean something else th
 | --- | --- | --- |
 | `--vram-budget SIZE` | free device memory | Device memory the server may use, summed over the devices the model runs on |
 | `--ctx-typical N` | the longest request that fits | Tokens a typical request holds; for a model with memory per request (e.g. recurrent state), sets the number of requests at once and the KV cache size; a model without it runs `--parallel` requests that share the cache |
-| `--prompt-cap N` | `-1` (one ubatch) | Prompt tokens per iteration while requests generate, weighted by their cost; `0` = no cap |
 | `--prefix-share`, `--no-prefix-share` | enabled | Let a new request start from another request's cached prefix |
 | `--prefix-share-min N` | `256` | Least number of tokens a shared prefix must save |
 | `--rs-rollback {snapshot,replay}` | `snapshot` | How recurrent state rolls back rejected speculative tokens |

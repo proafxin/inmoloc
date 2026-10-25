@@ -1742,17 +1742,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
-        {"--prompt-cap"}, "N",
-        "prompt tokens processed per iteration while other requests generate, so their next token is not held up by\n"
-        "a whole batch of prompt (default: -1 = what fills one ubatch next to the generated tokens, 0 = no cap)",
-        [](common_params & params, int value) {
-            if (value < -1) {
-                throw std::invalid_argument("error: --prompt-cap must be -1, 0 or positive\n");
-            }
-            params.prompt_cap = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}));
-    add_opt(common_arg(
         {"--slow-loop-ms"}, "N",
         string_format("log a time breakdown of server loop iterations that take longer than N ms (default: %d, 0 = off)",
                       params.slow_loop_ms),

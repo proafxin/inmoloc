@@ -16,11 +16,10 @@ inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps
 
 - **Shared KV cache**: all requests share one cache, and each request takes cells only for the tokens it holds, up to the model's training context.
 - **Memory budget**: at startup the server measures the weights, KV cache, per-request state, compute buffers, draft model, vision encoder, backend scratch memory, and what the process holds outside them (CUDA context, loaded kernels, libraries; measured for the process through NVML on NVIDIA GPUs). For a model with memory per request (e.g. recurrent state), it chooses from the typical request size (`--ctx-typical`) the number of requests at once and the cache size that serve the most requests within `--vram-budget`. A model without it runs `--parallel` requests that share the whole cache, as many at once as their sizes allow. Memory does not grow while serving.
-- **Admission and preemption**: a request is admitted when its prompt and the output it is expected to generate (the mean of recent requests, at most its limit) fit in free memory; waiting requests start smallest first, as soon as memory frees. When running requests still outgrow the cache, the request that holds the fewest cells is paused and the others continue. A paused request's state goes to the prompt cache in host memory (`--cache-ram`) and is restored when it resumes; without room there, it is recomputed.
+- **Admission and preemption**: a request is admitted when its prompt and the output it is expected to generate (the mean of recent requests, at most its limit) fit in free memory; waiting requests start in arrival order as soon as they fit. When running requests still outgrow the cache, the newest request is paused and the others continue. A paused request's state goes to the prompt cache in host memory (`--cache-ram`) and is restored when it resumes; without room there, it is recomputed.
 - **Per-request attention** (CUDA): each request reads only its own KV cells, so its cost grows with its own context, not with other requests. Quantized q8_0 and q4_0 caches are read directly.
 - **Prefix sharing**: a new request starts from the cached cells of another request with the same prefix, without copying them.
-- **Cost-based prompt scheduling**: long prompts are processed in chunks sized by their measured cost, so requests that are generating are not held up.
-- **Asynchronous vision encoder**: images are encoded on their own thread and lower-priority GPU stream while other requests generate.
+- **Asynchronous vision encoder**: images are encoded on their own thread while other requests generate.
 - **Replay rollback for speculative decoding**: on hybrid gated delta-net models such as Qwen3.5, memory per request stays nearly the same at any draft depth.
 - **Low CPU load while waiting for the GPU** (CUDA): with `--gpu-wait block` the server thread sleeps instead of spinning a CPU core.
 - **Observability**: the startup log shows the memory projection and what fills it; Prometheus metrics cover KV cells, why requests wait before they get a slot, preemptions and the tokens restored after them, prefix sharing, attention cost and free device memory; `--slow-loop-ms` logs slow server iterations.
@@ -65,7 +64,6 @@ The options below are specific to inmoloc; all other options are as in llama.cpp
 | `--ctx-typical N` | the longest request that fits | Tokens a typical request holds. For a model with memory per request (e.g. recurrent state), the budget runs the most requests at once whose typical requests fit in the KV cache, and gives the memory left to the cache. A model without it runs `--parallel` requests that share the cache. The startup log shows the longest request the budget holds. |
 | `--ctx-size N` | automatic | The most tokens the KV cache holds. Not needed: without it the cache is sized from the budget. |
 | `--parallel N` | auto | Upper limit on requests at once; the budget may lower it. |
-| `--prompt-cap N` | `-1` | Prompt tokens per iteration while requests generate, weighted by cost. `-1`: fill one ubatch, `0`: no cap. |
 | `--prefix-share`, `--no-prefix-share` | enabled | Let a new request start from another request's cached prefix. |
 | `--prefix-share-min N` | `256` | Least number of tokens a shared prefix must save. |
 | `--rs-rollback {snapshot,replay}` | `snapshot` | How recurrent state rolls back rejected speculative tokens. `replay` applies to gated delta-net models. |
@@ -129,7 +127,7 @@ llama.cpp at commit 56381e407 (2026-09-12); vLLM as of 2026-10-15.
 | Startup | Loads the model | Profiles memory, captures CUDA graphs, compiles the model | Loads the model after short memory dry runs |
 | GPU memory taken | What the model and context need | A fixed fraction (`--gpu-memory-utilization`) | What the model and context need, within `--vram-budget` |
 | KV cache | `--parallel` fixed parts by default, shared with `--kv-unified` | Shared pool of blocks | Shared, per token |
-| Cache full | Every active request fails | Newest requests preempted | Requests with the least work done preempted |
+| Cache full | Every active request fails | Newest requests preempted | Newest requests preempted |
 | Attention reads | All used cells | Own blocks | Own cells (CUDA) |
 | Shared prefixes | Own slot only | Across requests | Across requests |
 | Quantized KV cache | q8_0, q4_0 and others | fp8 | q8_0, q4_0 and others |
