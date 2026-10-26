@@ -205,6 +205,8 @@ private:
     bool state_read_meta(llama_io_read_i & io, uint32_t cell_count, llama_seq_id dest_seq_id = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t cell_count);
 
+    void state_clear(llama_seq_id seq_id, uint32_t cell_head, uint32_t cell_count);
+
     // the pending tokens of each seq and their cached inputs, see rs_replay
     void state_write_pend(llama_io_write_i & io, llama_seq_id seq_id) const;
     bool state_read_pend (llama_io_read_i  & io, llama_seq_id dest_seq_id);

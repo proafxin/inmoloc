@@ -2764,11 +2764,7 @@ const slot_info_vec_t *   sinfos_in) {
         }
 
         if (!res) {
-            if (seq_id == -1) {
-                clear(true);
-            } else {
-                seq_rm(seq_id, -1, -1);
-            }
+            state_clear(seq_id, strm, sinfo);
             throw std::runtime_error("failed to restore kv cache");
         }
 
@@ -2916,6 +2912,11 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t strm, uint32
 
     if (dest_seq_id != -1) {
         // single sequence
+        if (cell_count > cells.size()) {
+            LLAMA_LOG_ERROR("%s: not enough cells in kv cache\n", __func__);
+            return false;
+        }
+
         seq_rm(dest_seq_id, -1, -1);
 
         llama_batch_allocr balloc(hparams.n_pos_per_embd());
@@ -3237,6 +3238,101 @@ bool llama_kv_cache::state_read_data(llama_io_read_i & io, uint32_t strm, uint32
     }
 
     return true;
+}
+
+void llama_kv_cache::state_clear(llama_seq_id seq_id) {
+    if (seq_id == -1) {
+        clear(true);
+        return;
+    }
+
+    GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
+
+    const uint32_t strm = seq_to_stream[seq_id];
+
+    const auto & cells = v_cells[strm];
+
+    slot_info sinfo;
+    sinfo.s0 = strm;
+    sinfo.s1 = strm;
+    sinfo.resize(1);
+    sinfo.strm[0] = strm;
+
+    // a cell that another sequence still uses keeps its data
+    for (uint32_t i = 0; i < cells.size(); ++i) {
+        if (cells.seq_has(i, seq_id) && cells.seq_count(i) == 1) {
+            sinfo.idxs[0].push_back(i);
+        }
+    }
+
+    state_clear(seq_id, strm, sinfo);
+}
+
+// the cleared ranges mirror the write pattern of state_read_data() - keep both in sync
+void llama_kv_cache::state_clear(llama_seq_id seq_id, uint32_t strm, const slot_info & sinfo) {
+    if (seq_id == -1) {
+        clear(true);
+        return;
+    }
+
+    seq_rm(seq_id, -1, -1);
+
+    // zero the K/V data of the failed restore attempt - the attention can still read the data of free cells
+    if (sinfo.empty() || sinfo.size() == 0) {
+        return;
+    }
+
+    const auto & cells = v_cells[strm];
+
+    // the cells in runs of consecutive indices, as state_read_data() writes them
+    struct run { uint32_t from, to; };
+    std::vector<run> runs;
+    {
+        const auto & idxs = sinfo.idxs[0];
+        for (size_t i0 = 0; i0 < idxs.size();) {
+            size_t i1 = i0 + 1;
+            while (i1 < idxs.size() && idxs[i1] == idxs[i1 - 1] + 1) {
+                ++i1;
+            }
+            runs.push_back({idxs[i0], idxs[i1 - 1] + 1});
+            i0 = i1;
+        }
+    }
+
+    for (const auto & layer : layers) {
+        auto * k = layer.k_stream[strm];
+
+        const size_t k_size_row = ggml_row_size(k->type, hparams.n_embd_k_gqa(layer.il));
+
+        for (const auto & r : runs) {
+            llama_clear_tensor_data(k, (size_t) r.from * k_size_row, (size_t) (r.to - r.from) * k_size_row);
+        }
+    }
+
+    for (const auto & layer : layers) {
+        auto * v = layer.v_stream[strm];
+        if (!v) {
+            continue;
+        }
+
+        const uint32_t n_embd_v_gqa = hparams.n_embd_v_gqa(layer.il);
+
+        if (!v_trans) {
+            const size_t v_size_row = ggml_row_size(v->type, n_embd_v_gqa);
+
+            for (const auto & r : runs) {
+                llama_clear_tensor_data(v, (size_t) r.from * v_size_row, (size_t) (r.to - r.from) * v_size_row);
+            }
+        } else {
+            const size_t v_size_el = ggml_type_size(v->type);
+
+            for (uint32_t j = 0; j < n_embd_v_gqa; ++j) {
+                for (const auto & r : runs) {
+                    llama_clear_tensor_data(v, ((size_t) r.from + (size_t) j * cells.size()) * v_size_el, (size_t) (r.to - r.from) * v_size_el);
+                }
+            }
+        }
+    }
 }
 
 //

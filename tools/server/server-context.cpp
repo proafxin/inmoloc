@@ -1330,7 +1330,8 @@ private:
         }
 
         // the memory usage of mmproj: the concurrency computed at startup counts it, --fit leaves it free
-        if (has_mmproj) {
+        // on resume params_base already holds it from the first load
+        if (has_mmproj && !is_resume) {
             int64_t t_start = ggml_time_us();
             auto mmproj_mem = mtmd_get_memory_usage(mmproj_path.c_str(), mparams);
             int64_t t_elapsed = ggml_time_us() - t_start;
