@@ -1651,7 +1651,10 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
 
         sched->t_realloc_sync_us += t_reserve_us - t_sync_us;
 
-        ggml_gallocr_reserve_n(sched->galloc, &sched->graph, sched->node_backend_ids, sched->leaf_backend_ids);
+        if (!ggml_gallocr_reserve_n(sched->galloc, &sched->graph, sched->node_backend_ids, sched->leaf_backend_ids)) {
+            GGML_LOG_ERROR("%s: failed to reserve graph buffers\n", __func__);
+            return false;
+        }
 
         // the synchronize waits for work already submitted, only the reserve is added by the reallocation
         GGML_LOG_DEBUG("%s: graph reallocation: synchronize = %.2f ms, reserve = %.2f ms (nodes = %d, leafs = %d)\n", __func__,

@@ -1114,14 +1114,12 @@ float * llama_context::get_embeddings_seq(llama_seq_id seq_id) {
 
 float * llama_context::get_embeddings_nextn() {
     output_reorder();
-    embd_nextn_reorder();
 
     return embd_nextn.data;
 }
 
 float * llama_context::get_embeddings_nextn_ith(int32_t i) {
     output_reorder();
-    embd_nextn_reorder();
 
     try {
         if (embd_nextn.data == nullptr) {
@@ -1920,7 +1918,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
     n_queued_tokens += n_tokens_all;
 
     output_swaps.clear();
-    embd_nextn_tok_ids.clear();
+    embd_batch_idxs.clear();
 
     sched_reserve();
 
@@ -2130,7 +2128,8 @@ int llama_context::decode(const llama_batch & batch_inp) {
             }
         }
 
-        extract_layer_inputs(res, n_tokens_prev, ubatch.n_tokens);
+        // [TAG_EXTRACT_TARGET_EMBEDDINGS]
+        bool extract_all_idxs = extract_layer_inputs(res, n_tokens_prev, ubatch.n_tokens);
 
         // extract nextn embeddings before
         // only meaningful in LLAMA_POOLING_TYPE_NONE (per-token); other pooling modes are ignored.
@@ -2148,7 +2147,15 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
                 GGML_ASSERT((offset + n_rows)*n_embd <= (int64_t) embd_nextn.size);
                 ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn_out, 0, n_rows*n_embd*sizeof(float));
+                extract_all_idxs = extract_all_idxs || !masked;
             }
+        }
+
+        if (extract_all_idxs) {
+            GGML_ASSERT(ubatch.data && ubatch.data->batch_idxs.size() == ubatch.n_tokens);
+            GGML_ASSERT(embd_batch_idxs.size() == (size_t) n_tokens_prev);
+            const auto & batch_idxs = ubatch.data->batch_idxs;
+            embd_batch_idxs.insert(embd_batch_idxs.end(), batch_idxs.begin(), batch_idxs.end());
         }
 
         if (has_samplers) {
@@ -2167,19 +2174,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     // set to total number of outputs in the batch, for use in llama_get_logits_ith
     n_outputs = n_outputs_all;
-
-    if (embd_nextn.data && !cparams.embeddings_nextn_masked && cparams.pooling_type == LLAMA_POOLING_TYPE_NONE) {
-        const auto & tok_ids = balloc->get_tok_ids();
-
-        GGML_ASSERT(tok_ids.size() == (size_t) n_tokens_all);
-
-        for (int64_t k = 0; k < n_tokens_all; ++k) {
-            if (tok_ids[k] != k) {
-                embd_nextn_tok_ids = tok_ids;
-                break;
-            }
-        }
-    }
 
     // set output mappings
     if (n_outputs > 0) {
@@ -2400,7 +2394,8 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     return n_outputs_max;
 }
 
-void llama_context::extract_layer_inputs(const llm_graph_result * res, size_t token_offset, size_t n_tokens) {
+bool llama_context::extract_layer_inputs(const llm_graph_result * res, size_t token_offset, size_t n_tokens) {
+    bool extracted = false;
     for (uint32_t il = 0; il < cparams.embeddings_layer_inp.size(); ++il) {
         if (!cparams.embeddings_layer_inp[il]) {
             continue;
@@ -2419,13 +2414,17 @@ void llama_context::extract_layer_inputs(const llm_graph_result * res, size_t to
         GGML_ASSERT(nfloats % n_tokens == 0);
 
         const size_t row_floats = nfloats / n_tokens;
+        GGML_ASSERT(row_floats == model.hparams.n_embd);
         const size_t dst_offset = token_offset * row_floats;
         GGML_ASSERT(dst_offset + nfloats <= embd_layer_inp[il].size);
 
         ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched.get(), t);
         GGML_ASSERT(backend != nullptr);
+        // Tensor-split backends require a zero source offset.
         ggml_backend_tensor_get_async(backend, t, embd_layer_inp[il].data + dst_offset, 0, nbytes);
+        extracted = true;
     }
+    return extracted;
 }
 
 void llama_context::output_reorder() {
@@ -2449,20 +2448,10 @@ void llama_context::output_reorder() {
             }
         }
 
-        // unmasked nextn rows are per token, not per output, see embd_nextn_reorder()
+        // unmasked nextn rows are per token, not per output, they are reordered below
         if (embd_nextn.size > 0 && cparams.embeddings_nextn_masked) {
             for (uint64_t k = 0; k < n_embd_out; k++) {
                 std::swap(embd_nextn.data[i0*n_embd_out + k], embd_nextn.data[i1*n_embd_out + k]);
-            }
-        }
-
-        if (embd_layer_inp.size() > 0) {
-            for (int lid = 0; lid < (int) embd_layer_inp.size(); ++lid) {
-                if (embd_layer_inp[lid].size > 0) {
-                    for (uint64_t k = 0; k < n_embd; ++k) {
-                        std::swap(embd_layer_inp[lid].data[i0*n_embd + k], embd_layer_inp[lid].data[i1*n_embd + k]);
-                    }
-                }
             }
         }
 
@@ -2495,25 +2484,29 @@ void llama_context::output_reorder() {
     }
 
     output_swaps.clear();
-}
 
-void llama_context::embd_nextn_reorder() {
-    if (embd_nextn_tok_ids.empty()) {
-        return;
+    // [TAG_EXTRACT_TARGET_EMBEDDINGS]
+    // Layer inputs and unmasked NextN embeddings contain all token rows, independent of logits selection.
+    for (size_t i = 0; i < embd_batch_idxs.size(); ++i) {
+        while (embd_batch_idxs[i] != (int32_t) i) {
+            const int32_t j = embd_batch_idxs[i];
+            GGML_ASSERT(j >= 0 && (size_t) j < embd_batch_idxs.size());
+            if (embd_nextn.has_data() && !cparams.embeddings_nextn_masked) {
+                for (size_t k = 0; k < n_embd_out; ++k) {
+                    std::swap(embd_nextn.data[i*n_embd_out + k], embd_nextn.data[j*n_embd_out + k]);
+                }
+            }
+            for (auto & layer : embd_layer_inp) {
+                if (layer.has_data()) {
+                    for (size_t k = 0; k < n_embd; ++k) {
+                        std::swap(layer.data[i*n_embd + k], layer.data[j*n_embd + k]);
+                    }
+                }
+            }
+            std::swap(embd_batch_idxs[i], embd_batch_idxs[j]);
+        }
     }
-
-    const size_t n_embd_out = model.hparams.n_embd_out();
-    const size_t n_rows     = embd_nextn_tok_ids.size();
-
-    GGML_ASSERT(n_rows*n_embd_out <= embd_nextn.size);
-
-    std::vector<float> rows(embd_nextn.data, embd_nextn.data + n_rows*n_embd_out);
-
-    for (size_t k = 0; k < n_rows; ++k) {
-        std::memcpy(embd_nextn.data + (size_t) embd_nextn_tok_ids[k]*n_embd_out, rows.data() + k*n_embd_out, n_embd_out*sizeof(float));
-    }
-
-    embd_nextn_tok_ids.clear();
+    embd_batch_idxs.clear();
 }
 
 //
@@ -2555,9 +2548,23 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         res += 16u*9u*model.hparams.n_layer();
     }
 
-    // every sampler builds n_outputs_max_per_seq chains, see llm_graph_context::build_sampling
+    uint32_t n_sampling_nodes = 0;
+    uint32_t n_sampling_nodes_max = 0;
     for (const auto & [seq_id, sampler] : sampling.samplers) {
-        res += llama_sampler_backend_n_nodes(sampler) * cparams.n_outputs_max_per_seq;
+        const uint32_t n_nodes = llama_sampler_backend_n_nodes(sampler);
+        n_sampling_nodes += n_nodes;
+        if (cparams.n_outputs_max_per_seq > 1) {
+            n_sampling_nodes_max = std::max(n_sampling_nodes_max, n_nodes);
+        }
+    }
+
+    const uint32_t n_sampling_outputs_max = std::min<uint64_t>(
+            std::min(n_tokens, cparams.n_outputs_max),
+            (uint64_t) cparams.n_seq_max * cparams.n_outputs_max_per_seq);
+
+    res += n_sampling_nodes;
+    if (n_sampling_outputs_max > 1) {
+        res += (n_sampling_outputs_max - 1) * n_sampling_nodes_max;
     }
     return res;
 }
