@@ -5,10 +5,11 @@
     { "name": "llamacpp", "kind": "llamacpp", "image": "ghcr.io/ggml-org/llama.cpp:server-cuda" },
     { "name": "base",     "kind": "inmoloc",  "image": "inmoloc:base" },
     { "name": "port8",    "kind": "inmoloc",  "image": "inmoloc:port8" },
-    { "name": "current",  "kind": "inmoloc",  "image": "inmoloc:port9" }
+    { "name": "port9",    "kind": "inmoloc",  "image": "inmoloc:port9" },
+    { "name": "current",  "kind": "inmoloc",  "image": "inmoloc:port10" }
   ],
 
-  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"]],
+  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"]],
 
   "engine": {
     "bench":   { "n_prompt": "512", "n_gen": "128", "repetitions": 3 },
