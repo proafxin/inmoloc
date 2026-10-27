@@ -10833,7 +10833,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     for (auto [type_K, type_V] : std::vector<std::pair<ggml_type, ggml_type>>{
             {GGML_TYPE_F16, GGML_TYPE_F16}, {GGML_TYPE_Q8_0, GGML_TYPE_Q8_0}, {GGML_TYPE_Q4_0, GGML_TYPE_Q4_0}}) {
         for (int64_t hs : { 64, 128, 256 }) {
-            for (int64_t nr : { 1, 6 }) {
+            // GQA ratios of each number of Q heads a block takes, with columns left over and over several blocks
+            for (int64_t nr : { 1, 2, 3, 6, 16 }) {
                 for (int64_t nb : { 1, 3, 33 }) {
                     test_cases.emplace_back(new test_flash_attn_ext_kv_idx(hs, 4, nr, 1024, 3, nb, type_K, type_V));
                 }
