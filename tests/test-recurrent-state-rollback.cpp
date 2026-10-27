@@ -420,7 +420,7 @@ static int test_rollback(const common_params & params, llama_model * model, uint
     // Save the rolled-back state and restore it into a fresh context.
     common_prompt_checkpoint ckpt;
     ckpt.update_tgt(ctx_src, 0, 0);
-    ckpt.load_tgt(ctx_dst, 0, 0);
+    GGML_ASSERT(ckpt.load_tgt(ctx_dst, 0, 0));
 
     // the tokens after the prompt repeat its last one
     const auto tok_at = [&](llama_pos pos) {
@@ -494,7 +494,7 @@ static int test_rollback(const common_params & params, llama_model * model, uint
     constexpr llama_state_seq_flags partial_flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
     common_prompt_checkpoint ckpt_partial;
     ckpt_partial.update_tgt(ctx_src, 0, partial_flags);
-    ckpt_partial.load_tgt(ctx_dst, 0, partial_flags);
+    GGML_ASSERT(ckpt_partial.load_tgt(ctx_dst, 0, partial_flags));
 
     if (!replay_and_compare("partial", n_tokens, false)) {
         return 1;
@@ -525,7 +525,7 @@ static int test_rollback(const common_params & params, llama_model * model, uint
         return 1;
     }
 
-    ckpt.load_tgt(ctx_dirty, 0, 0);
+    GGML_ASSERT(ckpt.load_tgt(ctx_dirty, 0, 0));
 
     for (uint32_t i = 0; i < n_rollback; ++i) {
         const llama_pos pos = rollback_pos + i;
