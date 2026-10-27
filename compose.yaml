@@ -207,3 +207,66 @@ services:
       stack: 67108864
     volumes: *models
     deploy: *gpu
+
+  # Benchmark suite (scripts/bench-suite.py): the same model and settings on both servers, set through the environment:
+  #   BENCH_MODEL          model file under MODELS_DIR
+  #   BENCH_COMMON_ARGS    arguments of both servers (KV cache type, flash attention, speculative decoding, ...)
+  #   BENCH_LLAMACPP_ARGS  arguments of llama.cpp only (e.g. -c and --parallel)
+  #   BENCH_INMOLOC_ARGS   arguments of inmoloc only (e.g. --vram-budget)
+  # the profile keeps them out of a plain `docker compose up`
+  bench-llamacpp:
+    profiles: [bench]
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    container_name: bench-llamacpp
+    restart: "no"
+    ipc: host
+    command: >-
+      --model /models/${BENCH_MODEL:-} --host 0.0.0.0 --port 8130 -ngl 999 --metrics
+      ${BENCH_COMMON_ARGS:-} ${BENCH_LLAMACPP_ARGS:-}
+    ports:
+      - "8130:8130"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  bench-inmoloc:
+    profiles: [bench]
+    image: ${INMOLOC_IMAGE:-inmoloc:latest}
+    container_name: bench-inmoloc
+    restart: "no"
+    ipc: host
+    command: >-
+      --model /models/${BENCH_MODEL:-} --host 0.0.0.0 --port 8131 -ngl 999 --metrics
+      ${BENCH_COMMON_ARGS:-} ${BENCH_INMOLOC_ARGS:-}
+    ports:
+      - "8131:8131"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  # engine benchmarks (bench, batched-bench) of the unified binaries, run with `docker compose run --rm <service> <command> ...`
+  bench-engine-llamacpp:
+    profiles: [bench]
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    entrypoint: ["/app/llama"]
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  bench-engine-inmoloc:
+    profiles: [bench]
+    image: ${INMOLOC_IMAGE:-inmoloc:latest}
+    entrypoint: ["/app/local-inference"]
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
