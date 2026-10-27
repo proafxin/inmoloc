@@ -6,10 +6,11 @@
     { "name": "base",     "kind": "inmoloc",  "image": "inmoloc:base" },
     { "name": "port8",    "kind": "inmoloc",  "image": "inmoloc:port8" },
     { "name": "port9",    "kind": "inmoloc",  "image": "inmoloc:port9" },
-    { "name": "current",  "kind": "inmoloc",  "image": "inmoloc:port10" }
+    { "name": "port10",   "kind": "inmoloc",  "image": "inmoloc:port10" },
+    { "name": "current",  "kind": "inmoloc",  "image": "inmoloc:port12" }
   ],
 
-  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"]],
+  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"], ["current", "port10"]],
 
   "engine": {
     "bench":   { "n_prompt": "512", "n_gen": "128", "repetitions": 3 },
