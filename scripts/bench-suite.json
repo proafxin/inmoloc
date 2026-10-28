@@ -1,5 +1,5 @@
 {
-  "repeats": 2,
+  "repeats": 1,
 
   "targets": [
     { "name": "llamacpp", "kind": "llamacpp", "image": "ghcr.io/ggml-org/llama.cpp:server-cuda" },
@@ -8,10 +8,13 @@
     { "name": "port9",    "kind": "inmoloc",  "image": "inmoloc:port9" },
     { "name": "port10",   "kind": "inmoloc",  "image": "inmoloc:port10" },
     { "name": "port12",   "kind": "inmoloc",  "image": "inmoloc:port12" },
-    { "name": "current",  "kind": "inmoloc",  "image": "inmoloc:port13" }
+    { "name": "port15",   "kind": "inmoloc",  "image": "inmoloc:port15" },
+    { "name": "port15-replay", "kind": "inmoloc", "image": "inmoloc:port15", "args": "--rs-rollback replay" },
+    { "name": "current",  "kind": "inmoloc",  "image": "inmoloc:port17" },
+    { "name": "replay",   "kind": "inmoloc",  "image": "inmoloc:port17", "args": "--rs-rollback replay" }
   ],
 
-  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"], ["current", "port10"], ["current", "port12"]],
+  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"], ["current", "port10"], ["current", "port12"], ["replay", "current"], ["replay", "port15-replay"], ["current", "port15"]],
 
   "engine": {
     "bench":   { "n_prompt": "512", "n_gen": "128", "repetitions": 3 },

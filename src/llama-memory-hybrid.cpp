@@ -103,6 +103,16 @@ llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & ba
             break;
         }
 
+        // every ubatch is another pass over the weights: log how the batch was split
+        if (ubatches.size() > 1) {
+            std::string desc;
+            for (const auto & ub : ubatches) {
+                desc += format(" %ux%u", ub.n_seqs, ub.n_seq_tokens);
+            }
+            LLAMA_LOG_DEBUG("%s: %u tokens split into %zu ubatches (seqs x tokens):%s\n",
+                    __func__, balloc.get_n_tokens(), ubatches.size(), desc.c_str());
+        }
+
         // prepare the recurrent batches first
         if (!mem_recr->prepare(ubatches)) {
             // TODO: will the recurrent cache be in an undefined context at this point?

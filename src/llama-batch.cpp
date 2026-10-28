@@ -612,16 +612,47 @@ llama_ubatch llama_batch_allocr::split_equal(uint32_t n_ubatch, bool sequential,
             return (uint32_t) (seq_set_map[cur_seq_set[s]].size() - cur_idx[s]);
         };
 
-        // keep the longest prefix of seqs that satisfy the constraint, to preserve sequential seq ids
-        uint32_t n_keep = 0;
-        while (n_keep < n_seqs) {
-            const uint32_t remaining = n_remaining(n_keep);
+        auto keeps = [&](uint32_t s) {
+            const uint32_t remaining = n_remaining(s);
+            return remaining == 0 || remaining >= n_keep_tail;
+        };
 
-            if (remaining != 0 && remaining < n_keep_tail) {
-                break;
+        uint32_t n_keep = 0;
+        if (sequential) {
+            // keep the longest prefix of seqs that satisfy the constraint, to preserve sequential seq ids
+            while (n_keep < n_seqs && keeps(n_keep)) {
+                n_keep++;
+            }
+        } else {
+            // [TAG_RECURRENT_ROLLBACK_SPLITS] keep every seq that satisfies the constraint and defer only the others:
+            // a seq whose step is longer than the rest (e.g. the one seq of a decode step with a shorter draft) then
+            // goes to a ubatch of its own instead of splitting every seq before it off into a ubatch each
+            std::vector<uint32_t> order(n_seqs);
+            for (uint32_t s = 0; s < n_seqs; ++s) {
+                order[s] = s;
+            }
+            std::stable_partition(order.begin(), order.end(), keeps);
+
+            for (const uint32_t s : order) {
+                n_keep += keeps(s) ? 1 : 0;
             }
 
-            n_keep++;
+            if (n_keep < n_seqs) {
+                LLAMA_LOG_DEBUG("%s: %u of %u seqs deferred, their steps are longer than the %zu tokens each of this ubatch\n",
+                        __func__, n_seqs - n_keep, n_seqs, idxs_per_seq[0].size());
+
+                std::vector<seq_set_t> seq_sets(n_seqs);
+                std::vector<int32_t>   idx_cur (n_seqs);
+                std::vector<idx_vec_t> idxs_seq(n_seqs);
+                for (uint32_t s = 0; s < n_seqs; ++s) {
+                    seq_sets[s] = cur_seq_set [order[s]];
+                    idx_cur [s] = cur_idx     [order[s]];
+                    idxs_seq[s] = std::move(idxs_per_seq[order[s]]);
+                }
+                cur_seq_set  = std::move(seq_sets);
+                cur_idx      = std::move(idx_cur);
+                idxs_per_seq = std::move(idxs_seq);
+            }
         }
 
         // all seqs violate the constraint - resolve the first one directly and emit it alone

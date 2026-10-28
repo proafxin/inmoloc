@@ -52,6 +52,10 @@ def compose_env(target: dict, model: dict | None = None) -> dict:
         env["BENCH_COMMON_ARGS"]   = model.get("common_args", "")
         env["BENCH_LLAMACPP_ARGS"] = model.get("llamacpp_args", "")
         env["BENCH_INMOLOC_ARGS"]  = model.get("inmoloc_args", "")
+        # a target can add server arguments, e.g. to compare two settings of the same image in one run
+        if target.get("args"):
+            key = "BENCH_LLAMACPP_ARGS" if target["kind"] == "llamacpp" else "BENCH_INMOLOC_ARGS"
+            env[key] = (env[key] + " " + target["args"]).strip()
     return env
 
 
