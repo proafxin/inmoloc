@@ -603,11 +603,10 @@ struct server_slot {
         // determine the max draft that fits the current slot state
         // note: slot.prompt is not yet expanded with the `id` token sampled above
         //       also, need to leave space for 1 extra token to allow context shifts
-        int n_draft_max = n_ctx - prompt.n_tokens() - 2;
-
-        if (n_remaining() > 0) {
-            n_draft_max = std::min(n_draft_max, n_remaining() - 1);
-        }
+        // the draft is not shortened near the n_predict limit: the tokens accepted past it are never sent (process_token
+        // stops at the limit), while a shorter step than the other slots' would cost the whole batch an extra ubatch
+        // for hybrid and recurrent models, see [TAG_RECURRENT_ROLLBACK_SPLITS]
+        const int n_draft_max = n_ctx - prompt.n_tokens() - 2;
 
         SLT_DBG(*this, "max possible draft: %d\n", n_draft_max);
 
