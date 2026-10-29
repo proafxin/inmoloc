@@ -12,11 +12,15 @@
     { "name": "port15-replay", "kind": "inmoloc", "image": "inmoloc:port15", "args": "--rs-rollback replay" },
     { "name": "port17",   "kind": "inmoloc",  "image": "inmoloc:port17" },
     { "name": "port17-replay", "kind": "inmoloc", "image": "inmoloc:port17", "args": "--rs-rollback replay" },
-    { "name": "current",  "kind": "inmoloc",  "image": "inmoloc:port18" },
-    { "name": "replay",   "kind": "inmoloc",  "image": "inmoloc:port18", "args": "--rs-rollback replay" }
+    { "name": "port18",   "kind": "inmoloc",  "image": "inmoloc:port18" },
+    { "name": "port18-replay", "kind": "inmoloc", "image": "inmoloc:port18", "args": "--rs-rollback replay" },
+    { "name": "port20",   "kind": "inmoloc",  "image": "inmoloc:port20" },
+    { "name": "port20-replay", "kind": "inmoloc", "image": "inmoloc:port20", "args": "--rs-rollback replay" },
+    { "name": "current",  "kind": "inmoloc",  "image": "inmoloc:port21" },
+    { "name": "replay",   "kind": "inmoloc",  "image": "inmoloc:port21", "args": "--rs-rollback replay" }
   ],
 
-  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"], ["current", "port10"], ["current", "port12"], ["replay", "current"], ["replay", "port17-replay"], ["current", "port17"]],
+  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"], ["current", "port10"], ["current", "port12"], ["replay", "current"], ["replay", "port20-replay"], ["current", "port20"]],
 
   "engine": {
     "bench":   { "n_prompt": "512", "n_gen": "128", "repetitions": 3 },

@@ -2,12 +2,15 @@
 
 #include "server-task.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 
 // struct for managing server tasks
@@ -173,16 +176,28 @@ private:
 // in most cases, use server_response_reader to retrieve results
 struct server_response {
 private:
-    bool running = true;
+    std::atomic<bool> running = true;
 
-    // for keeping track of all tasks waiting for the result
-    std::unordered_set<int> waiting_task_ids;
+    // the results of the tasks of one reader (one set of task ids): a reader waits on its own condition variable and
+    // a result wakes only the reader of its task, not every waiting HTTP thread (128 streaming requests would otherwise
+    // all wake and take one shared lock for every generated token, and the decode loop waits behind them)
+    struct waiter {
+        std::mutex mutex;
+        std::condition_variable cond;
+        std::deque<server_task_result_ptr> results; // using ptr for polymorphism
+    };
 
-    // the main result queue (using ptr for polymorphism)
-    std::vector<server_task_result_ptr> queue_results;
+    // the waiter of each task waiting for results; the lock is held only to look up or change the map
+    std::unordered_map<int, std::shared_ptr<waiter>> waiters;
+    std::mutex mutex_waiters;
 
-    std::mutex mutex_results;
-    std::condition_variable condition_results;
+    std::shared_ptr<waiter> find_waiter(int id_task);
+
+    // the waiter of the first of the id_tasks that has one, or a new one for all of them
+    std::shared_ptr<waiter> waiter_for(const std::unordered_set<int> & id_tasks);
+
+    // the first result of one of the id_tasks in the waiter, or nullptr; the waiter's mutex must be held
+    static server_task_result_ptr take_result(waiter & w, const std::unordered_set<int> & id_tasks);
 
 public:
     // add the id_task to the list of tasks waiting for response

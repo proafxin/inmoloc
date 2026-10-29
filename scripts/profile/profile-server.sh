@@ -25,7 +25,7 @@ docker_cpu=()
 nsys_cpu=(-s none --cpuctxsw none)
 if [ "${PROFILE_CPU:-0}" = 1 ]; then
   docker_cpu=(--cap-add SYS_ADMIN --security-opt seccomp=unconfined)
-  nsys_cpu=(-s cpu --sampling-frequency 2000 --cpuctxsw process-tree)
+  nsys_cpu=(-s process-tree --cpuctxsw process-tree)
 fi
 
 # Nsight Systems lives in its own image and in the nsight-systems volume, mounted into the server image: installed once,
@@ -46,7 +46,15 @@ docker run -d --name "prof-$name" --gpus all --ipc host --ulimit memlock=-1 --ul
     --model /models/Qwen3.8-27B-AP-Q4_K_XL.gguf --host 0.0.0.0 --port "$port" -ngl 999 --metrics \
     -fa on --cache-type-k q8_0 --cache-type-v q8_0 --spec-type draft-mtp --spec-draft-n-max 2 --cache-ram 0 \
     --vram-budget 22826M --ctx-typical 2048 "$@"
-until curl -sf "localhost:$port/health" >/dev/null; do sleep 2; done
+until curl -sf "localhost:$port/health" >/dev/null; do
+  if [ "$(docker inspect -f '{{.State.Running}}' "prof-$name" 2>/dev/null)" != true ]; then
+    echo "prof-$name exited before the server was ready:" >&2
+    docker logs --tail 20 "prof-$name" >&2
+    docker rm "prof-$name" >/dev/null 2>&1 || true
+    exit 1
+  fi
+  sleep 2
+done
 python3 scripts/bench-server-concurrency.py --url "http://localhost:$port" --levels 128 --seed 0 \
   --prompt-tokens 64 --prompt-tokens-max 2048 --max-tokens 32 --max-tokens-max 512 || true
 docker wait "prof-$name" >/dev/null
