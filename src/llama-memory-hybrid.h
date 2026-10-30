@@ -6,8 +6,11 @@
 #include "llama-memory.h"
 #include "llama-memory-recurrent.h"
 
+#include <functional>
 #include <memory>
 #include <vector>
+
+class llama_box;
 
 //
 // llama_memory_hybrid
@@ -40,9 +43,17 @@ public:
                      bool   unified,
                             /* layer filters */
     const layer_filter_cb & filter_attn = nullptr,
-    const layer_filter_cb & filter_recr = nullptr);
+    const layer_filter_cb & filter_recr = nullptr,
+        // hold the KV cells and the states in one elastic memory, see llama_box, when the model can: kv_size is then the
+        // cells of the box and rs_size is ignored
+                     bool   use_box = false,
+        // the bytes of the box, 0 for kv_size cells and rs_size states, and the layer of an MTP draft kept in its blocks
+                   size_t   box_bytes = 0,
+                     bool   box_draft = false,
+                ggml_type   box_draft_type_k = GGML_TYPE_F16,
+                ggml_type   box_draft_type_v = GGML_TYPE_F16);
 
-    ~llama_memory_hybrid() = default;
+    ~llama_memory_hybrid();
 
     //
     // llama_memory_i
@@ -84,11 +95,34 @@ public:
     llama_kv_cache * get_mem_attn() const;
     llama_memory_recurrent * get_mem_recr() const;
 
+    //
+    // elastic memory, see llama_box
+    //
+
+    // nullptr when the caches have their own buffers
+    const llama_box * get_box() const;
+
+    // for a draft context that keeps its tokens in the blocks of the box
+    std::shared_ptr<llama_box> get_box_shared() const { return box; }
+
+    // admission of a request: its state and its prompt pages, and the pages it may generate into, see llama_box::reserve()
+    bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output);
+    void box_reserve_drop(llama_seq_id seq_id);
+
 private:
     const llama_hparams & hparams;
 
+    // declared before the caches, which view it
+    std::shared_ptr<llama_box> box;
+
     const std::unique_ptr<llama_kv_cache> mem_attn;
     const std::unique_ptr<llama_memory_recurrent> mem_recr;
+
+    // gives the seqs of the ubatches their states and the blocks their new tokens take
+    bool box_prepare(const std::vector<llama_ubatch> & ubatches);
+
+    // the blocks of removed seqs go back to the box
+    void box_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
 };
 
 class llama_memory_hybrid_context : public llama_memory_context_i {

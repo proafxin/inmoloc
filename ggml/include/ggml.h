@@ -1723,6 +1723,8 @@ extern "C" {
     // b I32 [n_rows, ne2, ne3, 1]
     //
     // return [n_embd, n_rows, ne2, ne3]
+    //
+    // a row index of -1 gives a row of zeros (CUDA; CPU for F32 and I32)
     GGML_API struct ggml_tensor * ggml_get_rows(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,  // data
@@ -2513,8 +2515,8 @@ extern "C" {
             struct ggml_tensor * sinks);
 
     // Attend every query to the K/V rows listed in rows, in that order, instead of all of them: the rows of one
-    // sequence in a cache shared by several, read in place. The mask keeps the layout of the K/V rows (ne[0] == k->ne[1])
-    // and is read at the listed rows; a row of -1 is padding and is left out.
+    // sequence in a cache shared by several, read in place. The mask is laid out like the list (ne[0] == rows->ne[0]):
+    // column i masks the row rows[i]; a row of -1 is padding and is left out.
     //
     // rows: I32 [n_rows, 1, 1, 1]
     // q, k and v must have ne[3] == 1
@@ -2524,6 +2526,17 @@ extern "C" {
     GGML_API void ggml_flash_attn_ext_set_kv_rows(
             struct ggml_tensor * a,
             struct ggml_tensor * rows);
+
+    // The same list of rows, without a mask: query i attends to the entries rows[0..hi[i]) of the list, so a list
+    // sorted by position makes causal attention over the rows of one sequence. The op must have been created without a
+    // mask, without max_bias (ALiBi) and without logit softcap.
+    //
+    // rows: I32 [n_rows, 1, 1, 1]
+    // hi:   I32 [n_q, 1, 1, 1], n_q >= q->ne[1], hi[i] <= n_rows
+    GGML_API void ggml_flash_attn_ext_set_kv_rows_hi(
+            struct ggml_tensor * a,
+            struct ggml_tensor * rows,
+            struct ggml_tensor * hi);
 
     // Attend each query to a range of an index list instead of all K/V rows with a mask.
     // The op must have been created without a mask and without max_bias (ALiBi).
@@ -2689,6 +2702,25 @@ extern "C" {
             struct ggml_tensor  * beta,
             struct ggml_tensor  * state,
             int64_t               K);
+
+    // the same scan, with the states read and written in place in rows of a larger tensor (K == 1):
+    //   state    : [S_v*S_v*H, n_rows] -- the rows may be strided by less than a row (overlapping views)
+    //   rows_in  : I32 [n_seqs] -- the row of the initial state of each sequence, -1 for a zero state
+    //   rows_out : I32 [n_seqs] -- the row the final state of each sequence is written to, -1 not written; NULL: none
+    //   after    : NULL, or a tensor computed before this op (e.g. the scan that writes the rows this one reads)
+    // the result holds the attention scores alone: [S_v*H, n_tokens*n_seqs]
+    // a row must not be written by one sequence while another sequence reads it
+    GGML_API struct ggml_tensor * ggml_gated_delta_net_rows(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * g,
+            struct ggml_tensor  * beta,
+            struct ggml_tensor  * state,
+            struct ggml_tensor  * rows_in,
+            struct ggml_tensor  * rows_out,
+            struct ggml_tensor  * after);
 
     // DSA lightning indexer
     //

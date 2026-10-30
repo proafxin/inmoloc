@@ -30,6 +30,12 @@ struct ggml_cuda_gdn_mma_args {
     int64_t sb3;
     float   scale;
     bool    eligible;
+
+    // the rows mode (ggml_gated_delta_net_rows): the state of seq s is read from row rows_in[s] of state (-1: zeros) and
+    // written to row rows_out[s] of state_out (-1 or no rows_out: not written), rows row_stride floats apart
+    const int32_t * rows_in    = nullptr;
+    const int32_t * rows_out   = nullptr;
+    int64_t         row_stride = 0;
 };
 
 bool ggml_cuda_gdn_mma_launch(int device, const ggml_cuda_gdn_mma_args & args, cudaStream_t stream);

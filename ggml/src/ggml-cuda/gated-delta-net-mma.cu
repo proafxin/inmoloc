@@ -148,13 +148,26 @@ static __global__ __launch_bounds__(256, BLOCKS) void gdn_single(ggml_cuda_gdn_m
     constexpr int                                  STATE_TILES = (D / 16) * (V / N);
     constexpr int                                  PER_WARP    = STATE_TILES / WARPS;
     static_assert(STATE_TILES % WARPS == 0, "state must divide across warps");
+    // the rows mode reads and writes the states in place, see ggml_cuda_gdn_mma_args
+    int64_t soff_in   = soff;
+    int64_t soff_out  = soff;
+    bool    zero_in   = false;
+    bool    write_out = true;
+    if (a.rows_in) {
+        const int32_t ri = a.rows_in[seq];
+        const int32_t ro = a.rows_out ? a.rows_out[seq] : -1;
+        zero_in   = ri < 0;
+        write_out = ro >= 0;
+        soff_in   = (int64_t) (zero_in   ? 0 : ri) * a.row_stride + (int64_t) h * D * D;
+        soff_out  = (int64_t) (write_out ? ro : 0) * a.row_stride + (int64_t) h * D * D;
+    }
     acc state[PER_WARP];
 #pragma unroll
     for (int j = 0; j < PER_WARP; ++j) {
         const int tile_index = warp + j * WARPS, r = (tile_index / (V / N)) * 16, c = (tile_index % (V / N)) * N;
 #pragma unroll
         for (int i = 0; i < acc::ne; ++i) {
-            state[j].x[i] = a.state[soff + (v0 + c + acc::get_j(i)) * D + r + acc::get_i(i)];
+            state[j].x[i] = zero_in ? 0.0f : a.state[soff_in + (v0 + c + acc::get_j(i)) * D + r + acc::get_i(i)];
         }
     }
     auto read_qk = [&](int64_t t, float4 & q, float4 & k) {
@@ -349,12 +362,14 @@ static __global__ __launch_bounds__(256, BLOCKS) void gdn_single(ggml_cuda_gdn_m
         }
         __syncthreads();
     }
+    if (write_out) {
 #pragma unroll
-    for (int j = 0; j < PER_WARP; ++j) {
-        const int ti = warp + j * WARPS, r = (ti / (V / N)) * 16, c = (ti % (V / N)) * N;
+        for (int j = 0; j < PER_WARP; ++j) {
+            const int ti = warp + j * WARPS, r = (ti / (V / N)) * 16, c = (ti % (V / N)) * N;
 #pragma unroll
-        for (int i = 0; i < acc::ne; ++i) {
-            a.state_out[soff + (v0 + c + acc::get_j(i)) * D + r + acc::get_i(i)] = state[j].x[i];
+            for (int i = 0; i < acc::ne; ++i) {
+                a.state_out[soff_out + (v0 + c + acc::get_j(i)) * D + r + acc::get_i(i)] = state[j].x[i];
+            }
         }
     }
 #else

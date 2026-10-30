@@ -663,6 +663,9 @@ struct server_slot {
 
             state = SLOT_STATE_IDLE;
 
+            // the elastic memory keeps the pages of the slot, but no longer what it might have generated
+            llama_memory_box_reserve_drop(llama_get_memory(ctx_tgt), id);
+
             // do not keep context of the child slots - the parent's context is enough
             if (task->is_child()) {
                 prompt_clear();
@@ -1177,6 +1180,14 @@ private:
     uint64_t n_launch_next    = 0;
     int32_t  kv_budget_prompt = -1; // KV cells left for prompt tokens in the current batch, -1 = unlimited
 
+    // the elastic memory (llama_memory_box_*): pages hold the KV cells and the recurrent states of the requests; the
+    // KV cell counts below are then pages of cells, a request is admitted with its state, its input and the most it may
+    // generate (policy A), so a running request never waits for memory and nothing is preempted
+    bool box = false;
+
+    // a request ended, the tasks that wait for memory try again
+    bool box_retry = false;
+
     // the tokens a finished request generated, a running mean over the recent ones, see kv_gen_expected()
     double   gen_mean   = 0.0;
     uint64_t n_gen_seen = 0;
@@ -1547,6 +1558,20 @@ private:
             SRV_TRC("%s", "speculative decoding will use checkpoints\n");
         }
 
+        {
+            llama_memory_box_info info;
+            box = llama_memory_box_get_info(llama_get_memory(ctx_tgt), &info);
+            if (box) {
+                // every request is admitted with its most output, so the most has to be given
+                if (params_base.max_output_tokens <= 0) {
+                    SRV_ERR("%s", "the elastic memory needs --max-output-tokens, the most tokens a request generates\n");
+                    return false;
+                }
+                SRV_INF("elastic memory: %u blocks of %u tokens, a state takes %u blocks, output at most %d tokens\n",
+                        info.n_blocks, info.block_tokens, info.state_blocks, params_base.max_output_tokens);
+            }
+        }
+
         // setup slots
         SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d, kv_unified = '%s'\n",
                 params_base.n_parallel, n_ctx_slot(), params_base.kv_unified ? "true" : "false");
@@ -1601,6 +1626,8 @@ private:
             SLT_TRC(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
 
             slot.callback_on_release = [this](int id_slot) {
+                box_retry = true;
+
                 queue_tasks.pop_deferred_task(id_slot);
             };
 
@@ -2101,6 +2128,31 @@ private:
         return true;
     }
 
+    llama_memory_box_info box_info() const {
+        llama_memory_box_info info = {};
+        llama_memory_box_get_info(llama_get_memory(ctx_tgt), &info);
+        return info;
+    }
+
+    // a slot that was not admitted after all: no charge, and no state when it holds no tokens
+    void box_admission_undo(server_slot & slot) {
+        llama_memory_t mem = llama_get_memory(ctx_tgt);
+
+        llama_memory_box_reserve_drop(mem, slot.id);
+        if (slot.prompt.n_tokens() == 0) {
+            llama_memory_seq_rm(mem, slot.id, -1, -1);
+        }
+    }
+
+    // the most a request may generate: its max_tokens, at most --max-output-tokens, and at most what the context window
+    // of the model leaves after its input
+    int32_t box_n_output(const server_task & task) const {
+        const int32_t n_left    = std::max(0, llama_model_n_ctx_train(model_tgt) - task.n_tokens());
+        const int32_t n_max     = params_base.max_output_tokens;
+        const int32_t n_predict = task.params.n_predict >= 0 ? std::min(task.params.n_predict, n_max) : n_max;
+        return std::min(n_predict, n_left);
+    }
+
     // the most KV cells that try_clear_idle_slot_rs() can free while it spares `keep` and `keep_donor`: a cell shared
     // by several slots is counted in each of them, but freed only with the last one
     int32_t kv_cells_evictable(const server_slot * keep, const server_slot * keep_donor) const {
@@ -2163,7 +2215,22 @@ private:
     // in the order they wait, every one that fits, see kv_schedule() for the same with preempted slots
     // with no slot at work, all of them are offered: the first one is admitted whatever its size
     void mem_offer_waiting(bool all) {
-        const bool is_rs = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
+        // the elastic memory knows what fits: whenever a request ended, the waiting tasks try again, in the order they wait
+        if (box) {
+            if (box_retry || all) {
+                box_retry = false;
+
+                std::vector<int> offer;
+                for (const auto & w : queue_tasks.get_deferred_mem_tasks()) {
+                    offer.push_back(w.id);
+                }
+                queue_tasks.pop_deferred_tasks(offer);
+            }
+            return;
+        }
+
+        // the elastic memory holds the states in its pages, see box
+        const bool is_rs = (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) && !box;
 
         const auto waiting = queue_tasks.get_deferred_mem_tasks();
 
@@ -2205,6 +2272,11 @@ private:
     }
 
     int32_t kv_cells_total() const {
+        if (box) {
+            const auto info = box_info();
+            return (int32_t) (info.n_blocks*info.block_tokens);
+        }
+
         return (int32_t) llama_n_ctx(ctx_tgt);
     }
 
@@ -2230,6 +2302,12 @@ private:
     // cells held, plus the rest of every prompt (or recompute after preemption) that is still being processed
     int32_t kv_cells_committed() const {
         int32_t n = kv_cells_held();
+
+        // the elastic memory holds the pages of the prompts from their admission on
+        if (box) {
+            return n;
+        }
+
         for (const auto & slot : slots) {
             const bool in_prompt = slot.state == SLOT_STATE_STARTED || slot.state == SLOT_STATE_PROCESSING_PROMPT;
             if (in_prompt) {
@@ -2624,7 +2702,9 @@ private:
     void kv_schedule() {
         kv_budget_prompt = -1;
 
-        if (!kv_preemption_enabled()) {
+        // the elastic memory admits a request with all it takes, so the running ones never need more than they hold and
+        // reserve: nothing is preempted and the prompts hold their pages already
+        if (!kv_preemption_enabled() || box) {
             mem_offer_waiting(false);
             return;
         }
@@ -3762,7 +3842,7 @@ private:
     // now (counting what evicting idle slots frees), and n_rs_need recurrent-state cells
     void defer_task_mem(server_task && task, server_defer_reason reason, int32_t n_kv_need, int32_t n_kv_missing, uint32_t n_rs_need) {
         task.n_kv_need    = n_kv_need;
-        task.n_kv_wait_at = kv_preemption_enabled() ? kv_cells_avail() + std::max(0, n_kv_missing) : 0;
+        task.n_kv_wait_at = kv_preemption_enabled() && !box ? kv_cells_avail() + std::max(0, n_kv_missing) : 0;
         task.n_rs_need    = n_rs_need;
         defer_task(std::move(task), reason);
     }
@@ -3835,7 +3915,40 @@ private:
                     // held, also while preempted slots wait for room; a task that cannot fit even alone is admitted
                     // when nothing else runs, so that it fails with the usual context size error
                     // wait for a free recurrent-state cell here, because a decode that cannot get one errors every active slot
-                    const bool     is_rs      = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
+                    // the elastic memory: a request takes its state, its input and the most it may generate (the children of
+                    // a parent task a state and an output each, they share its input); a request that does not fit even
+                    // in the empty memory, or is longer than --ctx-size, is rejected at arrival
+                    const int32_t n_children = task.is_parent() ? (int32_t) task.child_tasks.size() : 0;
+                    int32_t n_box_out = 0;
+                    if (box) {
+                        const auto    info    = box_info();
+                        const int32_t n_input = task.n_tokens();
+
+                        n_box_out = box_n_output(task);
+
+                        // the request generates at most what was charged for it
+                        task.params.n_predict = n_box_out;
+
+                        if (n_input >= llama_model_n_ctx_train(model_tgt)) {
+                            SRV_WRN("request of %d tokens exceeds the context window of the model, id_task = %d\n", n_input, id_task);
+                            send_error(task, string_format("request (%d tokens) exceeds the context window of the model (%d tokens)",
+                                        n_input, llama_model_n_ctx_train(model_tgt)), ERROR_TYPE_EXCEED_CONTEXT_SIZE);
+                            break;
+                        }
+
+                        const int64_t bt     = info.block_tokens;
+                        const int64_t n_most = info.state_blocks + (n_input + n_box_out + bt - 1)/bt +
+                            n_children*(info.state_blocks + (n_box_out + bt - 1)/bt);
+                        if (n_most > (int64_t) info.n_blocks) {
+                            SRV_WRN("request of %d input and %d output tokens never fits in the memory (%lld of %u blocks), id_task = %d\n",
+                                    n_input, n_box_out, (long long) n_most, info.n_blocks, id_task);
+                            send_error(task, string_format("request (%d input tokens, up to %d output tokens) does not fit in the memory, "
+                                        "lower max_tokens or the input", n_input, n_box_out), ERROR_TYPE_EXCEED_CONTEXT_SIZE);
+                            break;
+                        }
+                    }
+
+                    const bool     is_rs      = (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) && !box;
                     const uint32_t n_rs_cells = is_rs ? llama_n_rs_cells(ctx_tgt) : 0;
                     const uint32_t n_rs_new   = !is_rs ? 0 : (slot->prompt.n_tokens() > 0 ? 0 : 1)
                                                                + (task.is_parent() ? (uint32_t) task.child_tasks.size() : 0);
@@ -3853,6 +3966,9 @@ private:
                     const int32_t n_gen  = kv_gen_expected(task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict);
                     const int32_t n_need = std::max(0, task.n_tokens() - n_reuse) + n_gen - (slot->prompt.n_tokens() - n_own);
 
+                    // the elastic memory is not predicted: see the admission below
+                    const bool kv_predict = kv_preemption_enabled() && !box;
+
                     // the running slots keep the room they are expected to generate into, see kv_cells_growth()
                     const int32_t n_growth = kv_cells_growth();
 
@@ -3863,7 +3979,7 @@ private:
 
                     // nothing is evicted for a task that does not fit even then
                     {
-                        const int32_t n_kv_missing = !kv_preemption_enabled() || !any_running ? 0 :
+                        const int32_t n_kv_missing = !kv_predict || !any_running ? 0 :
                             kv_cells_committed() + n_growth + n_need - n_total - kv_cells_evictable(slot, donor);
                         const bool rs_missing = is_rs && n_rs_cells_held() + n_rs_new > n_rs_cells + n_rs_cells_evictable(slot, donor);
 
@@ -3892,20 +4008,54 @@ private:
                         while (n_rs_cells_held() + n_rs_new > n_rs_cells && try_clear_idle_slot_rs(slot, "a recurrent-state cell", donor)) {
                         }
                     }
-                    if (kv_preemption_enabled()) {
+                    if (kv_predict) {
                         while (kv_cells_committed() + n_growth + n_need > n_total && try_clear_idle_slot_rs(slot, "KV cells", donor)) {
                         }
                     }
 
                     // a cell held by several idle slots is freed only with the last one
                     {
-                        const int32_t n_kv_missing = !kv_preemption_enabled() || !any_running ? 0 : kv_cells_committed() + n_growth + n_need - n_total;
+                        const int32_t n_kv_missing = !kv_predict || !any_running ? 0 : kv_cells_committed() + n_growth + n_need - n_total;
                         const bool rs_missing = is_rs && n_rs_cells_held() + n_rs_new > n_rs_cells;
 
                         if (rs_missing || n_kv_missing > 0) {
                             SRV_DBG("not enough free memory after evicting idle slots (committed = %d, prompt = %d, reused = %d, total = %d), defer task, id_task = %d\n",
                                     kv_cells_committed(), task.n_tokens(), n_reuse, n_total, id_task);
                             defer_task_mem(std::move(task), rs_missing ? SERVER_DEFER_RECURRENT_CELL : SERVER_DEFER_KV_CELLS, n_need, n_kv_missing, n_rs_new);
+                            break;
+                        }
+                    }
+
+                    // the elastic memory admits a request with all it takes, or not at all: idle slots give way to it, since a
+                    // request that runs is worth more than a cached prompt, and it waits when the running ones hold the memory
+                    if (box) {
+                        llama_memory_t mem = llama_get_memory(ctx_tgt);
+
+                        const auto admit = [&]() {
+                            if (!llama_memory_box_reserve(mem, slot->id, task.n_tokens(), n_box_out)) {
+                                return false;
+                            }
+                            for (auto * child : child_slots) {
+                                if (!llama_memory_box_reserve(mem, child->id, 0, n_box_out)) {
+                                    return false;
+                                }
+                            }
+                            return true;
+                        };
+
+                        bool admitted = admit();
+                        while (!admitted && try_clear_idle_slot_rs(slot, "KV cells", donor)) {
+                            admitted = admit();
+                        }
+
+                        if (!admitted) {
+                            for (server_slot * s : child_slots) {
+                                box_admission_undo(*s);
+                            }
+                            box_admission_undo(*slot);
+
+                            SRV_DBG("the memory is held by running requests, defer task, id_task = %d\n", id_task);
+                            defer_task_mem(std::move(task), SERVER_DEFER_KV_CELLS, 0, 0, 0);
                             break;
                         }
                     }
@@ -3917,10 +4067,19 @@ private:
                     if (task.is_parent()) {
                         if (!launch_slots_with_parent_task(*slot, child_slots, std::move(task))) {
                             SRV_ERR("failed to launch slot with parent task, id_task = %d\n", id_task);
+                            if (box) {
+                                for (server_slot * s : child_slots) {
+                                    box_admission_undo(*s);
+                                }
+                                box_admission_undo(*slot);
+                            }
                             break; // drop the task
                         }
                     } else if (!launch_slot_with_task(*slot, std::move(task))) {
                         SRV_ERR("failed to launch slot with task, id_task = %d\n", id_task);
+                        if (box) {
+                            box_admission_undo(*slot);
+                        }
                         break; // drop the task
                     }
 
@@ -5779,6 +5938,11 @@ private:
 
     // context size of a single slot, capped by the training context of the model
     int n_ctx_slot() const {
+        // the elastic memory: input and output of a request within the context window of the model
+        if (box) {
+            return llama_model_n_ctx_train(model_tgt);
+        }
+
         const int res = llama_n_ctx_seq(ctx_tgt);
 
         return std::min(res, llama_model_n_ctx_train(model_tgt));

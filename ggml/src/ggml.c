@@ -1963,10 +1963,15 @@ struct ggml_tensor * ggml_format_name(struct ggml_tensor * tensor, const char * 
 struct ggml_tensor * ggml_view_tensor(
         struct ggml_context * ctx,
         struct ggml_tensor  * src) {
-    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, src->type, GGML_MAX_DIMS, src->ne, src, 0);
+    // the view spans what src spans: the size check of a new tensor counts contiguous rows, which a src with rows that
+    // overlap (a stride less than a row) exceeds, so the view is created with one row and takes the shape of src after
+    const int64_t ne[GGML_MAX_DIMS] = { src->ne[0], 1, 1, 1 };
+
+    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, src->type, GGML_MAX_DIMS, ne, src, 0);
     ggml_format_name(result, "%s (view)", src->name);
 
     for (int i = 0; i < GGML_MAX_DIMS; i++) {
+        result->ne[i] = src->ne[i];
         result->nb[i] = src->nb[i];
     }
 
@@ -5621,13 +5626,34 @@ void ggml_flash_attn_ext_set_kv_rows(
     const struct ggml_tensor * v    = a->src[2];
     const struct ggml_tensor * mask = a->src[3];
     GGML_ASSERT(q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1);
-    GGML_ASSERT(mask == NULL || mask->ne[0] == k->ne[1]);
-
     GGML_ASSERT(rows->type == GGML_TYPE_I32 && ggml_is_contiguous(rows));
     GGML_ASSERT(rows->ne[1] == 1 && rows->ne[2] == 1 && rows->ne[3] == 1);
+    GGML_ASSERT(mask == NULL || mask->ne[0] == rows->ne[0]);
 
     // src[6] stays NULL, which tells this mode apart from ggml_flash_attn_ext_set_kv_idx()
     a->src[5] = rows;
+}
+
+void ggml_flash_attn_ext_set_kv_rows_hi(
+        struct ggml_tensor * a,
+        struct ggml_tensor * rows,
+        struct ggml_tensor * hi) {
+    GGML_ASSERT(a->src[3] == NULL && "the prefix lengths replace the mask");
+
+    ggml_flash_attn_ext_set_kv_rows(a, rows);
+
+    float max_bias      = 0.0f;
+    float logit_softcap = 0.0f;
+    memcpy(&max_bias,      (const float *) a->op_params + 1, sizeof(float));
+    memcpy(&logit_softcap, (const float *) a->op_params + 2, sizeof(float));
+    GGML_ASSERT(max_bias == 0.0f && logit_softcap == 0.0f);
+
+    GGML_ASSERT(hi->type == GGML_TYPE_I32 && ggml_is_contiguous(hi));
+    GGML_ASSERT(hi->ne[0] >= a->src[0]->ne[1] && hi->ne[1] == 1 && hi->ne[2] == 1 && hi->ne[3] == 1);
+
+    // the prefix lengths take the place of the mask, flagged in op_params[5]
+    a->src[3] = hi;
+    ggml_set_op_params_i32(a, 5, 1);
 }
 
 // ggml_flash_attn_back
@@ -6461,6 +6487,61 @@ struct ggml_tensor * ggml_gated_delta_net(
     result->src[3] = g;
     result->src[4] = beta;
     result->src[5] = state;
+
+    return result;
+}
+
+struct ggml_tensor * ggml_gated_delta_net_rows(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * g,
+        struct ggml_tensor  * beta,
+        struct ggml_tensor  * state,
+        struct ggml_tensor  * rows_in,
+        struct ggml_tensor  * rows_out,
+        struct ggml_tensor  * after) {
+    GGML_ASSERT(ggml_is_contiguous_rows(q));
+    GGML_ASSERT(ggml_is_contiguous_rows(k));
+    GGML_ASSERT(ggml_is_contiguous_rows(v));
+    GGML_ASSERT(ggml_is_contiguous(g));
+    GGML_ASSERT(ggml_is_contiguous(beta));
+    GGML_ASSERT(ggml_is_contiguous_rows(state));
+
+    GGML_ASSERT(q->type == GGML_TYPE_F32 && k->type == GGML_TYPE_F32 && v->type == GGML_TYPE_F32);
+    GGML_ASSERT(g->type == GGML_TYPE_F32 && beta->type == GGML_TYPE_F32 && state->type == GGML_TYPE_F32);
+
+    const int64_t S_v      = v->ne[0];
+    const int64_t H        = v->ne[1];
+    const int64_t n_tokens = v->ne[2];
+    const int64_t n_seqs   = v->ne[3];
+
+    GGML_ASSERT(g->ne[0] == 1 || g->ne[0] == S_v);
+    GGML_ASSERT(beta->ne[0] == 1);
+
+    // a row holds the state of one sequence: [S_v, S_v, H]
+    GGML_ASSERT(state->ne[0] == S_v*S_v*H);
+
+    GGML_ASSERT(rows_in->type == GGML_TYPE_I32 && ggml_is_contiguous(rows_in) && rows_in->ne[0] == n_seqs);
+    GGML_ASSERT(rows_out == NULL || (rows_out->type == GGML_TYPE_I32 && ggml_is_contiguous(rows_out) && rows_out->ne[0] == n_seqs));
+
+    const int64_t ne[4] = { S_v * H, n_tokens * n_seqs, 1, 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    ggml_set_op_params_i32(result, 0, 1); // K
+    ggml_set_op_params_i32(result, 1, 1); // the rows mode
+
+    result->op     = GGML_OP_GATED_DELTA_NET;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = v;
+    result->src[3] = g;
+    result->src[4] = beta;
+    result->src[5] = state;
+    result->src[6] = rows_in;
+    result->src[7] = rows_out;
+    result->src[8] = after;
 
     return result;
 }

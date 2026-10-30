@@ -2935,6 +2935,11 @@ static int ggml_cuda_try_gdn_cache_fusion(
         return 0;
     }
 
+    // the rows mode writes the states in place itself, it has no snapshot tail to scatter
+    if (ggml_get_op_params_i32(gdn, 1) != 0) {
+        return 0;
+    }
+
     const ggml_tensor * src_v     = gdn->src[2];
     const int64_t       S_v       = src_v->ne[0];
     const int64_t       H         = src_v->ne[1];

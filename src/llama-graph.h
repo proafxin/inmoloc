@@ -48,9 +48,11 @@ struct llama_kv_attn_run {
     uint32_t     n_idx;
     bool         indexed = false;
 
-    // the graph depends on the shape of a run only, seq_id just selects which cells fill its inputs
+    // the graph depends on the shape of a run only, seq_id just selects which cells fill its inputs; a gather run of one
+    // sequence and one of all the cells (seq_id < 0) have different inputs, see llm_graph_input_attn_kv::attn_run_hi
     bool same_shape(const llama_kv_attn_run & other) const {
-        return t0 == other.t0 && t1 == other.t1 && gather == other.gather && n_idx == other.n_idx && indexed == other.indexed;
+        return t0 == other.t0 && t1 == other.t1 && gather == other.gather && n_idx == other.n_idx && indexed == other.indexed &&
+            (!gather || (seq_id < 0) == (other.seq_id < 0));
     }
 };
 
@@ -314,6 +316,26 @@ public:
     // token slots the replay scans, the mask says how many of them are pending tokens; shapes the graph
     uint32_t n_replay = 0;
 
+    // the elastic memory (see llama_box): the states stay in their cells, read and written by the rows of each seq of
+    // the ubatch in each recurrent layer, nullptr otherwise; one input for all the rows, so that it is copied to the
+    // device once, each layer reading views of it: per recurrent layer, runs of n_seqs rows of the kinds of
+    // llama_memory_recurrent_context::box_row_kind, conv write rows one run per conv row
+    ggml_tensor * box_rows = nullptr; // I32 [n_seqs*n_box_runs*n_layers]
+
+    uint32_t box_n_seqs     = 0;
+    uint32_t box_n_rows_r   = 0; // conv rows per state: 1 + n_rs_seq
+    uint32_t box_n_runs     = 0; // runs per layer: conv read, conv write per conv row, scan read, scan write, replay read, replay write
+
+    // the rows of model layer il: conv read, conv write of conv row k, scan read and write, replay read and write
+    ggml_tensor * box_r_read  (ggml_context * ctx, int il) const;
+    ggml_tensor * box_r_write (ggml_context * ctx, int il, uint32_t k) const;
+    ggml_tensor * box_s_read  (ggml_context * ctx, int il) const;
+    ggml_tensor * box_s_write (ggml_context * ctx, int il) const;
+    ggml_tensor * box_x_read  (ggml_context * ctx, int il) const;
+    ggml_tensor * box_x_write (ggml_context * ctx, int il) const;
+
+    ggml_tensor * box_run(ggml_context * ctx, int il, uint32_t run) const;
+
     const llama_memory_recurrent_context * mctx;
 
     // used in view offsets, need to match for valid graph reuse
@@ -399,10 +421,13 @@ public:
     // or reads its cells in place, nullptr otherwise
     // the views are made once for all layers: the scheduler copies every distinct input view to the device, so a
     // view per layer would keep a copy of the same rows per layer
+    // a run of one sequence read in place has no mask: the prefix of its cells each token sees, I32 [t1 - t0], see
+    // ggml_flash_attn_ext_set_kv_rows_hi(); nullptr otherwise
     std::vector<llama_kv_attn_run> attn_runs;
     std::vector<ggml_tensor *>     attn_run_idxs;
     std::vector<ggml_tensor *>     attn_run_mask;
     std::vector<ggml_tensor *>     attn_run_mask_full;
+    std::vector<ggml_tensor *>     attn_run_hi;
 
     // note: these have to be copies because in order to be able to reuse a graph, its inputs
     //       need to carry these parameters with them. otherwise, they can point to freed
@@ -1245,7 +1270,8 @@ struct llm_graph_context {
                     int   il,
             ggml_tensor * kv_idx = nullptr,  // I32 [n_idx, n_group], see ggml_flash_attn_ext_set_kv_idx(); without q_rng
                                              // I32 [n_rows], see ggml_flash_attn_ext_set_kv_rows()
-            ggml_tensor * q_rng  = nullptr) const; // I32 [3, n_tokens]
+            ggml_tensor * q_rng  = nullptr,  // I32 [3, n_tokens]
+            ggml_tensor * kv_hi  = nullptr) const; // I32 [n_tokens] with a list of rows, see ggml_flash_attn_ext_set_kv_rows_hi()
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 
@@ -1392,12 +1418,14 @@ struct llm_graph_context {
 
     llm_graph_input_rs * build_rs_inp() const;
 
+    // il: the model layer, which selects its rows of the elastic memory (see llama_box)
     ggml_tensor * build_rs(
             llm_graph_input_rs * inp,
             ggml_tensor * s,
                 int32_t   state_size,
                 int32_t   n_seqs,
-            const llm_graph_get_rows_fn & get_state_rows = nullptr) const;
+            const llm_graph_get_rows_fn & get_state_rows = nullptr,
+                    int   il = -1) const;
 
     ggml_tensor * build_rwkv_token_shift_load(
         llm_graph_input_rs * inp,

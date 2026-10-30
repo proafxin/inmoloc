@@ -1,6 +1,7 @@
 #include "llama-memory-recurrent.h"
 
 #include "ggml-backend.h"
+#include "llama-box.h"
 #include "llama-impl.h"
 #include "llama-io.h"
 #include "llama-batch.h"
@@ -26,7 +27,8 @@ llama_memory_recurrent::llama_memory_recurrent(
                  uint32_t   n_seq_max,
                  uint32_t   n_rs_seq,
                      bool   rs_replay_req,
-    const layer_filter_cb & filter) : hparams(model.hparams), n_seq_max(n_seq_max) {
+    const layer_filter_cb & filter,
+                llama_box * box) : box(box), hparams(model.hparams), n_seq_max(n_seq_max) {
     const int32_t n_layer = hparams.n_layer();
 
     head = 0;
@@ -40,6 +42,14 @@ llama_memory_recurrent::llama_memory_recurrent(
     cells.resize(mem_size);
 
     seq_tails.assign(n_seq_max, -1);
+
+    // a cell of the box is a state id, see llama_box
+    GGML_ASSERT(!box || (mem_size == box->get_max_states() && hparams.ple_conv_state() == 0));
+    if (box) {
+        box_cow   .assign(n_seq_max, -1);
+        box_x_cell.assign(n_seq_max, -1);
+        box_fresh .assign(mem_size, 0);
+    }
 
     // define a comparator for the buft -> ctx map to ensure that the order is well-defined:
     struct ggml_backend_buft_comparator {
@@ -120,6 +130,16 @@ llama_memory_recurrent::llama_memory_recurrent(
 
         // the conv state is small, so it keeps one row per draft position; the scan state is large and keeps a
         // single row, which lags behind the cached tokens of the last speculative step
+        // views of the whole box, read and written through the rows of the states, see llama_box
+        if (box) {
+            GGML_ASSERT(box->recr_index(i) >= 0);
+            r_l[i] = box->get_r();
+            s_l[i] = box->get_s();
+            x_l[i] = rs_replay ? box->get_x() : nullptr;
+            GGML_ASSERT(r_l[i] && s_l[i] && (!rs_replay || x_l[i]));
+            continue;
+        }
+
         const uint32_t n_rows   = mem_size * (1 + n_rs_seq);
         const uint32_t n_rows_s = rs_replay ? mem_size : n_rows;
 
@@ -146,7 +166,10 @@ llama_memory_recurrent::llama_memory_recurrent(
         }
     }
 
-    // allocate tensors and initialize the buffers to avoid NaNs in the padding
+    // allocate tensors and initialize the buffers to avoid NaNs in the padding; the box holds the states of a box cache
+    if (box) {
+        ctx_map.clear();
+    }
     for (auto & [buft, ctx] : ctx_map) {
         ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft);
         if (!buf) {
@@ -172,6 +195,9 @@ llama_memory_recurrent::llama_memory_recurrent(
 
 void llama_memory_recurrent::clear(bool data) {
     for (int32_t i = 0; i < (int32_t) size; ++i) {
+        if (box && !cells[i].seq_id.empty()) {
+            box->state_free(i);
+        }
         cells[i].pos = -1;
         cells[i].seq_id.clear();
         cells[i].src = -1;
@@ -189,6 +215,13 @@ void llama_memory_recurrent::clear(bool data) {
     }
 
     std::fill(rs_idx.begin(), rs_idx.end(), 0);
+
+    if (box) {
+        std::fill(box_cow   .begin(), box_cow   .end(), -1);
+        std::fill(box_x_cell.begin(), box_x_cell.end(), -1);
+        std::fill(box_fresh .begin(), box_fresh .end(), 0);
+        box_free_next.clear();
+    }
 
     if (rs_replay) {
         std::fill(x_cur .begin(), x_cur .end(), 0);
@@ -293,6 +326,32 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
         // could be fatal
         return false;
     }
+
+    // an admitted request keeps the state its admission took (box_keep): removing all of its tokens makes it a new state
+    // again, which its next step reads as zeros
+    if (box && rm_all && seq_id >= 0 && seq_tails[seq_id] >= 0 && box_keep && box_keep(seq_id) &&
+            cells[seq_tails[seq_id]].seq_id.size() == 1) {
+        const int32_t tail = seq_tails[seq_id];
+        if (cells[tail].pos >= 0) {
+            used--;
+        }
+        cells[tail].pos  = -1;
+        box_fresh[tail]  = 1;
+        box_cow[seq_id]  = -1;
+        box_x_cell[seq_id] = -1;
+        return true;
+    }
+
+    // a state of the box taken before the seq had any token (pos -1) is outside every range of positions
+    if (box && rm_all && seq_id >= 0 && seq_tails[seq_id] >= 0 && cells[seq_tails[seq_id]].pos < 0) {
+        auto & cell = cells[seq_tails[seq_id]];
+        cell.seq_id.erase(seq_id);
+        if (cell.is_empty()) {
+            box_cell_freed(seq_tails[seq_id]);
+        }
+        seq_tails[seq_id] = -1;
+        box_cow[seq_id]   = -1;
+    }
     if (0 <= seq_id) {
         int32_t & tail_id = seq_tails[seq_id];
         if (tail_id >= 0) {
@@ -365,6 +424,9 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
                 }
                 cells[i].pos = -1;
                 cells[i].src = -1;
+                if (box) {
+                    box_cell_freed(i);
+                }
                 if (new_head == size) {
                     new_head = i;
                 }
@@ -401,12 +463,17 @@ void llama_memory_recurrent::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id
             auto & cell_dst = cells[tail_dst];
 
             cell_dst.seq_id.erase(seq_id_dst);
-            tail_dst = -1;
             if (cell_dst.seq_id.empty()) {
+                if (!box || cell_dst.pos >= 0) {
+                    used -= 1;
+                }
                 cell_dst.pos = -1;
                 cell_dst.src = -1;
-                used -= 1;
+                if (box) {
+                    box_cell_freed(tail_dst);
+                }
             }
+            tail_dst = -1;
         }
         if (tail_src >= 0) {
             auto & cell_src = cells[tail_src];
@@ -421,7 +488,16 @@ void llama_memory_recurrent::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id
             set_rs_idx(seq_id_dst, tail_src >= 0 ? rs_idx[seq_id_src] : 0);
         }
 
-        if (rs_replay) {
+        // the box: dst reads the state of src, and its cached replay inputs, until its next step gives it a state of its
+        // own (box_prepare())
+        if (box) {
+            box_cow[seq_id_dst] = tail_src >= 0 ? box_cow[seq_id_src] : -1;
+            box_x_cell[seq_id_dst] = tail_src >= 0 ? box_x_cell[seq_id_src] : -1;
+            if (rs_replay) {
+                x_cur [seq_id_dst] = x_cur[seq_id_src];
+                n_pend[seq_id_dst] = tail_src >= 0 ? n_pend[seq_id_src] : 0;
+            }
+        } else if (rs_replay) {
             x_copy_drop(seq_id_dst);
 
             n_pend[seq_id_dst] = tail_src >= 0 ? n_pend[seq_id_src] : 0;
@@ -439,6 +515,10 @@ void llama_memory_recurrent::seq_keep(llama_seq_id seq_id) {
         if ((llama_seq_id) i != seq_id) {
             seq_tails[i] = -1;
 
+            if (box) {
+                box_cow[i] = -1;
+            }
+
             if (rs_replay) {
                 n_pend[i] = 0;
                 x_copy_drop((llama_seq_id) i);
@@ -448,6 +528,9 @@ void llama_memory_recurrent::seq_keep(llama_seq_id seq_id) {
 
     for (uint32_t i = 0; i < size; ++i) {
         if (!cells[i].has_seq_id(seq_id)) {
+            if (box && !cells[i].seq_id.empty()) {
+                box_cell_freed(i);
+            }
             if (cells[i].pos >= 0) {
                 used--;
             }
@@ -658,6 +741,10 @@ bool llama_memory_recurrent::prepare(const std::vector<llama_ubatch> & ubatches)
     auto org_n_rep    = n_rep;
     auto org_x_copies = x_copies;
 
+    auto org_box_cow    = box_cow;
+    auto org_box_x_cell = box_x_cell;
+    auto org_box_fresh  = box_fresh;
+
     bool success = true;
 
     for (const auto & ubatch : ubatches) {
@@ -679,10 +766,18 @@ bool llama_memory_recurrent::prepare(const std::vector<llama_ubatch> & ubatches)
     n_rep    = std::move(org_n_rep);
     x_copies = std::move(org_x_copies);
 
+    box_cow    = std::move(org_box_cow);
+    box_x_cell = std::move(org_box_x_cell);
+    box_fresh  = std::move(org_box_fresh);
+
     return success;
 }
 
 bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
+    if (box) {
+        return box_find_slot(ubatch);
+    }
+
     const uint32_t n_seq_tokens = ubatch.n_seq_tokens;
     const uint32_t n_seqs       = ubatch.n_seqs;
 
@@ -960,6 +1055,236 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
     return n >= n_seqs;
 }
 
+void llama_memory_recurrent::box_cell_freed(uint32_t i) {
+    GGML_ASSERT(box && cells[i].is_empty());
+
+    box->state_free(i);
+
+    cells[i].pos = -1;
+    cells[i].src = -1;
+}
+
+bool llama_memory_recurrent::box_state_take(llama_seq_id seq_id) {
+    GGML_ASSERT(box && seq_tails[seq_id] < 0);
+
+    const int32_t p = box->state_alloc();
+    if (p < 0) {
+        return false;
+    }
+
+    // only offsets change hands: the state starts at zero in the computation, its first step reads zeros instead of it
+    // (see box_fresh) and writes it
+    box_fresh[p] = 1;
+
+    auto & cell = cells[p];
+    cell.pos = -1;
+    cell.src = p;
+    cell.seq_id.clear();
+    cell.seq_id.insert(seq_id);
+
+    seq_tails[seq_id]  = p;
+    box_cow[seq_id]    = -1;
+    box_x_cell[seq_id] = -1;
+
+    if (rs_replay) {
+        x_cur [seq_id] = 0;
+        n_pend[seq_id] = 0;
+    }
+
+    return true;
+}
+
+bool llama_memory_recurrent::box_prepare(const std::vector<llama_ubatch> & ubatches) {
+    GGML_ASSERT(box);
+
+    // the shared states left by the previous batch, which its steps read: they are free from now on
+    for (const int32_t c : box_free_next) {
+        if (cells[c].is_empty()) {
+            box_cell_freed(c);
+        }
+    }
+    box_free_next.clear();
+
+    // the states shared at the start of the batch: a step reads them in place, so none of its seqs writes them; each seq
+    // of the batch that holds one takes a state of its own, read from the shared one (box_cow)
+    std::vector<uint8_t> shared(size, 0);
+    for (const auto & ubatch : ubatches) {
+        for (uint32_t s = 0; s < ubatch.n_seqs; ++s) {
+            const llama_seq_id lead = ubatch.seq_id[s*ubatch.n_seq_tokens][0];
+            if (lead >= 0 && (uint32_t) lead < n_seq_max && seq_tails[lead] >= 0 && cells[seq_tails[lead]].seq_id.size() > 1) {
+                shared[seq_tails[lead]] = 1;
+            }
+        }
+    }
+
+    for (const auto & ubatch : ubatches) {
+        for (uint32_t s = 0; s < ubatch.n_seqs; ++s) {
+            const uint32_t i = s*ubatch.n_seq_tokens;
+
+            const llama_seq_id lead = ubatch.seq_id[i][0];
+            if (lead < 0 || (uint32_t) lead >= n_seq_max) {
+                LLAMA_LOG_ERROR("%s: seq_id=%d >= n_seq_max=%u Try using a bigger --parallel value\n", __func__, lead, n_seq_max);
+                return false;
+            }
+
+            int32_t & tail = seq_tails[lead];
+
+            if (tail < 0) {
+                // a new seq: a state of its own, which starts at zero
+                if (!box_state_take(lead)) {
+                    LLAMA_LOG_WARN("%s: no state fits in the box for seq %d\n", __func__, lead);
+                    return false;
+                }
+            } else if (shared[tail]) {
+                // a shared state: a state of its own, which the next step writes after reading the shared one
+                const int32_t p = box->state_alloc();
+                if (p < 0) {
+                    LLAMA_LOG_WARN("%s: no state fits in the box for seq %d\n", __func__, lead);
+                    return false;
+                }
+
+                if (box_cow[lead] < 0) {
+                    box_cow[lead] = tail;
+                }
+
+                box_fresh[p] = 0;
+
+                cells[p].pos = cells[tail].pos;
+                cells[p].src = p;
+                cells[p].seq_id.clear();
+                cells[p].seq_id.insert(lead);
+
+                cells[tail].seq_id.erase(lead);
+                if (cells[tail].is_empty()) {
+                    // read by this batch: free after it, see box_free_next
+                    box_free_next.push_back(tail);
+                    used--;
+                }
+                tail = p;
+                used++;
+            }
+
+            // the other seqs of the tokens take the state of the lead: their own states go back to the box
+            for (int32_t j = 1; j < ubatch.n_seq_id[i]; ++j) {
+                const llama_seq_id seq_id = ubatch.seq_id[i][j];
+                if (seq_id < 0 || (uint32_t) seq_id >= n_seq_max) {
+                    LLAMA_LOG_ERROR("%s: seq_id=%d >= n_seq_max=%u Try using a bigger --parallel value\n", __func__, seq_id, n_seq_max);
+                    return false;
+                }
+
+                int32_t & tail_j = seq_tails[seq_id];
+                if (tail_j == tail) {
+                    continue;
+                }
+                if (tail_j >= 0) {
+                    auto & cell = cells[tail_j];
+                    cell.seq_id.erase(seq_id);
+                    if (cell.is_empty()) {
+                        if (cell.pos >= 0) {
+                            used--;
+                        }
+                        box_cell_freed(tail_j);
+                    }
+                }
+
+                cells[tail].seq_id.insert(seq_id);
+                tail_j = tail;
+                box_cow[seq_id] = -1;
+            }
+        }
+    }
+
+    return true;
+}
+
+// the box: the states stay in their cells, the step reads each seq from its cell (or the state it shares, box_cow, or
+// zeros for a new state) and writes it to its cell, see llama_memory_recurrent_context::box_row()
+bool llama_memory_recurrent::box_find_slot(const llama_ubatch & ubatch) {
+    const uint32_t n_seq_tokens = ubatch.n_seq_tokens;
+    const uint32_t n_seqs       = ubatch.n_seqs;
+
+    GGML_ASSERT(ubatch.equal_seqs());
+
+    box_lead  .resize(n_seqs);
+    box_src   .resize(n_seqs);
+    box_dst   .resize(n_seqs);
+    box_x_src .resize(n_seqs);
+    box_x_half.resize(n_seqs);
+
+    for (uint32_t s = 0; s < n_seqs; ++s) {
+        const uint32_t i = s*n_seq_tokens;
+
+        const llama_seq_id lead = ubatch.seq_id[i][0];
+        if (lead < 0 || (uint32_t) lead >= n_seq_max || seq_tails[lead] < 0) {
+            // box_prepare() gives every seq a state before the cells are searched
+            LLAMA_LOG_ERROR("%s: seq %d has no state in the box\n", __func__, lead);
+            return false;
+        }
+
+        const int32_t cell_id = seq_tails[lead];
+        auto & cell = cells[cell_id];
+
+        const int32_t src = box_cow[lead] >= 0 ? box_cow[lead] : cell_id;
+
+        box_lead[s] = lead;
+        box_src [s] = box_fresh[src] ? -1 : src; // a new state reads zeros
+        box_dst [s] = cell_id;
+
+        const llama_pos last_pos = ubatch.pos[i + n_seq_tokens - 1];
+
+        if (cell.pos >= 0 && last_pos != cell.pos + (llama_pos) n_seq_tokens) {
+            LLAMA_LOG_WARN("%s: non-consecutive token position %d after %d for sequence %d with %u new tokens\n",
+                __func__, last_pos, cell.pos, lead, n_seq_tokens);
+        }
+        if (cell.pos < 0) {
+            used++;
+        }
+        cell.pos = last_pos;
+
+        // the step writes the state of the seq into its cell, so it reads its own cell from then on
+        box_cow[lead]      = -1;
+        box_fresh[cell_id] = 0;
+
+        if (rs_replay) {
+            const bool keep = n_seq_tokens <= n_x();
+
+            // the pending inputs are in the cell that cached them, in its current half; none read zeros
+            box_x_src [s] = n_pend[lead] > 0 && box_x_cell[lead] >= 0 ? box_x_cell[lead] : -1;
+            box_x_half[s] = x_cur[lead];
+
+            n_rep[lead] = n_pend[lead];
+
+            if (keep) {
+                x_cur[lead] ^= 1;
+            }
+            n_pend[lead] = keep ? n_seq_tokens : 0;
+
+            box_x_cell[lead] = cell_id;
+
+            // the other seqs of the cell share its state and its cached inputs
+            for (const llama_seq_id seq_id : cell.seq_id) {
+                if (seq_id == lead) {
+                    continue;
+                }
+                x_cur [seq_id] = x_cur[lead];
+                n_pend[seq_id] = n_pend[lead];
+                box_x_cell[seq_id] = cell_id;
+            }
+        } else {
+            box_x_src [s] = -1;
+            box_x_half[s] = 0;
+
+            box_x_cell[lead] = cell_id;
+        }
+    }
+
+    head = 0;
+    n    = n_seqs;
+    rs_z = -1;
+
+    return true;
+}
+
 bool llama_memory_recurrent::get_can_shift() const {
     // shifting the pos is trivial for recurrent models
     return true;
@@ -1127,9 +1452,10 @@ void llama_memory_recurrent::state_write_pend(llama_io_write_i & io, llama_seq_i
             continue;
         }
 
-        const uint32_t row = x_row_pend(s);
+        const uint32_t row = box ? 0 : x_row_pend(s);
 
-        for (auto * x : x_l) {
+        for (size_t il = 0; il < x_l.size(); ++il) {
+            ggml_tensor * x = x_l[il];
             if (x == nullptr) {
                 continue;
             }
@@ -1137,7 +1463,12 @@ void llama_memory_recurrent::state_write_pend(llama_io_write_i & io, llama_seq_i
             const size_t row_size = ggml_row_size(x->type, x->ne[0]);
             const size_t n_bytes  = ggml_row_size(x->type, (int64_t) hparams.n_embd_gdn_inp()*n);
 
-            io.write_tensor(x, row*row_size, n_bytes);
+            // the box: the cached inputs are in the state that cached them, see box_x_cell
+            const size_t offs = box ?
+                (size_t) box->x_row(box_x_cell[s] >= 0 ? box_x_cell[s] : seq_tails[s], box->recr_index(il), x_cur[s])*llama_box::unit :
+                row*row_size;
+
+            io.write_tensor(x, offs, n_bytes);
         }
     }
 }
@@ -1174,9 +1505,17 @@ bool llama_memory_recurrent::state_read_pend(llama_io_read_i & io, llama_seq_id 
             continue;
         }
 
-        const uint32_t row = x_row(s, x_cur[s]);
+        const uint32_t row = box ? 0 : x_row(s, x_cur[s]);
 
-        for (auto * x : x_l) {
+        if (box && seq_tails[s] < 0) {
+            LLAMA_LOG_ERROR("%s: pending inputs of seq %d without a state\n", __func__, s);
+            return false;
+        }
+
+        std::vector<uint8_t> row_buf;
+
+        for (size_t il = 0; il < x_l.size(); ++il) {
+            ggml_tensor * x = x_l[il];
             if (x == nullptr) {
                 continue;
             }
@@ -1184,7 +1523,22 @@ bool llama_memory_recurrent::state_read_pend(llama_io_read_i & io, llama_seq_id 
             const size_t row_size = ggml_row_size(x->type, x->ne[0]);
             const size_t n_bytes  = ggml_row_size(x->type, (int64_t) hparams.n_embd_gdn_inp()*n);
 
-            io.read_tensor(x, row*row_size, n_bytes);
+            if (!box) {
+                io.read_tensor(x, row*row_size, n_bytes);
+                continue;
+            }
+
+            // the box: the whole row is written, the token slots after the restored ones as zeros, since a replay reads
+            // every slot of the row (and masks the ones that are not pending)
+            row_buf.assign(row_size, 0);
+            io.read(row_buf.data(), n_bytes);
+
+            const size_t offs = (size_t) box->x_row(seq_tails[s], box->recr_index(il), x_cur[s])*llama_box::unit;
+            ggml_backend_tensor_set(x, row_buf.data(), offs, row_size);
+        }
+
+        if (box) {
+            box_x_cell[s] = seq_tails[s];
         }
     }
 
@@ -1269,6 +1623,13 @@ void llama_memory_recurrent::state_write_data(llama_io_write_i & io, const std::
         // Write each logical cell row range. With pending recurrent rollback,
         // the logical current state may live in a rollback snapshot plane.
         for (const auto & range : cell_ranges) {
+            if (box) {
+                // the rows of the box are not contiguous across cells: one row each, conv row of the rollback plane
+                for (uint32_t id = range.first; id < range.second; ++id) {
+                    io.write_tensor(r_l[il], (size_t) box->r_row(id % size, box->recr_index(il), id / size)*llama_box::unit, r_size_row);
+                }
+                continue;
+            }
             const size_t range_size = range.second - range.first;
             const size_t buf_size = range_size * r_size_row;
             io.write_tensor(r_l[il], range.first * r_size_row, buf_size);
@@ -1302,6 +1663,12 @@ void llama_memory_recurrent::state_write_data(llama_io_write_i & io, const std::
             // Write each logical cell row range. With pending recurrent rollback,
             // the logical current state may live in a rollback snapshot plane.
             for (const auto & range : cell_ranges_s) {
+                if (box) {
+                    for (uint32_t id = range.first; id < range.second; ++id) {
+                        io.write_tensor(s_l[il], (size_t) box->s_row(id % size, box->recr_index(il))*llama_box::unit, s_size_row);
+                    }
+                    continue;
+                }
                 const size_t range_size = range.second - range.first;
                 const size_t buf_size = range_size * s_size_row;
                 io.write_tensor(s_l[il], range.first * s_size_row, buf_size);
@@ -1354,6 +1721,55 @@ bool llama_memory_recurrent::state_read_meta(llama_io_read_i & io, uint32_t cell
             return true;
         }
 
+        // the box: a state of its own for the seq, the data goes into its cell
+        if (box) {
+            if (cell_count != 1) {
+                LLAMA_LOG_ERROR("%s: the box restores one state per seq, not %u\n", __func__, cell_count);
+                return false;
+            }
+
+            llama_pos pos;
+            uint32_t  n_seq_id;
+
+            io.read(&pos,      sizeof(pos));
+            io.read(&n_seq_id, sizeof(n_seq_id));
+
+            if (n_seq_id != 0) {
+                LLAMA_LOG_ERROR("%s: invalid seq_id-agnostic kv cell\n", __func__);
+                return false;
+            }
+
+            // the data read below overwrites the rows the state is read from, the rest is written before it is read;
+            // an admitted request kept the state its admission took (see box_keep)
+            int32_t p = seq_tails[dest_seq_id];
+            if (p < 0) {
+                p = box->state_alloc();
+                if (p < 0) {
+                    LLAMA_LOG_ERROR("%s: no state fits in the box for seq %d\n", __func__, dest_seq_id);
+                    return false;
+                }
+                used++;
+            } else if (cells[p].pos < 0) {
+                used++; // the kept state is not counted while it holds no token
+            }
+
+            box_fresh[p] = 0;
+
+            auto & cell = cells[p];
+            cell.pos = pos;
+            cell.src = p;
+            cell.seq_id.clear();
+            cell.seq_id.insert(dest_seq_id);
+
+            seq_tails[dest_seq_id]  = p;
+            box_cow[dest_seq_id]    = -1;
+            box_x_cell[dest_seq_id] = p;
+
+            head = p;
+
+            return true;
+        }
+
         llama_batch_allocr balloc(hparams.n_pos_per_embd());
 
         llama_ubatch ubatch = balloc.ubatch_reserve(cell_count, 1);
@@ -1389,6 +1805,12 @@ bool llama_memory_recurrent::state_read_meta(llama_io_read_i & io, uint32_t cell
         GGML_ASSERT(cells[head + cell_count - 1].has_seq_id(dest_seq_id));
     } else {
         // whole KV cache restore
+
+        // the states of the box belong to the pages they were given
+        if (box) {
+            LLAMA_LOG_ERROR("%s: the box restores single sequences only\n", __func__);
+            return false;
+        }
 
         if (cell_count > size) {
             LLAMA_LOG_ERROR("%s: not enough cells in kv cache\n", __func__);
@@ -1484,8 +1906,9 @@ bool llama_memory_recurrent::state_read_data(llama_io_read_i & io, uint32_t cell
         }
 
         if (cell_count) {
-            // Read and set the keys for the whole cell range
-            io.read_tensor(r_l[il], head * r_size_row, cell_count * r_size_row);
+            // Read and set the keys for the whole cell range; the box restores the one state of a seq, conv row 0
+            const size_t offs = box ? (size_t) box->r_row(head, box->recr_index(il), 0)*llama_box::unit : head * r_size_row;
+            io.read_tensor(r_l[il], offs, cell_count * r_size_row);
         }
 
         if (p_l[il] != nullptr) {
@@ -1529,7 +1952,8 @@ bool llama_memory_recurrent::state_read_data(llama_io_read_i & io, uint32_t cell
 
             if (cell_count) {
                 // Read and set the values for the whole cell range
-                io.read_tensor(s_l[il], head * s_size_row, cell_count * s_size_row);
+                const size_t offs = box ? (size_t) box->s_row(head, box->recr_index(il))*llama_box::unit : head * s_size_row;
+                io.read_tensor(s_l[il], offs, cell_count * s_size_row);
             }
         }
     } else {
@@ -1590,7 +2014,8 @@ void llama_memory_recurrent::state_clear(llama_seq_id seq_id, uint32_t cell_head
 
     seq_rm(seq_id, -1, -1);
 
-    if (cell_count == 0) {
+    // the state of the box went back with the seq, the next one to take it zeroes it
+    if (cell_count == 0 || box) {
         return;
     }
 
@@ -1680,11 +2105,11 @@ uint32_t llama_memory_recurrent_context::get_n_rs() const {
 }
 
 uint32_t llama_memory_recurrent_context::get_head() const {
-    return is_full ? 0 : mem->head;
+    return is_full || mem->box ? 0 : mem->head;
 }
 
 int32_t llama_memory_recurrent_context::get_rs_z() const {
-    return is_full ? 0 : mem->rs_z;
+    return mem->box ? -1 : is_full ? 0 : mem->rs_z;
 }
 
 uint32_t llama_memory_recurrent_context::get_size() const {
@@ -1743,9 +2168,56 @@ int32_t llama_memory_recurrent_context::x_write(int i) const {
 }
 
 uint32_t llama_memory_recurrent_context::replay_n(int i) const {
-    const llama_seq_id seq_id = mem->x_seq(i + mem->head);
+    const llama_seq_id seq_id = mem->box ? mem->box_lead[i] : mem->x_seq(i + mem->head);
 
     return !mem->rs_replay || seq_id < 0 ? 0 : mem->n_rep[seq_id];
+}
+
+bool llama_memory_recurrent_context::is_box() const {
+    return mem->box != nullptr;
+}
+
+uint32_t llama_memory_recurrent_context::get_n_rs_seq() const {
+    return mem->n_rs_seq;
+}
+
+uint32_t llama_memory_recurrent_context::box_n_layers() const {
+    return mem->box->get_n_recr();
+}
+
+int32_t llama_memory_recurrent_context::box_layer(int32_t il) const {
+    return mem->box->recr_index(il);
+}
+
+int32_t llama_memory_recurrent_context::box_row(int i, uint32_t l, box_row_kind kind, uint32_t k) const {
+    const auto * box = mem->box;
+
+    const int32_t src = mem->box_src[i];
+    const int32_t dst = mem->box_dst[i];
+
+    switch (kind) {
+        case BOX_R_READ:  return src < 0 ? -1 : (int32_t) box->r_row(src, l, k);
+        case BOX_R_WRITE: return (int32_t) box->r_row(dst, l, k);
+        case BOX_S_READ:  return src < 0 ? -1 : (int32_t) box->s_row(src, l);
+        case BOX_S_WRITE: return (int32_t) box->s_row(dst, l);
+        case BOX_X_READ:  return mem->box_x_src[i] < 0 ? -1 : (int32_t) box->x_row(mem->box_x_src[i], l, mem->box_x_half[i]);
+        case BOX_X_WRITE: return (int32_t) box->x_row(dst, l, mem->x_cur[mem->box_lead[i]]);
+    }
+
+    GGML_ABORT("unknown box row kind");
+}
+
+uint32_t llama_memory_recurrent_context::box_take_rollback(int i) const {
+    if (mem->n_rs_seq == 0) {
+        return 0;
+    }
+
+    const llama_seq_id lead = mem->box_lead[i];
+
+    const uint32_t idx = mem->rs_idx[lead];
+    mem->rs_idx[lead] = 0; // reset rollback idx
+
+    return idx;
 }
 
 int32_t llama_memory_recurrent_context::s_copy(int i) const {

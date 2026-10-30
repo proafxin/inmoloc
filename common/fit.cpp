@@ -4,6 +4,7 @@
 
 #include "../src/llama-ext.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <stdexcept>
@@ -1106,7 +1107,6 @@ bool common_budget_params(
  const common_fit_extra_model * extra,
                          size_t   budget,
                          size_t   budget_used,
-                       uint32_t   n_ctx_typical,
                            bool   size_ctx,
                  ggml_log_level   log_level,
                        size_t *   predicted,
@@ -1158,6 +1158,12 @@ bool common_budget_params(
         return false;
     }
 
+    // the elastic memory (llama_memory_box_*): seen in the first dry run, it is then all the bytes that the fixed costs
+    // leave, nothing about it is sized by requests or context
+    bool   box       = false;
+    size_t box_bytes = 0; // the size of the box of the next dry run
+    size_t box_total = 0; // the size of the box of the last dry run
+
     // the memory of n_seq concurrent sequences, for the main and the draft context
     struct measured {
         common_budget_mem main;
@@ -1170,33 +1176,44 @@ bool common_budget_params(
 
     const auto measure = [&](uint32_t n_seq, uint32_t n_ctx, measured & res) {
         llama_context_params cp = *cparams;
-        cp.n_ctx      = n_ctx;
+        cp.n_ctx      = box ? llama_model_n_ctx_train(model) : n_ctx;
         cp.n_seq_max  = n_seq;
-        cp.n_rs_cells = 0; // one recurrent state per sequence
+        cp.n_rs_cells = box ? 1 : 0; // one recurrent state per sequence, or a box of states and cells
+        cp.box_bytes  = box ? box_bytes : 0;
 
         llama_context * ctx = llama_init_from_model(model, cp);
         if (ctx == nullptr) {
             return false;
         }
         res.main = common_budget_device_mem(ctx, true);
-        llama_free(ctx);
+
+        llama_memory_box_info info;
+        if (llama_memory_box_get_info(llama_get_memory(ctx), &info)) {
+            box       = true;
+            box_total = info.total_bytes;
+        }
 
         res.dft = {};
         if (extra) {
-            // the draft context follows the main one: same context size and number of sequences
+            // the draft context follows the main one: same context size and number of sequences; an MTP draft keeps its
+            // tokens in the elastic memory of the main one
             llama_context_params cpd = *extra->cparams;
             cpd.n_ctx      = cp.n_ctx;
             cpd.n_seq_max  = n_seq;
             cpd.kv_unified = cp.kv_unified;
+            cpd.ctx_other  = ctx;
 
             llama_context * ctx_dft = llama_init_from_model(extra->shares_model ? model : model_dft, cpd);
             if (ctx_dft == nullptr) {
+                llama_free(ctx);
                 return false;
             }
             // an MTP context runs on the weights of the main model, which are counted already
             res.dft = common_budget_device_mem(ctx_dft, !extra->shares_model);
             llama_free(ctx_dft);
         }
+
+        llama_free(ctx);
 
         return true;
     };
@@ -1253,9 +1270,9 @@ bool common_budget_params(
     const uint32_t n_seq_cap   = std::max<uint32_t>(1, cparams->n_seq_max);
     const uint32_t n_ctx_train = llama_model_n_ctx_train(model);
 
-    // size_ctx: the tokens a typical request holds, --ctx-typical, else the longest request; n_ctx on entry (--ctx-size)
+    // size_ctx: the tokens of a request are those of the longest request; n_ctx on entry (--ctx-size)
     // is the most the cache holds, 0 = no most
-    uint32_t       typical   = n_ctx_typical > 0 ? n_ctx_typical : n_ctx_train;
+    uint32_t       typical   = n_ctx_train;
     const uint32_t n_ctx_cap = cparams->n_ctx > 0 ? cparams->n_ctx : UINT32_MAX;
 
     const auto pad_ctx = [&](uint64_t n) {
@@ -1318,9 +1335,59 @@ bool common_budget_params(
     measured m_one;
     measured m_best;
 
+    bool box_probed = false;
+
+    // the elastic memory: every byte the fixed costs leave; the compute grows a little with the lists of the box, so what
+    // that adds comes off once
+    const auto box_size = [&](measured & res) -> bool {
+        box_bytes = 1;
+        if (!measure(n_seq_cap, 0, res) || res.total() > avail) {
+            return false;
+        }
+        box_bytes = avail - (res.total() - box_total);
+        if (!measure(n_seq_cap, 0, res)) {
+            return false;
+        }
+        if (res.total() > avail) {
+            box_bytes -= res.total() - avail;
+            return measure(n_seq_cap, 0, res) && res.total() <= avail;
+        }
+        return true;
+    };
+
     // sizes the sequences and the cache to avail; false when not even one sequence fits (logged and cleaned up)
     const auto size_all = [&]() -> bool {
-        typical = n_ctx_typical > 0 ? n_ctx_typical : n_ctx_train;
+        typical = n_ctx_train;
+
+        // the first dry run shows whether the memory is elastic
+        if (!box_probed) {
+            measured m;
+            if (!measure(1, 256, m)) {
+                cleanup();
+                LOG_ERR("%s: failed to create a context to measure its memory\n", func);
+                return false;
+            }
+            box_probed = true;
+        }
+
+        // the elastic memory takes all the budget the fixed costs leave, and the requests are admitted by what fits in it
+        if (box) {
+            measured m;
+            if (!box_size(m)) {
+                restore_log();
+                LOG_ERR("%s: the elastic memory does not fit in the memory budget of %.0f MiB\n", func, budget/MiB);
+                cleanup();
+                return false;
+            }
+
+            lo            = n_seq_cap;
+            n_ctx         = n_ctx_train;
+            m_best        = m;
+            m_one         = m;
+            n_ctx_longest = 0;
+            shared        = false;
+            return true;
+        }
 
         // the longest request this budget holds: the largest cache of one sequence, up to the training context
         n_ctx_longest = 0;
@@ -1334,17 +1401,7 @@ bool common_budget_params(
                 cleanup();
                 return false;
             }
-            if (typical > n_ctx_longest) {
-                if (n_ctx_typical > 0) {
-                    restore_log();
-                    LOG_ERR("%s: a typical request of %u tokens (--ctx-typical) does not fit, the longest request this "
-                            "budget holds is %u tokens%s\n", func, typical, n_ctx_longest,
-                            n_ctx_cap < UINT32_MAX ? " (at most --ctx-size)" : "");
-                    cleanup();
-                    return false;
-                }
-                typical = n_ctx_longest;
-            }
+            typical = std::min(typical, n_ctx_longest);
         }
 
         if (!measure(1, ctx_for(1), m_one)) {
@@ -1483,17 +1540,23 @@ bool common_budget_params(
 
     restore_log();
 
-    print(lo < n_seq_cap ? "limited by the budget" : "at the requested maximum", lo, n_ctx, m_best);
-    if (shared) {
+    if (box) {
+        LOG_INF("%s: the elastic memory takes %.0f MiB: model %.0f + compute %.0f + draft %.0f + other %.0f + runtime %.0f "
+                "are the fixed costs of the budget of %.0f MiB\n", __func__, box_total/MiB, m_best.main.model/MiB,
+                m_best.main.compute/MiB, m_best.dft.total()/MiB, budget_used/MiB, runtime/MiB, budget/MiB);
+    } else {
+        print(lo < n_seq_cap ? "limited by the budget" : "at the requested maximum", lo, n_ctx, m_best);
+    }
+    if (box) {
+        LOG_INF("%s: up to %u sequences at once (--parallel), as many as fit in it\n", __func__, lo);
+    } else if (shared) {
         LOG_INF("%s: the model holds no memory per sequence: the %u sequences share a cache of %u tokens, so how many "
-                "requests run at once follows their sizes: %u of %u tokens (--ctx-typical), more of smaller ones, up to "
+                "requests run at once follows their sizes: %u of %u tokens, more of smaller ones, up to "
                 "%u; the longest request this budget holds is %u tokens\n", __func__, lo, n_ctx,
                 std::min(lo, n_ctx/std::max<uint32_t>(1, typical)), typical, lo, n_ctx_longest);
     } else if (size_ctx) {
-        LOG_INF("%s: the longest request this budget holds is %u tokens%s; a typical request holds %u tokens%s, the "
-                "cache holds %u tokens: %u per sequence\n", __func__, n_ctx_longest,
-                n_ctx_cap < UINT32_MAX ? " (at most --ctx-size)" : "", typical,
-                n_ctx_typical > 0 ? " (--ctx-typical)" : "", n_ctx, n_ctx/lo);
+        LOG_INF("%s: the longest request this budget holds is %u tokens%s; the cache holds %u tokens: %u per sequence\n",
+                __func__, n_ctx_longest, n_ctx_cap < UINT32_MAX ? " (at most --ctx-size)" : "", n_ctx, n_ctx/lo);
     } else if (lo > 1) {
         LOG_INF("%s: each sequence adds %.0f MiB (its state and compute), the context of %u tokens takes %.0f MiB\n",
                 __func__, (double) (m_best.total() - m_one.total())/(lo - 1)/MiB, n_ctx,
@@ -1505,7 +1568,8 @@ bool common_budget_params(
 
     cparams->n_ctx      = n_ctx;
     cparams->n_seq_max  = lo;
-    cparams->n_rs_cells = 0;
+    cparams->n_rs_cells = box ? 1 : 0;
+    cparams->box_bytes  = box ? box_bytes : 0;
 
     if (predicted) {
         *predicted = m_best.total() + budget_used + runtime;

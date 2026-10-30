@@ -3,24 +3,27 @@
 
   "targets": [
     { "name": "llamacpp", "kind": "llamacpp", "image": "ghcr.io/ggml-org/llama.cpp:server-cuda" },
-    { "name": "base",     "kind": "inmoloc",  "image": "inmoloc:base" },
-    { "name": "port8",    "kind": "inmoloc",  "image": "inmoloc:port8" },
-    { "name": "port9",    "kind": "inmoloc",  "image": "inmoloc:port9" },
-    { "name": "port10",   "kind": "inmoloc",  "image": "inmoloc:port10" },
-    { "name": "port12",   "kind": "inmoloc",  "image": "inmoloc:port12" },
-    { "name": "port15",   "kind": "inmoloc",  "image": "inmoloc:port15" },
-    { "name": "port15-replay", "kind": "inmoloc", "image": "inmoloc:port15", "args": "--rs-rollback replay" },
-    { "name": "port17",   "kind": "inmoloc",  "image": "inmoloc:port17" },
-    { "name": "port17-replay", "kind": "inmoloc", "image": "inmoloc:port17", "args": "--rs-rollback replay" },
-    { "name": "port18",   "kind": "inmoloc",  "image": "inmoloc:port18" },
-    { "name": "port18-replay", "kind": "inmoloc", "image": "inmoloc:port18", "args": "--rs-rollback replay" },
-    { "name": "port20",   "kind": "inmoloc",  "image": "inmoloc:port20" },
-    { "name": "port20-replay", "kind": "inmoloc", "image": "inmoloc:port20", "args": "--rs-rollback replay" },
-    { "name": "current",  "kind": "inmoloc",  "image": "inmoloc:port21" },
-    { "name": "replay",   "kind": "inmoloc",  "image": "inmoloc:port21", "args": "--rs-rollback replay" }
+    { "name": "base",     "kind": "inmoloc",  "image": "inmoloc:base", "args": "--ctx-typical 2048" },
+    { "name": "port8",    "kind": "inmoloc",  "image": "inmoloc:port8", "args": "--ctx-typical 2048" },
+    { "name": "port9",    "kind": "inmoloc",  "image": "inmoloc:port9", "args": "--ctx-typical 2048" },
+    { "name": "port10",   "kind": "inmoloc",  "image": "inmoloc:port10", "args": "--ctx-typical 2048" },
+    { "name": "port12",   "kind": "inmoloc",  "image": "inmoloc:port12", "args": "--ctx-typical 2048" },
+    { "name": "port15",   "kind": "inmoloc",  "image": "inmoloc:port15", "args": "--ctx-typical 2048" },
+    { "name": "port15-replay", "kind": "inmoloc", "image": "inmoloc:port15", "args": "--ctx-typical 2048 --rs-rollback replay" },
+    { "name": "port17",   "kind": "inmoloc",  "image": "inmoloc:port17", "args": "--ctx-typical 2048" },
+    { "name": "port17-replay", "kind": "inmoloc", "image": "inmoloc:port17", "args": "--ctx-typical 2048 --rs-rollback replay" },
+    { "name": "port18",   "kind": "inmoloc",  "image": "inmoloc:port18", "args": "--ctx-typical 2048" },
+    { "name": "port18-replay", "kind": "inmoloc", "image": "inmoloc:port18", "args": "--ctx-typical 2048 --rs-rollback replay" },
+    { "name": "port20",   "kind": "inmoloc",  "image": "inmoloc:port20", "args": "--ctx-typical 2048" },
+    { "name": "port20-replay", "kind": "inmoloc", "image": "inmoloc:port20", "args": "--ctx-typical 2048 --rs-rollback replay" },
+    { "name": "port21", "kind": "inmoloc", "image": "inmoloc:port21", "args": "--ctx-typical 2048" },
+    { "name": "port21-replay", "kind": "inmoloc", "image": "inmoloc:port21", "args": "--ctx-typical 2048 --rs-rollback replay" },
+    { "name": "current",  "kind": "inmoloc",  "image": "inmoloc:elastic1" },
+    { "name": "replay",   "kind": "inmoloc",  "image": "inmoloc:elastic1", "args": "--rs-rollback replay --max-output-tokens 512" },
+    { "name": "replay-block", "kind": "inmoloc", "image": "inmoloc:elastic1", "args": "--rs-rollback replay --max-output-tokens 512 --gpu-wait block" }
   ],
 
-  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"], ["current", "port10"], ["current", "port12"], ["replay", "current"], ["replay", "port20-replay"], ["current", "port20"]],
+  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"], ["current", "port10"], ["current", "port12"], ["replay", "current"], ["replay", "port21-replay"], ["current", "port21"]],
 
   "engine": {
     "bench":   { "n_prompt": "512", "n_gen": "128", "repetitions": 3 },
@@ -43,7 +46,7 @@
       "engine_ctx": 20480,
       "common_args": "-fa on --cache-type-k q8_0 --cache-type-v q8_0 --spec-type draft-mtp --spec-draft-n-max 2 --cache-ram 0",
       "llamacpp_args": "-c 65536 --parallel 8",
-      "inmoloc_args": "--vram-budget 22826M --ctx-typical 2048",
+      "inmoloc_args": "--vram-budget 22826M",
       "workloads": ["mixed"],
       "levels": [128]
     },
@@ -66,7 +69,7 @@
       "tiers": ["server"],
       "common_args": "-fa on --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 0",
       "llamacpp_args": "-c 65536 --parallel 8",
-      "inmoloc_args": "--vram-budget 20G --ctx-typical 2048",
+      "inmoloc_args": "--vram-budget 20G",
       "workloads": ["mixed"],
       "levels": [128]
     },

@@ -429,6 +429,19 @@ extern "C" {
         // inmoloc: after the fields of llama.cpp, so that those keep their offsets
         uint32_t n_rs_cells;            // recurrent-state cells shared by all sequences (0 = n_seq_max) [EXPERIMENTAL]
         enum llama_rs_rollback_type rs_rollback; // how the recurrent state rolls back, see llama_rs_rollback_type [EXPERIMENTAL]
+
+        // hold the KV cells and the recurrent states in one elastic memory of the size of n_ctx cells and n_rs_cells
+        // states, where any mix of tokens and states fits, when the model supports it, see llama_memory_box_*
+        bool elastic;
+
+        // the elastic memory takes box_bytes bytes (0 = the size of n_ctx cells and n_rs_cells states)
+        size_t box_bytes;
+
+        // keep the tokens of an MTP draft on this model in the blocks of the elastic memory, with these KV types; the
+        // draft context is created with ctx_other set to this context
+        bool box_draft;
+        enum ggml_type box_draft_type_k;
+        enum ggml_type box_draft_type_v;
     };
 
     struct llama_model_tensor_override {
@@ -833,6 +846,29 @@ extern "C" {
 
     // Returns the cell usage of the memory
     LLAMA_API struct llama_memory_usage llama_memory_get_usage(llama_memory_t mem);
+
+    // the elastic memory (see llama_context_params::elastic): a box holds the recurrent states of the sequences at one
+    // end, each covering up to state_blocks blocks, and blocks of block_tokens tokens of every attention layer at the
+    // other; usage counts the cells of the blocks in use
+    struct llama_memory_box_info {
+        uint32_t block_tokens; // the tokens of a block
+        uint32_t n_blocks;     // the blocks of the box
+        uint32_t n_free;       // the free blocks
+        uint32_t n_reserved;   // the free blocks the admitted requests may still take for their output
+        uint32_t state_blocks; // the blocks the state of a sequence covers
+        uint64_t total_bytes;  // the bytes of the box
+    };
+
+    // false when the memory is not elastic
+    LLAMA_API bool llama_memory_box_get_info(llama_memory_t mem, struct llama_memory_box_info * info);
+
+    // admits a request of seq_id: takes its state (if it has none) and the blocks of its n_input input tokens (minus
+    // those the seq holds), and charges the blocks of up to n_output generated tokens, so that a running request never
+    // waits for memory; false, with nothing taken, when it does not fit next to the charges of the admitted requests
+    LLAMA_API bool llama_memory_box_reserve(llama_memory_t mem, llama_seq_id seq_id, uint32_t n_input, uint32_t n_output);
+
+    // the request of seq_id ended: its charge is dropped, its blocks stay with the seq until it is removed
+    LLAMA_API void llama_memory_box_reserve_drop(llama_memory_t mem, llama_seq_id seq_id);
 
     //
     // State / sessions

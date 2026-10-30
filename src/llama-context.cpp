@@ -2,6 +2,7 @@
 
 #include "ggml.h"
 #include "llama-arch.h"
+#include "llama-box.h"
 #include "llama-graph.h"
 #include "llama-impl.h"
 #include "llama-batch.h"
@@ -302,6 +303,11 @@ llama_context::llama_context(
 
     cparams.op_offload = params.op_offload;
     cparams.kv_unified = params.kv_unified;
+    cparams.elastic    = params.elastic;
+    cparams.box_bytes  = params.box_bytes;
+    cparams.box_draft  = params.box_draft;
+    cparams.box_draft_type_k = params.box_draft_type_k;
+    cparams.box_draft_type_v = params.box_draft_type_v;
 
     // a non-unified KV cache keeps one stream per seq and reserves graphs with one seq per stream,
     // which a recurrent-state pool smaller than n_seq_max cannot back
@@ -431,9 +437,34 @@ llama_context::llama_context(
             /*.swa_full  =*/ params.swa_full,
             /*.ctx_type  =*/ cparams.ctx_type,
             /*.mem_other =*/ llama_get_memory(cparams.ctx_other),
+            /*.box       =*/ nullptr,
         };
 
+        // an MTP draft on the same model keeps its tokens in the elastic memory of its target
+        if (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP && params.ctx_other) {
+            if (auto * mem_hyb = dynamic_cast<llama_memory_hybrid *>(llama_get_memory(params.ctx_other)); mem_hyb) {
+                params_mem.box = mem_hyb->get_box_shared();
+            }
+        }
+
         memory.reset(model.create_memory(params_mem, cparams));
+
+        // the elastic memory: a box of blocks read through lists of its rows only, see llama_box
+        const auto * mem_hyb = dynamic_cast<const llama_memory_hybrid *>(memory.get());
+        const auto * mem_kv  = dynamic_cast<const llama_kv_cache *>(memory.get());
+
+        const llama_box * box = mem_hyb ? mem_hyb->get_box() : (mem_kv ? mem_kv->get_box() : nullptr);
+        if (box) {
+            // the box sets the cells, not the context size
+            cparams.n_ctx     = box->get_n_cells();
+            cparams.n_ctx_seq = box->get_n_cells();
+
+            cparams.kv_rows      = true;
+            cparams.auto_kv_rows = false;
+            cparams.kv_idx_rest  = true;
+            cparams.kv_idx       = false;
+            cparams.auto_kv_idx  = false;
+        }
     }
 
     // init backends
@@ -606,6 +637,14 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
     if (cparams.auto_fa) {
         resolve(llm_fused_op_flash_attn_probe, cparams.flash_attn);
         cparams.auto_fa = false;
+    }
+
+    // the cells of the elastic memory are read by flash attention through lists of their rows only
+    if (const auto * mem_kv = dynamic_cast<const llama_kv_cache *>(memory.get()); mem_kv && mem_kv->get_box() && !cparams.flash_attn) {
+        throw std::runtime_error("the elastic memory needs flash attention");
+    }
+    if (const auto * mem_hyb = dynamic_cast<const llama_memory_hybrid *>(memory.get()); mem_hyb && mem_hyb->get_box() && !cparams.flash_attn) {
+        throw std::runtime_error("the elastic memory needs flash attention");
     }
 
     // indexed flash attention reads only the cells of each sequence of a unified KV cache, see
@@ -930,13 +969,24 @@ uint32_t llama_context::n_seq_max_ubatch() const {
     // e.g. the MTP draft context of a hybrid arch uses a plain KV cache
     // llama_memory_hybrid_idx derives from llama_memory_hybrid
     const llama_memory_i * mem = memory.get();
-    const bool has_rs =
-        dynamic_cast<const llama_memory_recurrent *>(mem)   != nullptr ||
-        dynamic_cast<const llama_memory_hybrid *>(mem)      != nullptr ||
-        dynamic_cast<const llama_memory_hybrid_iswa *>(mem) != nullptr;
+    const auto * mem_hyb = dynamic_cast<const llama_memory_hybrid *>(mem);
 
     // each seq of a ubatch has at least one token in it
     const uint32_t n_tokens_max = std::min(cparams.n_ctx, cparams.n_ubatch);
+
+    // the elastic memory reads and writes the states in place, nothing per seq is reserved: the graphs are sized for the
+    // most seqs a ubatch can hold, whatever the number of seqs that run at once (n_seq_max only caps the admission);
+    // so is the draft context next to it, which decodes the same seqs
+    const bool elastic = (mem_hyb != nullptr && mem_hyb->get_box() != nullptr) ||
+        (cparams.elastic && cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP);
+    if (elastic) {
+        return std::min<uint32_t>(n_tokens_max, LLAMA_MAX_SEQ);
+    }
+
+    const bool has_rs =
+        mem_hyb != nullptr ||
+        dynamic_cast<const llama_memory_recurrent *>(mem)   != nullptr ||
+        dynamic_cast<const llama_memory_hybrid_iswa *>(mem) != nullptr;
 
     return std::min(has_rs ? cparams.n_rs_cells : cparams.n_seq_max, n_tokens_max);
 }
@@ -3931,6 +3981,11 @@ llama_context_params llama_context_default_params() {
         /*.ctx_other                   =*/ nullptr,
         /*.n_rs_cells                  =*/ 0,
         /*.rs_rollback                 =*/ LLAMA_RS_ROLLBACK_SNAPSHOT,
+        /*.elastic                     =*/ true,
+        /*.box_bytes                   =*/ 0,
+        /*.box_draft                   =*/ false,
+        /*.box_draft_type_k            =*/ GGML_TYPE_F16,
+        /*.box_draft_type_v            =*/ GGML_TYPE_F16,
     };
 
     return result;
@@ -4432,7 +4487,48 @@ llama_memory_usage llama_memory_get_usage(llama_memory_t mem) {
         res.rs_used = rs->size - rs->n_free_cells();
     }
 
+    // the elastic memory: the cells of the pages that hold tokens or states are used, see llama_box
+    if (const auto * m = dynamic_cast<const llama_memory_hybrid *>(mem); m && m->get_box()) {
+        const auto * box = m->get_box();
+
+        res.kv_used = (box->get_n_blocks() - box->n_free())*llama_box::n_block_tokens;
+        res.rs_size = 0;
+        res.rs_used = 0;
+    }
+
     return res;
+}
+
+bool llama_memory_box_get_info(llama_memory_t mem, llama_memory_box_info * info) {
+    const auto * m = dynamic_cast<const llama_memory_hybrid *>(mem);
+    if (!m || !m->get_box()) {
+        return false;
+    }
+
+    const auto * box = m->get_box();
+
+    info->block_tokens = llama_box::n_block_tokens;
+    info->n_blocks     = box->get_n_blocks();
+    info->n_free       = box->n_free();
+    info->n_reserved   = box->n_reserved();
+    info->state_blocks = box->get_state_blocks();
+    info->total_bytes  = box->get_total_bytes();
+
+    return true;
+}
+
+bool llama_memory_box_reserve(llama_memory_t mem, llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) {
+    auto * m = dynamic_cast<llama_memory_hybrid *>(mem);
+    GGML_ASSERT(m && m->get_box());
+
+    return m->box_reserve(seq_id, n_input, n_output);
+}
+
+void llama_memory_box_reserve_drop(llama_memory_t mem, llama_seq_id seq_id) {
+    auto * m = dynamic_cast<llama_memory_hybrid *>(mem);
+    if (m && m->get_box()) {
+        m->box_reserve_drop(seq_id);
+    }
 }
 
 // llama state API

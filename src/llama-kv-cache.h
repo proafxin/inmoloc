@@ -10,6 +10,7 @@
 
 struct llama_cparams;
 struct llama_hparams;
+class  llama_box;
 struct llama_model;
 struct llama_context;
 
@@ -114,9 +115,13 @@ public:
         const  layer_reuse_cb & reuse,
         const  layer_share_cb & share,
         // a model can hold more than one cache, so the tensor names have to stay unique
-                 const char *   name_tag = "");
+                 const char *   name_tag = "",
+        // the elastic memory that holds the cells, see llama_box: kv_size is its cells then
+                  llama_box *   box = nullptr,
+        // the elastic memory of a target context, whose blocks hold the rows of this draft context
+        std::shared_ptr<llama_box> box_ref = nullptr);
 
-    ~llama_kv_cache() = default;
+    ~llama_kv_cache();
 
     //
     // llama_memory_i
@@ -157,6 +162,22 @@ public:
 
     uint32_t get_size()     const;
     uint32_t get_n_stream() const;
+    uint32_t get_n_seq_max() const { return n_seq_max; }
+
+    //
+    // elastic memory, see llama_box
+    //
+
+    llama_box * get_box() const { return box; }
+
+    // the row of cell c in the K and V tensors
+    int64_t cell_row(uint32_t c) const;
+
+    // whether block b of the box holds a used cell
+    bool box_block_used(uint32_t b) const;
+
+    // the empty cells in the blocks of seq_id
+    uint32_t box_seq_free(llama_seq_id seq_id) const;
 
     // used cells summed over streams, and the largest used range (highest used cell + 1) of any stream
     void get_usage(uint32_t & n_used, uint32_t & n_span) const;
@@ -232,7 +253,9 @@ public:
     ggml_tensor * get_v_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs, const slot_info & sinfo) const;
 
     // fill the cell indices and the mask of a gather run, the mask rows are taken from the full F16 mask [n_kv, n_tokens]
-    void set_input_attn_run(ggml_tensor * idxs, ggml_tensor * mask, const ggml_fp16_t * full_mask, int64_t n_kv, const llama_ubatch * ubatch, const llama_kv_attn_run & run) const;
+    // a run of one sequence read in place takes its cells sorted by position and, in hi (I32 [n_tokens of the run]),
+    // the prefix of them each token sees, see ggml_flash_attn_ext_set_kv_rows_hi(); it has no mask
+    void set_input_attn_run(ggml_tensor * idxs, ggml_tensor * mask, ggml_tensor * hi, const ggml_fp16_t * full_mask, int64_t n_kv, const llama_ubatch * ubatch, const llama_kv_attn_run & run) const;
 
     // the full F16 mask in host memory owned by the cache, for when no graph node reads the full mask tensor
     // (every run is gathered) and so the tensor is not allocated
@@ -323,6 +346,12 @@ private:
 
     bool v_trans = true;  // the value tensor is transposed
 
+    // the elastic memory that holds the cells, nullptr when the cache has its own buffers
+    llama_box * box = nullptr;
+
+    // a draft context keeps the box of its target alive, and takes the blocks for its own tokens
+    std::shared_ptr<llama_box> box_ref;
+
     const uint32_t n_seq_max = 1;
     const uint32_t n_stream  = 1;
 
@@ -369,6 +398,19 @@ private:
 
     // fills a KQ mask [n_kv, n_tokens/n_stream, 1, n_stream] of type F16 or F32 at data
     void fill_kq_mask(ggml_type type, void * data, int64_t n_kv, int64_t n_stream, const llama_ubatch * ubatch, bool causal_attn) const;
+
+    // the cells of seq_id sorted by position (then by the 2D position), the order of the causal mask, with their positions
+    void seq_cells_causal(llama_seq_id seq_id, bool is_2d, std::vector<int32_t> & cells_out, std::vector<llama_pos> & pos_out) const;
+
+    // the entries of a list from seq_cells_causal() token i of the ubatch sees: [lo, hi)
+    void causal_range(const llama_ubatch * ubatch, uint32_t i, bool causal_attn, const int32_t * cid, const llama_pos * pos, int32_t n,
+            llama_pos seq_pos_min, int32_t & lo, int32_t & hi) const;
+
+    // places the tokens of the ubatch in the blocks of their sequences, see llama_box
+    bool find_slot_box(const llama_ubatch & ubatch, std::vector<uint32_t> & idxs) const;
+
+    // calls fn(row, n) for the runs of rows of the cells [c0, c1), which are contiguous within a page
+    void cell_row_runs(uint32_t c0, uint32_t c1, const std::function<void(int64_t, uint32_t)> & fn) const;
 
     // TODO: temporary until we refactor to be able to share the same cells between 2 kv caches [TAG_KV_CACHE_SHARE_CELLS]
     llama_kv_cache * other;
@@ -481,7 +523,7 @@ public:
     ggml_tensor * get_k_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs) const;
     ggml_tensor * get_v_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs) const;
 
-    void set_input_attn_run(ggml_tensor * idxs, ggml_tensor * mask, const ggml_fp16_t * full_mask, int64_t n_kv, const llama_ubatch * ubatch, const llama_kv_attn_run & run) const;
+    void set_input_attn_run(ggml_tensor * idxs, ggml_tensor * mask, ggml_tensor * hi, const ggml_fp16_t * full_mask, int64_t n_kv, const llama_ubatch * ubatch, const llama_kv_attn_run & run) const;
 
     // see llama_kv_cache::fill_kq_mask_scratch()
     const ggml_fp16_t * fill_kq_mask_scratch(const llama_ubatch * ubatch, bool causal_attn) const;

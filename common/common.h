@@ -488,7 +488,7 @@ struct common_params {
 
     // the server sizes the cache from the budget too, see common_budget_params()
     bool    vram_budget_ctx    = false;
-    int32_t n_ctx_typical      = 0;     // tokens a typical request holds (0 = n_ctx, else the longest request that fits)
+    int32_t max_output_tokens  = 0;     // with the elastic memory: the most tokens a request generates, charged when it is admitted
 
     // filled in at startup: the memory the configuration is projected to use, and the free device memory it was
     // measured against; compared with the memory actually used once everything is loaded
@@ -591,6 +591,8 @@ struct common_params {
     bool ctx_shift         = false; // context shift on infinite text generation
     bool swa_full          = false; // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
     bool kv_unified        = false; // enable unified KV cache
+    bool elastic           = true;  // one elastic memory for the KV cells and the recurrent states, see llama_context_params::elastic
+    size_t box_bytes       = 0;     // its size, set by the memory budget
 
     bool input_prefix_bos  = false; // prefix BOS to user inputs, preceding input_prefix
     bool verbose_prompt    = false; // print prompt tokens before generation
