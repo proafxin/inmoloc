@@ -432,8 +432,69 @@ void llm_graph_input_cls::set_input(const llama_ubatch * ubatch) {
     }
 }
 
+ggml_tensor * llm_graph_input_rs::box_run(ggml_context * ctx, int il, uint32_t run) const {
+    const int32_t l = mctx->box_layer(il);
+    GGML_ASSERT(l >= 0 && run < box_n_runs);
+
+    return ggml_view_1d(ctx, box_rows, box_n_seqs, ((size_t) l*box_n_runs + run)*box_n_seqs*box_rows->nb[0]);
+}
+
+// the runs of a layer: conv read, conv write per conv row, scan read, scan write, replay read, replay write
+ggml_tensor * llm_graph_input_rs::box_r_read (ggml_context * ctx, int il)             const { return box_run(ctx, il, 0); }
+ggml_tensor * llm_graph_input_rs::box_r_write(ggml_context * ctx, int il, uint32_t k) const { return box_run(ctx, il, 1 + k); }
+ggml_tensor * llm_graph_input_rs::box_s_read (ggml_context * ctx, int il)             const { return box_run(ctx, il, 1 + box_n_rows_r); }
+ggml_tensor * llm_graph_input_rs::box_s_write(ggml_context * ctx, int il)             const { return box_run(ctx, il, 2 + box_n_rows_r); }
+ggml_tensor * llm_graph_input_rs::box_x_read (ggml_context * ctx, int il)             const { return box_run(ctx, il, 3 + box_n_rows_r); }
+ggml_tensor * llm_graph_input_rs::box_x_write(ggml_context * ctx, int il)             const { return box_run(ctx, il, 4 + box_n_rows_r); }
+
 void llm_graph_input_rs::set_input(const llama_ubatch * ubatch) {
     GGML_UNUSED(ubatch);
+
+    // the elastic memory: the rows of every seq in every recurrent layer, see box_rows
+    if (box_rows) {
+        if (box_rows->buffer) {
+            GGML_ASSERT(ggml_backend_buffer_is_host(box_rows->buffer));
+            int32_t * data = (int32_t *) box_rows->data;
+
+            using kind = llama_memory_recurrent_context::box_row_kind;
+
+            const uint32_t n_layers = mctx->box_n_layers();
+            const uint32_t ns       = box_n_seqs;
+
+            for (uint32_t i = 0; i < ns; ++i) {
+                // the rollback index is read once per step, for all the layers
+                const uint32_t rb = mctx->box_take_rollback((int) i);
+
+                for (uint32_t l = 0; l < n_layers; ++l) {
+                    int32_t * run = data + (size_t) l*box_n_runs*ns;
+
+                    run[i] = mctx->box_row((int) i, l, kind::BOX_R_READ, rb);
+                    for (uint32_t k = 0; k < box_n_rows_r; ++k) {
+                        run[(1 + k)*ns + i] = mctx->box_row((int) i, l, kind::BOX_R_WRITE, k);
+                    }
+                    run[(1 + box_n_rows_r)*ns + i] = mctx->box_row((int) i, l, kind::BOX_S_READ);
+                    run[(2 + box_n_rows_r)*ns + i] = mctx->box_row((int) i, l, kind::BOX_S_WRITE);
+                    run[(3 + box_n_rows_r)*ns + i] = mctx->get_n_x() > 0 ? mctx->box_row((int) i, l, kind::BOX_X_READ)  : -1;
+                    run[(4 + box_n_rows_r)*ns + i] = mctx->get_n_x() > 0 ? mctx->box_row((int) i, l, kind::BOX_X_WRITE) : -1;
+                }
+            }
+        }
+
+        // the replay mask, the only other input the box reads
+        if (rs_x_mask && rs_x_mask->buffer) {
+            GGML_ASSERT(ggml_backend_buffer_is_host(rs_x_mask->buffer));
+            float * data = (float *) rs_x_mask->data;
+
+            for (uint32_t i = 0; i < box_n_seqs; ++i) {
+                const uint32_t n = mctx->replay_n((int) i);
+                for (int64_t t = 0; t < n_replay; ++t) {
+                    data[i*n_replay + t] = t < (int64_t) n ? 1.0f : 0.0f;
+                }
+            }
+        }
+
+        return;
+    }
 
     const int64_t n_rs = mctx->get_n_rs();
 
@@ -501,10 +562,18 @@ bool llm_graph_input_rs::can_reuse_impl(const llm_graph_params & params, const l
 
     bool res = true;
 
-    res &= s_copy->ne[0] == mctx->get_n_rs();
+    // the elastic memory: the rows of the seqs of the ubatch in every layer
+    if (box_rows) {
+        res &= mctx->is_box();
+        res &= box_n_seqs == params.ubatch.n_seqs;
+        res &= n_replay == mctx->get_n_x();
 
-    res &= s_copy_main->ne[0]  == params.ubatch.n_seqs;
-    res &= s_copy_extra->ne[0] == mctx->get_n_rs() - params.ubatch.n_seqs;
+        return res;
+    }
+
+    res &= s_copy->ne[0] == (int64_t) mctx->get_n_rs();
+
+    res &= s_copy_main->ne[0] == params.ubatch.n_seqs;
 
     res &= head == mctx->get_head();
     res &= rs_z == mctx->get_rs_z();
@@ -562,7 +631,7 @@ static void print_mask(const T * data, int64_t n_tokens, int64_t n_kv, int64_t n
 }
 
 void llm_graph_input_attn_no_cache::set_input(const llama_ubatch * ubatch) {
-    const int64_t n_kv     = ubatch->n_tokens;
+    const int64_t n_kv     = self_kq_mask->ne[0];
     const int64_t n_tokens = ubatch->n_tokens;
 
     const auto fill_mask = [&](auto * data, int64_t ne, int n_swa, llama_swa_type swa_type) {
@@ -649,13 +718,13 @@ void llm_graph_input_attn_kv::set_input(const llama_ubatch * ubatch) {
         mctx->add_attn_read(attn_cells_read(attn_runs, cparams, self_q_rng, mctx->get_n_kv(), ubatch->n_tokens));
     }
 
-    // the masks of the gather runs are taken from the full mask
+    // the masks of the copied gather runs are taken from the full mask
     for (size_t r = 0; r < attn_runs.size(); ++r) {
         if (attn_runs[r].gather && attn_run_idxs[r]->buffer) {
-            if (!full_mask) {
+            if (!full_mask && attn_run_mask[r]) {
                 full_mask = mctx->fill_kq_mask_scratch(ubatch, cparams.causal_attn);
             }
-            mctx->set_input_attn_run(attn_run_idxs[r], attn_run_mask[r], full_mask, mctx->get_n_kv(), ubatch, attn_runs[r]);
+            mctx->set_input_attn_run(attn_run_idxs[r], attn_run_mask[r], attn_run_hi[r], full_mask, mctx->get_n_kv(), ubatch, attn_runs[r]);
         }
     }
 
@@ -1297,13 +1366,14 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
                 mctx->get_attn()->get_n_kv(), ubatch->n_tokens));
     }
 
-    // the masks of the gather runs are taken from the full mask
+    // the masks of the copied gather runs are taken from the full mask
     for (size_t r = 0; r < inp_attn->attn_runs.size(); ++r) {
         if (inp_attn->attn_runs[r].gather && inp_attn->attn_run_idxs[r]->buffer) {
-            if (!full_mask) {
+            if (!full_mask && inp_attn->attn_run_mask[r]) {
                 full_mask = mctx->get_attn()->fill_kq_mask_scratch(ubatch, cparams.causal_attn);
             }
-            mctx->get_attn()->set_input_attn_run(inp_attn->attn_run_idxs[r], inp_attn->attn_run_mask[r], full_mask, mctx->get_attn()->get_n_kv(), ubatch, inp_attn->attn_runs[r]);
+            mctx->get_attn()->set_input_attn_run(inp_attn->attn_run_idxs[r], inp_attn->attn_run_mask[r], inp_attn->attn_run_hi[r],
+                    full_mask, mctx->get_attn()->get_n_kv(), ubatch, inp_attn->attn_runs[r]);
         }
     }
 
@@ -2787,7 +2857,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
                float   kq_scale,
                  int   il,
          ggml_tensor * kv_idx,
-         ggml_tensor * q_rng) const {
+         ggml_tensor * q_rng,
+         ggml_tensor * kv_hi) const {
     const bool v_trans = v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
@@ -2827,9 +2898,12 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         ggml_flash_attn_ext_set_n_kv_max(cur, static_cast<int32_t>(n_kv_max));
         ggml_prec_set_acc(cur, GGML_PREC_F32);
 
-        // ranges of per-sequence lists with q_rng, else one list of K/V rows for all queries
+        // ranges of per-sequence lists with q_rng, else one list of K/V rows for all queries, each seeing a prefix of
+        // it with kv_hi
         if (kv_idx && q_rng) {
             ggml_flash_attn_ext_set_kv_idx(cur, kv_idx, q_rng);
+        } else if (kv_idx && kv_hi) {
+            ggml_flash_attn_ext_set_kv_rows_hi(cur, kv_idx, kv_hi);
         } else if (kv_idx) {
             ggml_flash_attn_ext_set_kv_rows(cur, kv_idx);
         }
@@ -2930,14 +3004,16 @@ llm_graph_input_attn_no_cache * llm_graph_context::build_attn_inp_no_cache() con
     // flash attention requires an f16 mask
     const auto type_mask = cparams.flash_attn ? GGML_TYPE_F16 : GGML_TYPE_F32;
 
-    // note: there is no KV cache, so the number of KV values is equal to the number of tokens in the batch
-    inp->self_kq_mask = ggml_new_tensor_4d(ctx0, type_mask, n_tokens, n_tokens, 1, 1);
+    // note: there is no KV cache, so the KV values are the tokens of the batch, padded like the KV cache (see llama_kv_cache::get_n_kv)
+    const int64_t n_kv = GGML_PAD(n_tokens, 256);
+
+    inp->self_kq_mask = ggml_new_tensor_4d(ctx0, type_mask, n_kv, n_tokens, 1, 1);
     ggml_set_input(inp->self_kq_mask);
 
     inp->self_kq_mask_cnv = inp->self_kq_mask;
 
     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
-        inp->self_kq_mask_swa = ggml_new_tensor_4d(ctx0, type_mask, n_tokens, n_tokens, 1, 1);
+        inp->self_kq_mask_swa = ggml_new_tensor_4d(ctx0, type_mask, n_kv, n_tokens, 1, 1);
         ggml_set_input(inp->self_kq_mask_swa);
 
         inp->self_kq_mask_swa_cnv = inp->self_kq_mask_swa;
@@ -2982,6 +3058,16 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * q = q_cur;
     ggml_tensor * k = k_cur;
     ggml_tensor * v = v_cur;
+
+    // the KV values and the KQ bias are padded with zeros up to the KV dimension of the mask
+    const int64_t n_kv_pad = kq_mask->ne[0] - k->ne[2];
+
+    k = ggml_pad(ctx0, k, 0, 0, n_kv_pad, 0);
+    v = ggml_pad(ctx0, v, 0, 0, n_kv_pad, 0);
+
+    if (kq_b) {
+        kq_b = ggml_pad(ctx0, kq_b, n_kv_pad, 0, 0, 0);
+    }
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
     cb(cur, "kqv_out", il);
@@ -3041,9 +3127,14 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
         ggml_tensor * idxs      = nullptr;
         ggml_tensor * mask      = nullptr;
         ggml_tensor * mask_full = nullptr;
+        ggml_tensor * hi        = nullptr;
+
+        // a run read in place of one sequence sees a prefix of its cells (hi), one of all the cells (seq_id < 0) uses the
+        // rows of the full mask for its tokens, which is laid out like the list of all the cells
+        const bool gather_seq = run.gather && cparams.kv_rows && run.seq_id >= 0;
 
         ggml_tensor * kq_mask = inp->get_kq_mask();
-        if (kq_mask && (!run.gather || cparams.kv_rows)) {
+        if (kq_mask && !run.indexed && !gather_seq && (!run.gather || cparams.kv_rows)) {
             mask_full = ggml_view_2d(ctx0, kq_mask, kq_mask->ne[0], run.t1 - run.t0, kq_mask->nb[1], run.t0*kq_mask->nb[1]);
         }
 
@@ -3052,17 +3143,21 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
             ggml_set_input(idxs);
             ggml_set_name(idxs, "attn_inp_run_idxs");
 
-            // a run read in place uses the rows of the full mask for its tokens
             if (!cparams.kv_rows) {
                 mask = ggml_new_tensor_4d(ctx0, GGML_TYPE_F16, run.n_idx, run.t1 - run.t0, 1, 1);
                 ggml_set_input(mask);
                 ggml_set_name(mask, "attn_inp_run_mask");
+            } else if (gather_seq) {
+                hi = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, run.t1 - run.t0);
+                ggml_set_input(hi);
+                ggml_set_name(hi, "attn_inp_run_hi");
             }
         }
 
         inp->attn_run_idxs.push_back(idxs);
         inp->attn_run_mask.push_back(mask);
         inp->attn_run_mask_full.push_back(mask_full);
+        inp->attn_run_hi.push_back(hi);
     }
 
     inp->self_k_rot = mctx_cur->build_input_k_rot(ctx0);
@@ -3156,6 +3251,7 @@ ggml_tensor * llm_graph_context::build_attn(
             ggml_tensor * v    = nullptr;
             ggml_tensor * mask = nullptr;
             ggml_tensor * rows = nullptr; // the cells of a run read in place
+            ggml_tensor * hi   = nullptr; // the prefix of them each token sees, see attn_run_hi
 
             // the tokens outside the gather runs (e.g. generation) read the cells of their sequence through indexed
             // ranges, rather than all the cells of the cache with a mask
@@ -3186,10 +3282,11 @@ ggml_tensor * llm_graph_context::build_attn(
 
                 if (run.gather) {
                     rows = inp->attn_run_idxs[r];
+                    hi   = inp->attn_run_hi[r];
                 }
             }
 
-            ggml_tensor * out = build_attn_mha(q, k, v, nullptr, mask, sinks, v_mla, 0, kq_scale, il, rows);
+            ggml_tensor * out = build_attn_mha(q, k, v, nullptr, hi ? nullptr : mask, sinks, v_mla, 0, kq_scale, il, rows, nullptr, hi);
 
             cur = cur ? ggml_concat(ctx0, cur, out, 1) : out;
         }
@@ -3775,8 +3872,8 @@ llm_graph_input_dsv4 * llm_graph_context::build_inp_dsv4() const {
 
 ggml_tensor * llm_graph_context::build_rs(
         ggml_tensor * s,
+        ggml_tensor * state_copy,
         ggml_tensor * state_copy_main,
-        ggml_tensor * state_copy_extra,
             int32_t   state_size,
             int32_t   n_seqs,
            uint32_t   n_rs,
@@ -3795,12 +3892,19 @@ ggml_tensor * llm_graph_context::build_rs(
 
     // copy states
     // NOTE: assuming the copy destinations are ALL contained between rs_head and rs_head + n_rs
-    // {state_size, rs_size} -> {state_size, n_seqs}
-    ggml_tensor * output_states = get_state_rows(ctx0, states, state_copy_main);
+    // one gather of the states i0..n_rs (ubatch states then extra states), sized by n_rs so the reserve covers every split
+    // {state_size, rs_size} -> {state_size, n_rs - i0}
+    const int64_t i0 = n_rs - state_copy->ne[0];
+
+    ggml_tensor * states_all = ggml_get_rows(ctx0, states, state_copy);
+
+    ggml_tensor * output_states = get_state_rows ?
+        get_state_rows(ctx0, states, state_copy_main) :
+        ggml_view_2d(ctx0, states_all, state_size, n_seqs, states_all->nb[1], 0);
     ggml_build_forward_expand(gf, output_states);
 
     // copy extra states which won't be changed further (between n_seqs and n_rs)
-    ggml_tensor * states_extra = ggml_get_rows(ctx0, states, state_copy_extra);
+    ggml_tensor * states_extra = ggml_view_2d(ctx0, states_all, state_size, n_rs - n_seqs, states_all->nb[1], (n_seqs - i0)*states_all->nb[1]);
     ggml_build_forward_expand(gf,
         ggml_cpy(ctx0,
             states_extra,
@@ -3816,14 +3920,43 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
 
     auto inp = std::make_unique<llm_graph_input_rs>(mctx_cur);
 
-    const int64_t n_rs   = mctx_cur->get_n_rs();
+    // the box reads and writes the states of the seqs of the ubatch in their cells, one row each
+    const bool box = mctx_cur->is_box();
+
+    const int64_t n_rs   = box ? (int64_t) ubatch.n_seqs : (int64_t) mctx_cur->get_n_rs();
     const int64_t n_seqs = ubatch.n_seqs;
+
+    if (box) {
+        // conv rows: one per draft position, see llama_memory_recurrent
+        inp->box_n_seqs   = (uint32_t) n_seqs;
+        inp->box_n_rows_r = 1 + mctx_cur->get_n_rs_seq();
+        inp->box_n_runs   = inp->box_n_rows_r + 5;
+
+        inp->box_rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, (int64_t) n_seqs*inp->box_n_runs*mctx_cur->box_n_layers());
+        ggml_set_input(inp->box_rows);
+        ggml_set_name(inp->box_rows, "rs_box_rows");
+
+        // the replay reads the pending inputs through box_rows, only the mask of the pending tokens is apart
+        if (mctx_cur->get_n_x() > 0) {
+            inp->n_replay  = mctx_cur->get_n_x();
+            inp->rs_x_mask = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, 1, 1, inp->n_replay, n_seqs);
+            ggml_set_input(inp->rs_x_mask);
+        }
+
+        inp->s_copy      = nullptr;
+        inp->s_copy_main = nullptr;
+        inp->s_copy_tail = nullptr;
+        inp->head = 0;
+        inp->rs_z = -1;
+
+        return inp;
+    }
 
     inp->s_copy = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_rs);
     ggml_set_input(inp->s_copy);
 
-    inp->s_copy_main  = ggml_view_1d(ctx0, inp->s_copy, n_seqs, 0);
-    inp->s_copy_extra = ggml_view_1d(ctx0, inp->s_copy, n_rs - n_seqs, n_seqs * inp->s_copy->nb[0]);
+    inp->s_copy_main = ggml_view_1d(ctx0, inp->s_copy, n_seqs, 0);
+    inp->s_copy_tail = ggml_view_1d(ctx0, inp->s_copy, n_rs - 1, inp->s_copy->nb[0]);
 
     if (mctx_cur->get_n_x() > 0) {
         // the scan always replays this many slots, the mask says how many of them are pending tokens
@@ -3841,8 +3974,8 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
         inp->rs_s_copy = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_rs);
         ggml_set_input(inp->rs_s_copy);
 
-        inp->rs_s_copy_main  = ggml_view_1d(ctx0, inp->rs_s_copy, n_seqs, 0);
-        inp->rs_s_copy_extra = ggml_view_1d(ctx0, inp->rs_s_copy, n_rs - n_seqs, n_seqs * inp->rs_s_copy->nb[0]);
+        inp->rs_s_copy_main = ggml_view_1d(ctx0, inp->rs_s_copy, n_seqs, 0);
+        inp->rs_s_copy_tail = ggml_view_1d(ctx0, inp->rs_s_copy, n_rs - 1, inp->rs_s_copy->nb[0]);
 
         inp->rs_x_mask = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, 1, 1, inp->n_replay, n_seqs);
         ggml_set_input(inp->rs_x_mask);
@@ -3867,17 +4000,34 @@ ggml_tensor * llm_graph_context::build_rs(
         ggml_tensor * s,
             int32_t   state_size,
             int32_t   n_seqs,
-        const llm_graph_get_rows_fn & get_state_rows) const {
+        const llm_graph_get_rows_fn & get_state_rows,
+                int   il) const {
     const auto * kv_state = inp->mctx;
+
+    // the box: the tensor is a view of the box with a row per unit, the states of the ubatch are read by the rows of the
+    // layer (-1 reads zeros: a new state)
+    if (kv_state->is_box()) {
+        GGML_ASSERT(il >= 0 && s->ne[0] == state_size && (int64_t) inp->box_n_seqs == n_seqs);
+
+        ggml_tensor * rows = kv_state->is_s_l(s) ? inp->box_s_read(ctx0, il) : inp->box_r_read(ctx0, il);
+
+        ggml_tensor * states = get_state_rows ? get_state_rows(ctx0, s, rows) : ggml_get_rows(ctx0, s, rows);
+        ggml_build_forward_expand(gf, states);
+
+        return states;
+    }
+
+    // a custom getter reads the states of the ubatch straight from the cache, so the gather skips the first
+    // state: it still holds the n_rs - n_seqs extra states and copies no state of a single sequence ubatch
 
     // the scan state has no snapshots to roll back to when a rollback replays the cached inputs instead
     if (inp->rs_s_copy && kv_state->is_s_l(s)) {
-        return build_rs(s, inp->rs_s_copy_main, inp->rs_s_copy_extra, state_size, n_seqs,
+        return build_rs(s, get_state_rows ? inp->rs_s_copy_tail : inp->rs_s_copy, inp->rs_s_copy_main, state_size, n_seqs,
                         kv_state->get_n_rs(), kv_state->get_head(), kv_state->get_size(), kv_state->get_rs_z(),
                         get_state_rows);
     }
 
-    return build_rs(s, inp->s_copy_main, inp->s_copy_extra, state_size, n_seqs,
+    return build_rs(s, get_state_rows ? inp->s_copy_tail : inp->s_copy, inp->s_copy_main, state_size, n_seqs,
                     kv_state->get_n_rs(), kv_state->get_head(), kv_state->get_size(), kv_state->get_rs_z(),
                     get_state_rows);
 }

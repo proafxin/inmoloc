@@ -1,0 +1,99 @@
+{
+  "repeats": 1,
+
+  "targets": [
+    { "name": "llamacpp", "kind": "llamacpp", "image": "ghcr.io/ggml-org/llama.cpp:server-cuda" },
+    { "name": "base",     "kind": "inmoloc",  "image": "inmoloc:base", "args": "--ctx-typical 2048" },
+    { "name": "port8",    "kind": "inmoloc",  "image": "inmoloc:port8", "args": "--ctx-typical 2048" },
+    { "name": "port9",    "kind": "inmoloc",  "image": "inmoloc:port9", "args": "--ctx-typical 2048" },
+    { "name": "port10",   "kind": "inmoloc",  "image": "inmoloc:port10", "args": "--ctx-typical 2048" },
+    { "name": "port12",   "kind": "inmoloc",  "image": "inmoloc:port12", "args": "--ctx-typical 2048" },
+    { "name": "port15",   "kind": "inmoloc",  "image": "inmoloc:port15", "args": "--ctx-typical 2048" },
+    { "name": "port15-replay", "kind": "inmoloc", "image": "inmoloc:port15", "args": "--ctx-typical 2048 --rs-rollback replay" },
+    { "name": "port17",   "kind": "inmoloc",  "image": "inmoloc:port17", "args": "--ctx-typical 2048" },
+    { "name": "port17-replay", "kind": "inmoloc", "image": "inmoloc:port17", "args": "--ctx-typical 2048 --rs-rollback replay" },
+    { "name": "port18",   "kind": "inmoloc",  "image": "inmoloc:port18", "args": "--ctx-typical 2048" },
+    { "name": "port18-replay", "kind": "inmoloc", "image": "inmoloc:port18", "args": "--ctx-typical 2048 --rs-rollback replay" },
+    { "name": "port20",   "kind": "inmoloc",  "image": "inmoloc:port20", "args": "--ctx-typical 2048" },
+    { "name": "port20-replay", "kind": "inmoloc", "image": "inmoloc:port20", "args": "--ctx-typical 2048 --rs-rollback replay" },
+    { "name": "port21", "kind": "inmoloc", "image": "inmoloc:port21", "args": "--ctx-typical 2048" },
+    { "name": "port21-replay", "kind": "inmoloc", "image": "inmoloc:port21", "args": "--ctx-typical 2048 --rs-rollback replay" },
+    { "name": "current",  "kind": "inmoloc",  "image": "inmoloc:elastic1" },
+    { "name": "replay",   "kind": "inmoloc",  "image": "inmoloc:elastic1", "args": "--rs-rollback replay --max-output-tokens 512" },
+    { "name": "replay-block", "kind": "inmoloc", "image": "inmoloc:elastic1", "args": "--rs-rollback replay --max-output-tokens 512 --gpu-wait block" }
+  ],
+
+  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"], ["current", "port10"], ["current", "port12"], ["replay", "current"], ["replay", "port21-replay"], ["current", "port21"]],
+
+  "engine": {
+    "bench":   { "n_prompt": "512", "n_gen": "128", "repetitions": 3 },
+    "batched": { "npp": "512", "ntg": "64", "npl": "1,8,32" }
+  },
+
+  "workloads": {
+    "mixed":    { "prompt_tokens": 64,   "prompt_tokens_max": 2048, "max_tokens": 32, "max_tokens_max": 512 },
+    "short":    { "prompt_tokens": 256,  "max_tokens": 256 },
+    "long-in":  { "prompt_tokens": 4096, "max_tokens": 256 },
+    "long-out": { "prompt_tokens": 256,  "max_tokens": 1024 }
+  },
+
+  "models": [
+    {
+      "name": "qwen3.8-mtp",
+      "file": "Qwen3.8-27B-AP-Q4_K_XL.gguf",
+      "tiers": ["engine", "server"],
+      "engine_args": "-fa on -ctk q8_0 -ctv q8_0",
+      "engine_ctx": 20480,
+      "common_args": "-fa on --cache-type-k q8_0 --cache-type-v q8_0 --spec-type draft-mtp --spec-draft-n-max 2 --cache-ram 0",
+      "llamacpp_args": "-c 65536 --parallel 8",
+      "inmoloc_args": "--vram-budget 22826M",
+      "workloads": ["mixed"],
+      "levels": [128]
+    },
+    {
+      "name": "gemma4-e4b",
+      "file": "Nemotron-3.5-Bolt-E4B-Q4_K_M.gguf",
+      "tiers": ["engine", "server"],
+      "engine_args": "-fa on -ctk q8_0 -ctv q8_0",
+      "engine_ctx": 20480,
+      "common_args": "-fa on --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 0",
+      "llamacpp_args": "-c 131072 --parallel 16",
+      "inmoloc_args": "--vram-budget 20G",
+      "workloads": ["mixed"],
+      "levels": [128]
+    },
+    {
+      "name": "qwen3.8",
+      "default": false,
+      "file": "Qwen3.8-27B-AP-Q4_K_XL.gguf",
+      "tiers": ["server"],
+      "common_args": "-fa on --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 0",
+      "llamacpp_args": "-c 65536 --parallel 8",
+      "inmoloc_args": "--vram-budget 20G",
+      "workloads": ["mixed"],
+      "levels": [128]
+    },
+    {
+      "name": "harrier-embed",
+      "default": false,
+      "file": "harrier-oss-v1-0.6b-BF16.gguf",
+      "tiers": ["embed"],
+      "common_args": "--embedding --pooling mean -fa on --cache-ram 0",
+      "llamacpp_args": "-c 32768 --parallel 16 -ub 2048 -b 2048",
+      "inmoloc_args": "--vram-budget 8G -ub 2048 -b 2048",
+      "embed": { "n_requests": 256, "min_words": 20, "max_words": 1200 },
+      "levels": [128]
+    },
+    {
+      "name": "paddleocr-vl",
+      "default": false,
+      "file": "PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-Q8_0.gguf",
+      "tiers": ["vision"],
+      "common_args": "--mmproj /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-GGUF-mmproj.gguf --chat-template-file /models/PaddleOCR-VL-1.6/chat_template.jinja --cache-type-k bf16 --cache-type-v bf16 -fa on --cache-ram 0",
+      "llamacpp_args": "-c 184320 --parallel 45",
+      "inmoloc_args": "--vram-budget 5G",
+      "vision": { "images": "", "n_requests": 256, "prompt": "OCR:", "max_tokens": 1024 },
+      "levels": [128]
+    }
+  ]
+}

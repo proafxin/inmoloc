@@ -999,7 +999,10 @@ void launch_fattn(
     GGML_ASSERT(K->nb[0] == ggml_element_size(K));
     GGML_ASSERT(V->nb[0] == ggml_element_size(V));
 
-    GGML_ASSERT(!mask || mask->type == GGML_TYPE_F16);
+    // a list of rows with the prefix of it each query sees has the I32 prefix lengths in place of the mask, see
+    // ggml_flash_attn_ext_set_kv_rows_hi()
+    const bool rows_hi = KQV->src[5] != nullptr && KQV->src[6] == nullptr && ggml_get_op_params_i32(KQV, 5) == 1;
+    GGML_ASSERT(!mask || mask->type == (rows_hi ? GGML_TYPE_I32 : GGML_TYPE_F16));
 
     ggml_cuda_pool & pool = ctx.pool();
     cudaStream_t main_stream = ctx.stream();
@@ -1266,7 +1269,9 @@ void launch_fattn(
         Q->ne[0], ne01,     Q->ne[2], Q->ne[3], Q->nb[1], Q->nb[2], Q->nb[3],
         K->ne[0], n_kv, K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,
-        kv_idx ? kv_idx->ne[0] : mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
+        // the prefix lengths of a list of rows (ggml_flash_attn_ext_set_kv_rows_hi) are flagged by ne32 < 0
+        kv_idx ? kv_idx->ne[0] : mask ? mask->ne[1] : 0,
+        rows_hi ? -1 : mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
         mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0
     );
     CUDA_CHECK(cudaGetLastError());

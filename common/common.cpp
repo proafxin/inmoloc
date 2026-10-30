@@ -1363,10 +1363,13 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             }
 
             // fit_params_min_ctx is negative (UINT32_MAX) after -c 0
-            cparams.n_ctx = params.n_ctx_typical > 0 ? params.n_ctx_typical : params.fit_params_min_ctx > 0 ? params.fit_params_min_ctx : 4096;
+            cparams.n_ctx = params.fit_params_min_ctx > 0 ? params.fit_params_min_ctx : 4096;
             if (n_ctx_user > 0) {
                 cparams.n_ctx = std::min(cparams.n_ctx, n_ctx_user);
             }
+
+            // one request holds one recurrent state, the sizing of the sequences is the budget's
+            cparams.n_rs_cells = 1;
         }
 
         common_fit_params(params.model.path.c_str(), &mparams, &cparams,
@@ -1378,7 +1381,8 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             log_level_fit);
 
         if (fit_layers_only) {
-            cparams.n_ctx = n_ctx_user;
+            cparams.n_ctx      = n_ctx_user;
+            cparams.n_rs_cells = 0;
         }
     }
 
@@ -1386,13 +1390,14 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     if (!model_only) {
         if (!common_budget_params(params.model.path.c_str(), &mparams, &cparams,
                 has_draft || spec_mtp ? &extra : nullptr, params.vram_budget, params.vram_budget_used,
-                params.n_ctx_typical, params.vram_budget_ctx,
+                params.vram_budget_ctx,
                 log_level_fit,
                 &params.vram_predicted, &params.vram_free_at_start)) {
             return;
         }
 
         params.n_parallel = (int32_t) cparams.n_seq_max;
+        params.box_bytes  = cparams.box_bytes;
         if (params.vram_budget_ctx) {
             params.n_ctx = (int32_t) cparams.n_ctx;
         }
@@ -1800,7 +1805,6 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.n_seq_max         = params.n_parallel;
     cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
     cparams.rs_rollback       = params.rs_rollback;
-    cparams.backend_priority  = params.backend_priority;
     cparams.n_outputs_max     = std::max(params.n_outputs_max, 0);
     cparams.n_outputs_max_per_seq = std::max(params.n_outputs_max_per_seq, 0);
     cparams.n_batch           = params.n_batch;
@@ -1827,6 +1831,12 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.op_offload        = !params.no_op_offload;
     cparams.swa_full          = params.swa_full;
     cparams.kv_unified        = params.kv_unified;
+    cparams.elastic           = params.elastic;
+    cparams.box_bytes         = params.box_bytes;
+    cparams.box_draft         = !params.speculative.has_dft() && std::find(params.speculative.types.begin(), params.speculative.types.end(),
+                                    COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
+    cparams.box_draft_type_k  = params.speculative.draft.cache_type_k;
+    cparams.box_draft_type_v  = params.speculative.draft.cache_type_v;
 
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;
@@ -2432,40 +2442,36 @@ void common_prompt_checkpoint::update_dft(
     }
 }
 
-void common_prompt_checkpoint::load_tgt(
+bool common_prompt_checkpoint::load_tgt(
         llama_context * ctx,
         llama_seq_id seq_id,
         llama_state_seq_flags flags) const {
     if (ctx == nullptr) {
-        return;
+        return true;
     }
 
     if (data_tgt.empty()) {
-        return;
+        return true;
     }
 
     const size_t n = llama_state_seq_set_data_ext(ctx, data_tgt.data(), data_tgt.size(), seq_id, flags);
-    if (n != data_tgt.size()) {
-        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", data_tgt.size(), n);
-    }
+    return n == data_tgt.size();
 }
 
-void common_prompt_checkpoint::load_dft(
+bool common_prompt_checkpoint::load_dft(
         llama_context * ctx,
         llama_seq_id seq_id,
         llama_state_seq_flags flags) const {
     if (ctx == nullptr) {
-        return;
+        return true;
     }
 
     if (data_dft.empty()) {
-        return;
+        return true;
     }
 
     const size_t n = llama_state_seq_set_data_ext(ctx, data_dft.data(), data_dft.size(), seq_id, flags);
-    if (n != data_dft.size()) {
-        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", data_dft.size(), n);
-    }
+    return n == data_dft.size();
 }
 
 void common_prompt_checkpoint::clear_tgt() {

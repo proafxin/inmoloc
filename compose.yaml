@@ -1,5 +1,5 @@
 x-models: &models
-  - ${MODELS_DIR:-/home/masterkenway/Projects/citadel/data/gguf_models}:/models:ro
+  - ${MODELS_DIR:-/home/masterkenway/models}:/models:ro
 
 x-gpu: &gpu
   resources:
@@ -99,6 +99,168 @@ services:
       timeout: 5s
       start_period: 120s
       retries: 3
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  # Text benchmark: Qwen3.8-27B with its MTP layer, on both servers with the same settings (q8_0 KV cache, flash
+  # attention, MTP drafting 2 tokens, no host prompt cache). Run with scripts/bench-server-concurrency.py and
+  # --prompt-tokens, so that every request has its own text and nothing is reused from a cache.
+  # inmoloc sizes itself from TEXT_BUDGET; llama.cpp gets the cache by hand (TEXT_CTX over TEXT_PARALLEL slots), set
+  # to what inmoloc chose at the same budget.
+  textbench-llamacpp:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    container_name: textbench-llamacpp
+    restart: "no"
+    ipc: host
+    command:
+      - --model
+      - /models/Qwen3.8-27B-AP-Q4_K_XL.gguf
+      - -ngl
+      - "999"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8120"
+      - -c
+      - "${TEXT_CTX:-65536}"
+      - --parallel
+      - "${TEXT_PARALLEL:-8}"
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "2"
+      - --cache-ram
+      - "0"
+      - --metrics
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --flash-attn
+      - "on"
+      - --alias
+      - text
+    ports:
+      - "8120:8120"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8120/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 300s
+      retries: 3
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  textbench-inmoloc:
+    image: ${INMOLOC_IMAGE:-inmoloc:sched10}
+    container_name: textbench-inmoloc
+    restart: "no"
+    ipc: host
+    command:
+      - --model
+      - /models/Qwen3.8-27B-AP-Q4_K_XL.gguf
+      - -ngl
+      - "999"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8121"
+      - --vram-budget
+      - ${TEXT_BUDGET:-20G}
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "2"
+      - --cache-ram
+      - "0"
+      - --metrics
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --flash-attn
+      - "on"
+      - --alias
+      - text
+      - --slow-loop-ms
+      - "100"
+    ports:
+      - "8121:8121"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8121/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 300s
+      retries: 3
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  # Benchmark suite (scripts/bench-suite.py): the same model and settings on both servers, set through the environment:
+  #   BENCH_MODEL          model file under MODELS_DIR
+  #   BENCH_COMMON_ARGS    arguments of both servers (KV cache type, flash attention, speculative decoding, ...)
+  #   BENCH_LLAMACPP_ARGS  arguments of llama.cpp only (e.g. -c and --parallel)
+  #   BENCH_INMOLOC_ARGS   arguments of inmoloc only (e.g. --vram-budget)
+  # the profile keeps them out of a plain `docker compose up`
+  bench-llamacpp:
+    profiles: [bench]
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    container_name: bench-llamacpp
+    restart: "no"
+    ipc: host
+    command: >-
+      --model /models/${BENCH_MODEL:-} --host 0.0.0.0 --port 8130 -ngl 999 --metrics
+      ${BENCH_COMMON_ARGS:-} ${BENCH_LLAMACPP_ARGS:-}
+    ports:
+      - "8130:8130"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  bench-inmoloc:
+    profiles: [bench]
+    image: ${INMOLOC_IMAGE:-inmoloc:latest}
+    container_name: bench-inmoloc
+    restart: "no"
+    ipc: host
+    command: >-
+      --model /models/${BENCH_MODEL:-} --host 0.0.0.0 --port 8131 -ngl 999 --metrics
+      ${BENCH_COMMON_ARGS:-} ${BENCH_INMOLOC_ARGS:-}
+    ports:
+      - "8131:8131"
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  # engine benchmarks (bench, batched-bench) of the unified binaries, run with `docker compose run --rm <service> <command> ...`
+  bench-engine-llamacpp:
+    profiles: [bench]
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    entrypoint: ["/app/llama"]
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  bench-engine-inmoloc:
+    profiles: [bench]
+    image: ${INMOLOC_IMAGE:-inmoloc:latest}
+    entrypoint: ["/app/local-inference"]
+    ipc: host
     ulimits:
       memlock: -1
       stack: 67108864

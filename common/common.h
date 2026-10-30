@@ -332,6 +332,8 @@ struct common_params_speculative_draft {
 
     bool backend_sampling = true; // offload draft sampling to the backend (default: on)
 
+    bool probabilistic = false; // sample the draft and verify by rejection, instead of argmax and match
+
     common_params_model mparams;
 
     llama_context * ctx_tgt = nullptr;
@@ -456,7 +458,6 @@ struct common_params {
     int32_t n_parallel            =     1; // number of parallel sequences to decode
 
     enum llama_rs_rollback_type rs_rollback = LLAMA_RS_ROLLBACK_SNAPSHOT; // how the recurrent state rolls back drafts
-    enum ggml_backend_priority backend_priority = GGML_BACKEND_PRIORITY_NORMAL; // of the contexts against other work on the devices
     int32_t n_sequences           =     1; // number of sequences to decode
     int32_t n_outputs_max         =     0; // max outputs in a batch (0 = n_batch)
     int32_t n_outputs_max_per_seq =     1; // max outputs per sequence
@@ -487,7 +488,7 @@ struct common_params {
 
     // the server sizes the cache from the budget too, see common_budget_params()
     bool    vram_budget_ctx    = false;
-    int32_t n_ctx_typical      = 0;     // tokens a typical request holds (0 = n_ctx, else the longest request that fits)
+    int32_t max_output_tokens  = 0;     // with the elastic memory: the most tokens a request generates, charged when it is admitted
 
     // filled in at startup: the memory the configuration is projected to use, and the free device memory it was
     // measured against; compared with the memory actually used once everything is loaded
@@ -590,6 +591,8 @@ struct common_params {
     bool ctx_shift         = false; // context shift on infinite text generation
     bool swa_full          = false; // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
     bool kv_unified        = false; // enable unified KV cache
+    bool elastic           = true;  // one elastic memory for the KV cells and the recurrent states, see llama_context_params::elastic
+    size_t box_bytes       = 0;     // its size, set by the memory budget
 
     bool input_prefix_bos  = false; // prefix BOS to user inputs, preceding input_prefix
     bool verbose_prompt    = false; // print prompt tokens before generation
@@ -647,7 +650,6 @@ struct common_params {
     bool    cache_idle_slots    = true;  // save idle slots to the prompt cache (unified KV: when evicted for memory, else upon starting a new task)
     bool    prefix_share        = true;  // a new request may start from the memory of another slot with the same prefix
     int32_t prefix_share_min    = 256;   // the least gain in tokens worth sharing a prefix
-    int32_t prompt_cap          = -1;    // prompt tokens per iteration while slots generate (-1 = one ubatch, 0 = no cap)
     int32_t slow_loop_ms        = 1000;  // log a breakdown of main-loop iterations slower than this (0 = off)
     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
     int32_t checkpoint_min_step = 8192;  // minimum spacing between context checkpoints
@@ -1245,12 +1247,13 @@ struct common_prompt_checkpoint {
             llama_seq_id seq_id,
             llama_state_seq_flags flags);
 
-    void load_tgt(
+    // return false if the state could not be restored
+    bool load_tgt(
             llama_context * ctx,
             llama_seq_id seq_id,
             llama_state_seq_flags flags) const;
 
-    void load_dft(
+    bool load_dft(
             llama_context * ctx,
             llama_seq_id seq_id,
             llama_state_seq_flags flags) const;

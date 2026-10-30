@@ -13,6 +13,14 @@
 #
 # --long N --long-tokens T gives N requests of each level a unique document of about T tokens to summarize, so long
 # and short requests share the memory; ttft is then reported for both, and failed requests are counted
+#
+# --prompt-tokens P gives every short request its own text of about P tokens to continue, different in every request of
+# every level (and for every --seed), so that no server can reuse a cached prompt; --per-client K makes each of the
+# clients of a level send K requests one after another, so that a level is a sustained load and not one burst
+#
+# --prompt-tokens-max and --max-tokens-max make the requests differ in size: each request draws its prompt length from
+# [--prompt-tokens, --prompt-tokens-max] and its output length from [--max-tokens, --max-tokens-max], fixed by --seed so
+# that every server gets the same requests; --json writes the numbers of every level, for scripts/bench-suite.py
 
 import argparse
 import json
@@ -97,8 +105,16 @@ def main() -> int:
     parser.add_argument("--url", default="http://localhost:8100")
     parser.add_argument("--levels", type=int, nargs="+", default=[1, 2, 4, 8])
     parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--max-tokens-max", type=int, default=0,
+                        help="if larger than --max-tokens, each request draws its output length from the range")
     parser.add_argument("--long", type=int, default=0, help="requests per level with a long document")
     parser.add_argument("--long-tokens", type=int, default=16000, help="approximate tokens of a long document")
+    parser.add_argument("--prompt-tokens", type=int, default=0,
+                        help="approximate tokens of a unique text for every short request, 0 = a short essay prompt")
+    parser.add_argument("--prompt-tokens-max", type=int, default=0,
+                        help="if larger than --prompt-tokens, each request draws its prompt length from the range")
+    parser.add_argument("--json", default="", help="JSON file for the numbers of every level")
+    parser.add_argument("--per-client", type=int, default=1, help="requests each client sends one after another")
     parser.add_argument("--save", default="", help="JSON file for the text of every response, to compare servers")
     parser.add_argument("--seed", type=int, default=0,
                         help="varies the long documents; runs with the same seed send the same documents, which the "
@@ -106,21 +122,44 @@ def main() -> int:
     args = parser.parse_args()
 
     saved = {}
+    results = []
 
     print(f"{'conc':>4} {'wall s':>7} {'agg tok/s':>9} {'req tok/s':>9} {'ttft s':>7} {'ttft long':>9} {'itl p50':>8} "
           f"{'itl p99':>8} {'itl max':>8} {'accept':>7} {'failed':>6}")
     for level in args.levels:
         n_long = min(args.long, level)
+        n_req  = level*args.per_client
+
+        # request r is the (r // level)-th of client r % level; the clients below n_long send long documents
+        def is_long(r):
+            return r % level < n_long
+
         prompts = []
-        for i in range(level):
-            if i < n_long:
-                prompts.append("Summarize the following document in detail.\n\n" + long_document(args.long_tokens, 1000000*args.seed + 1000*level + i))
+        max_tokens = []
+        for r in range(n_req):
+            rng_size = random.Random(f"size-{args.seed}-{level}-{r}")
+            max_tokens.append(rng_size.randint(args.max_tokens, args.max_tokens_max)
+                              if args.max_tokens_max > args.max_tokens else args.max_tokens)
+            prompt_tokens = (rng_size.randint(args.prompt_tokens, args.prompt_tokens_max)
+                             if args.prompt_tokens_max > args.prompt_tokens else args.prompt_tokens)
+            i = r % level
+            if is_long(r):
+                prompts.append("Summarize the following document in detail.\n\n" +
+                               long_document(args.long_tokens, 1000000*args.seed + 1000*level + i + 1000000000*(r // level)))
+            elif prompt_tokens > 0:
+                rng = random.Random(f"{args.seed}-{level}-{r}")
+                prompts.append(f"Continue this text about {rng.choice(TOPICS)} with a detailed essay.\n\n" +
+                               long_document(prompt_tokens, rng.randrange(1 << 62)))
             else:
                 prompts.append(f"Write a detailed essay about {TOPICS[i % len(TOPICS)]}.")
 
-        outs = [dict() for _ in range(level)]
-        threads = [threading.Thread(target=run_request, args=(args.url, prompts[i], args.max_tokens, outs[i]))
-                   for i in range(level)]
+        outs = [dict() for _ in range(n_req)]
+
+        def client(i):
+            for r in range(i, n_req, level):
+                run_request(args.url, prompts[r], max_tokens[r], outs[r])
+
+        threads = [threading.Thread(target=client, args=(i,)) for i in range(level)]
         t0 = time.time()
         for t in threads:
             t.start()
@@ -129,10 +168,10 @@ def main() -> int:
         wall = time.time() - t0
 
         good  = [o for o in outs if "error" not in o and o.get("timings")]
-        n_bad = level - len(good)
-        for i, o in enumerate(outs):
+        n_bad = n_req - len(good)
+        for r, o in enumerate(outs):
             if "error" in o:
-                print(f"     request {i} ({'long' if i < n_long else 'short'}) failed: {o['error'][:120]}")
+                print(f"     request {r} ({'long' if is_long(r) else 'short'}) failed: {o['error'][:120]}")
 
         def mean(values):
             values = [v for v in values if v == v]
@@ -140,8 +179,8 @@ def main() -> int:
 
         n_gen = sum(o["timings"].get("predicted_n", 0) for o in good)
         req_tps = mean([o["timings"].get("predicted_per_second", 0.0) for o in good])
-        ttft = mean([outs[i]["ttft"] for i in range(n_long, level) if outs[i] in good])
-        ttft_long = mean([outs[i]["ttft"] for i in range(n_long) if outs[i] in good])
+        ttft = mean([outs[r]["ttft"] for r in range(n_req) if not is_long(r) and outs[r] in good])
+        ttft_long = mean([outs[r]["ttft"] for r in range(n_req) if is_long(r) and outs[r] in good])
         gaps = [g for o in good for g in o["gaps"]]
         n_draft = sum(o["timings"].get("draft_n", 0) for o in good)
         n_acc = sum(o["timings"].get("draft_n_accepted", 0) for o in good)
@@ -152,10 +191,21 @@ def main() -> int:
 
         saved[str(level)] = [o.get("text") for o in outs]
 
+        results.append({
+            "level": level, "wall_s": wall, "agg_tps": n_gen / wall, "req_tps": req_tps,
+            "ttft_s": ttft, "ttft_long_s": ttft_long,
+            "itl_p50_ms": percentile(gaps, 0.5) * 1e3, "itl_p99_ms": percentile(gaps, 0.99) * 1e3,
+            "accept": n_acc / n_draft if n_draft else None, "failed": n_bad, "n_gen": n_gen,
+            "n_prompt": sum(o["timings"].get("prompt_n", 0) for o in good),
+        })
+
     if args.save:
         with open(args.save, "w") as f:
             json.dump(saved, f)
-    return 0
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump(results, f, indent=1)
+    return 1 if any(r["failed"] for r in results) else 0
 
 
 if __name__ == "__main__":

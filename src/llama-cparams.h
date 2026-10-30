@@ -60,6 +60,11 @@ struct llama_cparams {
     bool warmup;             // TODO: remove [TAG_LLAMA_GRAPH_NO_WARMUP]
     bool op_offload;
     bool kv_unified;
+    bool elastic;            // the elastic memory, see llama_box
+    size_t box_bytes;        // its size, 0 for n_ctx cells and n_rs_cells states
+    bool box_draft;          // an MTP draft keeps its tokens in its blocks
+    ggml_type box_draft_type_k;
+    ggml_type box_draft_type_v;
     bool pipeline_parallel;
 
     std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer

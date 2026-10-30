@@ -14,6 +14,8 @@ class llama_batch_allocr;
 class llama_io_write_i;
 class llama_io_read_i;
 
+class llama_box;
+
 struct llama_memory_params {
     // kv cache
     ggml_type type_k;
@@ -25,6 +27,9 @@ struct llama_memory_params {
     llama_context_type ctx_type;
 
     llama_memory_t mem_other;
+
+    // the elastic memory of the target context of a draft context, see llama_box
+    std::shared_ptr<llama_box> box;
 };
 
 enum llama_memory_status {

@@ -4,9 +4,12 @@
 #include "llama-graph.h"
 #include "llama-memory.h"
 
+#include <functional>
 #include <map>
 #include <set>
 #include <vector>
+
+class llama_box;
 
 //
 // llama_memory_recurrent
@@ -25,7 +28,9 @@ public:
                      uint32_t   n_seq_max,
                      uint32_t   n_rs_seq,
                          bool   rs_replay_req, // replay if the model supports it, see rs_replay
-        const layer_filter_cb & filter);
+        const layer_filter_cb & filter,
+        // the elastic memory that holds the states, see llama_box: mem_size is its pages then
+                    llama_box * box = nullptr);
 
     ~llama_memory_recurrent() = default;
 
@@ -175,6 +180,51 @@ public:
     // number of free cells, i.e. cells not owned by any seq
     uint32_t n_free_cells() const;
 
+    //
+    // elastic memory, see llama_box
+    //
+    // a cell is a state of the box (its state id), made of blocks of the box, and stays where it is: a step reads the
+    // states of its seqs and writes them back by their rows (llama_memory_recurrent_context::box_row()), instead of
+    // gathering them into a range of cells from head; nothing is cleared: a new state reads zeros in its first step
+    //
+
+    llama_box * box = nullptr;
+
+    // per seq: a state that the seq shared (seq_cp) when it took a cell of its own, read by the next step of the seq,
+    // which writes the cell of the seq, see box_prepare(); -1 when the seq reads its own cell
+    std::vector<int32_t> box_cow;
+
+    // per seq: the cell whose state holds the cached replay inputs of the seq, see rs_replay
+    std::vector<int32_t> box_x_cell;
+
+    // per cell: a state that holds nothing yet, which its first step reads as zeros (and then writes)
+    std::vector<uint8_t> box_fresh;
+
+    // shared states the seqs of a batch all left, which the batch still reads: they go back to the box with the next one
+    std::vector<int32_t> box_free_next;
+
+    // whether seq_id keeps its state when all its tokens are removed (an admitted request, see llama_box::reserve())
+    std::function<bool(llama_seq_id)> box_keep;
+
+    // per seq of the ubatch being computed, set by box_find_slot(): its lead seq, the cell its state is read from (-1:
+    // zeros), the cell it is written to, and the cell and half of its pending replay inputs (-1: zeros)
+    std::vector<llama_seq_id> box_lead;
+    std::vector<int32_t>      box_src;
+    std::vector<int32_t>      box_dst;
+    std::vector<int32_t>      box_x_src;
+    std::vector<uint8_t>      box_x_half;
+
+    // gives a state of its own to each seq of the ubatches that has none or shares one
+    bool box_prepare(const std::vector<llama_ubatch> & ubatches);
+
+    // a state for seq_id, which must hold none; false when the box has not enough free blocks for it
+    bool box_state_take(llama_seq_id seq_id);
+
+    // the state of an emptied cell goes back to the box
+    void box_cell_freed(uint32_t i);
+
+    bool box_find_slot(const llama_ubatch & ubatch);
+
     // per layer
     std::vector<ggml_tensor *> r_l;
     std::vector<ggml_tensor *> s_l;
@@ -204,6 +254,8 @@ private:
 
     bool state_read_meta(llama_io_read_i & io, uint32_t cell_count, llama_seq_id dest_seq_id = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t cell_count);
+
+    void state_clear(llama_seq_id seq_id, uint32_t cell_head, uint32_t cell_count);
 
     // the pending tokens of each seq and their cached inputs, see rs_replay
     void state_write_pend(llama_io_write_i & io, llama_seq_id seq_id) const;
@@ -274,6 +326,32 @@ public:
     uint32_t replay_n(int i) const;
 
     int32_t s_copy(int i) const;
+
+    //
+    // the elastic memory, see llama_memory_recurrent::box
+    //
+
+    enum box_row_kind {
+        BOX_R_READ,  // conv row k (the rollback index) of the state read
+        BOX_R_WRITE, // conv row k of the state written
+        BOX_S_READ,
+        BOX_S_WRITE,
+        BOX_X_READ,  // the pending replay inputs
+        BOX_X_WRITE, // the replay inputs this step caches
+    };
+
+    bool     is_box() const;
+    uint32_t get_n_rs_seq() const;
+
+    // the recurrent layers of the box, and the index of model layer il among them
+    uint32_t box_n_layers() const;
+    int32_t  box_layer(int32_t il) const;
+
+    // the row of the i-th seq of the ubatch in the box view of its kind, for recurrent layer l; -1 reads zeros
+    int32_t box_row(int i, uint32_t l, box_row_kind kind, uint32_t k = 0) const;
+
+    // the rollback index of the i-th seq of the ubatch, which a step reads once (it is reset)
+    uint32_t box_take_rollback(int i) const;
 
 private:
     const llama_memory_status status;

@@ -32,6 +32,8 @@
 #include <cstring>
 #include <cmath>
 #include <functional>
+#include "llama-box.h"
+
 #include <map>
 #include <numeric>
 #include <regex>
@@ -2625,7 +2627,12 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* offload           */ cparams.offload_kqv,
                             /* unified           */ cparams.kv_unified,
                             /* filter_attn       */ std::move(filter_attn),
-                            /* filter_recr       */ std::move(filter_recr));
+                            /* filter_recr       */ std::move(filter_recr),
+                            /* use_box           */ cparams.elastic && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP,
+                            /* box_bytes         */ cparams.box_bytes,
+                            /* box_draft         */ cparams.box_draft,
+                            /* box_draft_type_k  */ cparams.box_draft_type_k,
+                            /* box_draft_type_v  */ cparams.box_draft_type_v);
                     }
                 } else {
                     llama_kv_cache::layer_filter_cb filter = nullptr;
@@ -2711,6 +2718,9 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     } else {
                         GGML_ASSERT(!hparams.is_swa_any());
 
+                        // an MTP draft keeps its tokens in the blocks of the elastic memory of its target
+                        const bool in_box = params.box && params.box->has_draft();
+
                         res = new llama_kv_cache(
                                 *this,
                                 hparams,
@@ -2719,7 +2729,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 !cparams.flash_attn,
                                 cparams.offload_kqv,
                                 cparams.kv_unified,
-                                cparams.n_ctx_seq,
+                                in_box ? params.box->get_n_cells() : cparams.n_ctx_seq,
                                 cparams.n_seq_max,
                                 1,
                                 hparams.n_swa,
@@ -2727,7 +2737,10 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 nullptr,
                                 filter,
                                 nullptr,
-                                nullptr);
+                                nullptr,
+                                "",
+                                nullptr,
+                                in_box ? params.box : nullptr);
                     }
                 }
             }

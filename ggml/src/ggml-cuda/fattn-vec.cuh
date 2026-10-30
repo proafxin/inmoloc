@@ -18,7 +18,8 @@ static constexpr __device__ int ggml_cuda_fattn_vec_get_nthreads_device() {
 #endif // __clang__
 // use_kv_idx: indexed attention (ggml_flash_attn_ext_set_kv_idx), each query attends to the rows kv_idx[lo..hi) of its
 // group; there is no mask, so the launcher passes the per query (group, lo, hi) in place of the mask, the lists in place
-// of KV_max and their length (kv_idx->ne[0]) in place of ne31
+// of KV_max and their length (kv_idx->ne[0]) in place of ne31. A block takes one query and ncols of the Q heads that
+// share a K/V head, so each K/V row is read once for all of them
 template<int D, int ncols, ggml_type type_K, ggml_type type_V, bool use_logit_softcap, bool use_kv_idx = false> // D == head size
 __launch_bounds__(ggml_cuda_fattn_vec_get_nthreads_device(), 1)
 static __global__ void flash_attn_ext_vec(
@@ -51,7 +52,6 @@ static __global__ void flash_attn_ext_vec(
     const char * GGML_CUDA_RESTRICT mask     = use_kv_idx ? nullptr : mask_ptr;
     const char * GGML_CUDA_RESTRICT sinks    = sinks_ptr;
     const int  * GGML_CUDA_RESTRICT KV_max   = KV_max_ptr;
-    static_assert(!use_kv_idx || ncols == 1, "indexed attention takes one query per block");
     float      * GGML_CUDA_RESTRICT dst      = dst_ptr;
     float2     * GGML_CUDA_RESTRICT dst_meta = dst_meta_ptr;
 
@@ -105,11 +105,30 @@ static __global__ void flash_attn_ext_vec(
     constexpr dequantize_V_t dequantize_V = get_dequantize_V<type_V, float, V_rows_per_thread>();
 #endif // V_DOT2_F32_F16_AVAILABLE
 
-    const int ic0 = blockIdx.x * ncols; // Index of the Q/QKV column to work on.
+    const int ic0 = use_kv_idx ? blockIdx.x : blockIdx.x * ncols; // Index of the Q/QKV column to work on.
 
-    const int sequence = blockIdx.z / ne02;
-    const int head = blockIdx.z - sequence*ne02;
     const int gqa_ratio = ne02 / ne12; // With grouped query attention there are > 1 Q matrices per K, V matrix.
+
+    // indexed attention: the columns are the Q heads head .. head + ncols_head of one query, all of one K/V head
+    int sequence;
+    int head;
+    int ncols_head = ncols;
+    if constexpr (use_kv_idx) {
+        const int ntiles_gqa = (gqa_ratio + ncols - 1) / ncols;
+        sequence = blockIdx.z / (ne12*ntiles_gqa);
+        const int z = blockIdx.z - sequence*ne12*ntiles_gqa;
+        const int tile_gqa = z % ntiles_gqa;
+        head       = (z / ntiles_gqa)*gqa_ratio + tile_gqa*ncols;
+        ncols_head = min(ncols, gqa_ratio - tile_gqa*ncols);
+    } else {
+        sequence = blockIdx.z / ne02;
+        head     = blockIdx.z - sequence*ne02;
+    }
+    // the Q column j, a query or (indexed attention) a head, is in bounds
+    auto col_ok = [&] __device__ (const int j) -> bool {
+        return use_kv_idx ? j < ncols_head : ncols == 1 || ic0 + j < int(ne01.z);
+    };
+    const int nb_col = use_kv_idx ? nb02 : nb01; // stride of the Q columns
     Q += nb03*sequence + nb02* head              + nb01*ic0;
     K += nb13*sequence + nb12*(head / gqa_ratio);
     V += nb23*sequence + nb22*(head / gqa_ratio);
@@ -123,7 +142,7 @@ static __global__ void flash_attn_ext_vec(
     const int tid = WARP_SIZE*threadIdx.y + threadIdx.x;
     __builtin_assume(tid < nthreads);
 
-    constexpr int ne_KQ      = ncols*D;
+    constexpr int ne_KQ      = ncols*(D > nthreads ? D : nthreads); // Q of each column as q8_1, then nthreads KQ values each
     constexpr int ne_combine = nwarps*V_cols_per_iter*D;
 #ifdef V_DOT2_F32_F16_AVAILABLE
     half2            VKQ[ncols][(D/2)/nthreads_V] = {{{0.0f, 0.0f}}};
@@ -165,7 +184,7 @@ static __global__ void flash_attn_ext_vec(
             float2 * tmp_q_ds  = (float2 *) (tmp_q_i32 + D/sizeof(int));
 
             // Set memory to zero if out of bounds:
-            if (ncols > 1 && ic0 + j >= int(ne01.z)) {
+            if (ncols > 1 && !col_ok(j)) {
 #pragma unroll
                 for (int i0 = 0; i0 < int(D/sizeof(int)); i0 += WARP_SIZE) {
                     const int i = i0 + threadIdx.x;
@@ -178,7 +197,7 @@ static __global__ void flash_attn_ext_vec(
                     tmp_q_ds[threadIdx.x] = make_float2(0.0f, 0.0f);
                 }
             } else {
-                const float * Q_f = (const float *) (Q + j*nb01);
+                const float * Q_f = (const float *) (Q + j*nb_col);
                 constexpr int nthreads_quantize = D/sizeof(int) < WARP_SIZE ? D/sizeof(int) : WARP_SIZE;
 #pragma unroll
                 for (int i0 = 0; i0 < int(D/sizeof(int)); i0 += nthreads_quantize) {
@@ -210,13 +229,13 @@ static __global__ void flash_attn_ext_vec(
         const half2 scale_h2 = make_half2(scale, scale);
 #pragma unroll
         for (int j = 0; j < ncols; ++j) {
-            const float2 * Q_j = (const float2 *) (Q + j*nb01);
+            const float2 * Q_j = (const float2 *) (Q + j*nb_col);
 #pragma unroll
             for (int i0 = 0; i0 < D/2; i0 += nthreads_KQ*cpy_ne) {
                 const int i = i0 + (nthreads_KQ == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_KQ)*cpy_ne;
 
                 __align__(16) float2 tmp[cpy_ne] = {{0.0f, 0.0f}};
-                if (ncols == 1 || ic0 + j < int(ne01.z)) {
+                if (col_ok(j)) {
                     ggml_cuda_memcpy_1<cpy_nb>(tmp,            &Q_j[i]);
                     ggml_cuda_memcpy_1<cpy_nb>(tmp + cpy_ne/2, &Q_j[i + cpy_ne/2]);
                 }
@@ -233,11 +252,11 @@ static __global__ void flash_attn_ext_vec(
 #else
 #pragma unroll
         for (int j = 0; j < ncols; ++j) {
-            const float2 * Q_j = (const float2 *) (Q + j*nb01);
+            const float2 * Q_j = (const float2 *) (Q + j*nb_col);
 #pragma unroll
             for (int i0 = 0; i0 < D/2; i0 += nthreads_KQ*cpy_ne) {
                 const int i = i0 + (nthreads_KQ == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_KQ)*cpy_ne;
-                if (ncols == 1 || ic0 + j < int(ne01.z)) {
+                if (col_ok(j)) {
                     ggml_cuda_memcpy_1<cpy_nb>(&Q_reg[j][i0/nthreads_KQ],            &Q_j[i]);
                     ggml_cuda_memcpy_1<cpy_nb>(&Q_reg[j][i0/nthreads_KQ + cpy_ne/2], &Q_j[i + cpy_ne/2]);
                 }
@@ -302,7 +321,7 @@ static __global__ void flash_attn_ext_vec(
                     sum = -INFINITY; // past the end of the list
                 }
 
-                if (mask && (ncols == 1 || ic0 + j < int(ne01.z))) {
+                if (mask && col_ok(j)) {
                     sum += slope*__half2float(maskh[j*ne11 + i_KQ]);
                 }
 
@@ -404,8 +423,6 @@ static __global__ void flash_attn_ext_vec(
     }
 
     if (sinks && blockIdx.y == 0) {
-        const float sink = ((const float *) sinks)[head];
-
 #pragma unroll
         for (int j0 = 0; j0 < ncols; j0 += nwarps) {
             const int j = j0 + threadIdx.y;
@@ -413,6 +430,8 @@ static __global__ void flash_attn_ext_vec(
             if (j0 + nwarps > ncols && j >= ncols) {
                 break;
             }
+
+            const float sink = ((const float *) sinks)[head + (use_kv_idx && col_ok(j) ? j : 0)];
 
             const float kqmax_new_j = fmaxf(sink, KQ_max[j]);
             const float KQ_max_scale = expf(KQ_max[j] - kqmax_new_j);
@@ -458,7 +477,7 @@ static __global__ void flash_attn_ext_vec(
 
 #pragma unroll
     for (int j_VKQ = 0; j_VKQ < ncols; ++j_VKQ) {
-        if (ncols > 1 && ic0 + j_VKQ >= int(ne01.z)) {
+        if (ncols > 1 && !col_ok(j_VKQ)) {
             break;
         }
 
@@ -526,7 +545,9 @@ static __global__ void flash_attn_ext_vec(
                     // an empty range of indexed attention has no weights, its output is 0 as on the CPU
                     dst_val = KQ_sum[j_VKQ] > 0.0f ? dst_val/KQ_sum[j_VKQ] : 0.0f;
                 }
-                dst[(((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i0 + tid] = dst_val;
+                const int q_dst    = use_kv_idx ? ic0 : ic0 + j_VKQ;
+                const int head_dst = use_kv_idx ? head + j_VKQ : head;
+                dst[(((sequence*int(ne01.z) + q_dst)*ne02 + head_dst)*gridDim.y + blockIdx.y)*D + i0 + tid] = dst_val;
             }
         }
 
@@ -536,8 +557,10 @@ static __global__ void flash_attn_ext_vec(
 
     }
 
-    if (gridDim.y != 1 && tid < ncols && (ncols == 1 || ic0 + tid < int(ne01.z))) {
-        dst_meta[((sequence*int(ne01.z) + ic0 + tid)*ne02 + head)*gridDim.y + blockIdx.y] = make_float2(KQ_max[tid], KQ_sum[tid]);
+    if (gridDim.y != 1 && tid < ncols && col_ok(tid)) {
+        const int q_dst    = use_kv_idx ? ic0 : ic0 + tid;
+        const int head_dst = use_kv_idx ? head + tid : head;
+        dst_meta[((sequence*int(ne01.z) + q_dst)*ne02 + head_dst)*gridDim.y + blockIdx.y] = make_float2(KQ_max[tid], KQ_sum[tid]);
     }
 #else
     GGML_UNUSED_VARS(Q_ptr, K_ptr, V_ptr, mask_ptr, sinks_ptr, KV_max_ptr, dst_ptr, dst_meta_ptr, scale,
@@ -566,7 +589,33 @@ void ggml_cuda_flash_attn_ext_vec_case_impl(ggml_backend_cuda_context & ctx, ggm
     const bool need_f16_K = type_K == GGML_TYPE_F16;
     const bool need_f16_V = type_V == GGML_TYPE_F16;
     constexpr size_t nbytes_shared = 0;
-    launch_fattn<D, cols_per_block, 1>(ctx, dst, fattn_kernel, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false, false);
+    // indexed attention: one query per block, the columns are Q heads
+    constexpr int ncols1 = use_kv_idx ? 1 : cols_per_block;
+    constexpr int ncols2 = use_kv_idx ? cols_per_block : 1;
+    launch_fattn<D, ncols1, ncols2>(ctx, dst, fattn_kernel, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false, false);
+}
+
+// indexed attention: the Q heads of one K/V head a block takes, the smallest of 1, 2, 4 and 8 that holds the GQA ratio.
+// f16 and bf16 keep Q and the accumulators of a head in twice the registers of the quantized types: with more than one
+// head they spill (928 bytes a thread at D 256 and 4 heads) and run 3x slower, so they take one head (measured, RTX 5090)
+template <int D, ggml_type type_K, ggml_type type_V>
+static void ggml_cuda_flash_attn_ext_vec_kv_idx(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+    const int gqa_ratio = dst->src[0]->ne[2] / dst->src[1]->ne[2];
+
+    constexpr bool wide = type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_BF16 || type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16;
+    if constexpr (wide) {
+        ggml_cuda_flash_attn_ext_vec_case_impl<D, 1, type_K, type_V, false, true>(ctx, dst);
+    } else {
+        if (gqa_ratio == 1) {
+            ggml_cuda_flash_attn_ext_vec_case_impl<D, 1, type_K, type_V, false, true>(ctx, dst);
+        } else if (gqa_ratio == 2) {
+            ggml_cuda_flash_attn_ext_vec_case_impl<D, 2, type_K, type_V, false, true>(ctx, dst);
+        } else if (gqa_ratio <= 4) {
+            ggml_cuda_flash_attn_ext_vec_case_impl<D, 4, type_K, type_V, false, true>(ctx, dst);
+        } else {
+            ggml_cuda_flash_attn_ext_vec_case_impl<D, 8, type_K, type_V, false, true>(ctx, dst);
+        }
+    }
 }
 
 template <int D, ggml_type type_K, ggml_type type_V>
@@ -580,7 +629,7 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
     // indexed attention: one query per block, each with its own list (see ggml_flash_attn_ext_set_kv_idx)
     if (KQV->src[6] != nullptr) {
         GGML_ASSERT(logit_softcap == 0.0f);
-        ggml_cuda_flash_attn_ext_vec_case_impl<D, 1, type_K, type_V, false, true>(ctx, dst);
+        ggml_cuda_flash_attn_ext_vec_kv_idx<D, type_K, type_V>(ctx, dst);
         return;
     }
 

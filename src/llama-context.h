@@ -11,6 +11,7 @@
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
 
+#include <array>
 #include <map>
 #include <vector>
 
@@ -236,7 +237,7 @@ private:
 
     // async-copy enabled layer-input tensors (per cparams.output_layer_inp)
     // from backend into host-side embd_layer_inp buffers
-    void extract_layer_inputs(const llm_graph_result * res, size_t token_offset, size_t n_tokens);
+    bool extract_layer_inputs(const llm_graph_result * res, size_t token_offset, size_t n_tokens);
 
     //
     // graph
@@ -258,6 +259,8 @@ public:
     bool set_sampler(llama_seq_id seq_id, llama_sampler * sampler);
 
 private:
+    llm_graph_result * get_gf_res_prev();
+
     llm_graph_params graph_params(
                         llm_graph_result * res,
                       const llama_ubatch & ubatch,
@@ -307,6 +310,7 @@ private:
     // host buffers for output layer input embeddings, per layer
     // populated when cparams.output_layer_inp[il] is true
     std::vector<buffer_view<float>> embd_layer_inp;
+    std::vector<int32_t> embd_batch_idxs; // extracted index -> original batch index
 
     struct sampling_info {
         // !samplers.empty() to check if any samplers are active
@@ -345,12 +349,6 @@ private:
 
     std::vector<swap_info> output_swaps;
 
-    // unmasked nextn rows are written in ubatch order; tok_ids[k] is the batch index of row k
-    // applied lazily by embd_nextn_reorder(), empty when the rows are already in batch order
-    std::vector<int32_t> embd_nextn_tok_ids;
-
-    void embd_nextn_reorder();
-
     ggml_backend_sched_ptr sched;
 
     bool sched_need_reserve = true;
@@ -375,8 +373,11 @@ private:
     std::vector<size_t>                     backend_buf_exp_size; // expected buffer sizes
     std::vector<size_t>                     backend_scratch_size; // memory each backend takes outside its buffers
 
-    llm_graph_result_ptr gf_res_prev;
+    // Separate arenas give batches with and without outputs distinct CUDA graph cache keys.
+    std::array<llm_graph_result_ptr, 2> gf_res_prev;
     llm_graph_result_ptr gf_res_reserve;
+
+    llm_graph_result * gf_res_prev_active = nullptr;
 
     // host buffer for the model output (logits and embeddings)
     ggml_backend_buffer_ptr buf_output;
