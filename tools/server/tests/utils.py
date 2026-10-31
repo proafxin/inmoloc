@@ -541,8 +541,14 @@ class ServerPreset:
             if callable(method) and name != "load_all"
         ]
         for server in servers:
-            server.offline = False
-            server.start()
+            # a cached model needs no network: this runs once per pytest worker, and a stalled lookup would fail the session
+            server.offline = True
+            try:
+                server.start()
+            except (RuntimeError, TimeoutError):
+                server.stop()
+                server.offline = False
+                server.start()
             server.stop()
 
     @staticmethod

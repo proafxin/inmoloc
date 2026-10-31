@@ -17,7 +17,7 @@ inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps
 - **Shared KV cache**: all requests share one cache, and each request takes cells only for the tokens it holds, up to the model's training context.
 - **Elastic memory**: on hybrid gated delta-net models such as Qwen3.5, all request memory is one box of device memory, with nothing set aside per request at startup. A request's recurrent state and input are known when it arrives, so it takes them at admission; its output is charged up to `--max-output-tokens` and taken in blocks of 128 tokens as it generates. States sit at one end of the box and KV blocks at the other, and the rows of an MTP draft live in the blocks of the tokens they belong to, so any mix of short and long requests fits as long as its bytes do.
 - **Memory budget**: at startup the server measures the weights, compute buffers, draft model, vision encoder, backend scratch memory, and what the process holds outside them (CUDA context, loaded kernels, libraries; measured for the process through NVML on NVIDIA GPUs). What those fixed costs leave of `--vram-budget` is request memory: the elastic memory where the model supports it, otherwise a KV cache and per-request state sized at startup. Memory does not grow while serving.
-- **Admission**: with elastic memory, a request is admitted when its state, input and output charge fit. Idle slots give up their cached prompts to make room, and otherwise the request waits; waiting requests start in arrival order. A running request has all the memory it can need, so nothing is preempted.
+- **Admission**: with elastic memory, a request is admitted when its state, input and output charge fit. Idle slots give up their cached prompts to make room, and otherwise the request waits; waiting requests start in arrival order. A request longer than the model's context window, or too large for the empty box, is rejected on arrival with an error. A running request has all the memory it can need, so nothing is preempted.
 - **Preemption on other models**: a request is admitted when its prompt and the output it is expected to generate (the mean of recent requests, at most its limit) fit in free memory. When running requests still outgrow the cache, the newest request is paused and the others continue. A paused request's state goes to the prompt cache in host memory (`--cache-ram`) and is restored when it resumes; without room there, it is recomputed.
 - **Per-request attention** (CUDA): each request reads only its own KV cells, so its cost grows with its own context, not with other requests. Quantized q8_0 and q4_0 caches are read directly.
 - **Prefix sharing**: a new request starts from the cached cells of another request with the same prefix, without copying them.
@@ -60,7 +60,7 @@ A model with elastic memory needs the most tokens a request may generate, and no
 
 ```sh
 build/bin/local-inference-server -m qwen3.8.gguf -ngl 999 --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 \
-    --spec-type draft-mtp --spec-draft-n-max 2 --rs-rollback replay --max-output-tokens 512 --vram-budget 22G --port 8100
+    --spec-type draft-mtp --spec-draft-n-max 2 --rs-rollback replay --max-output-tokens 512 --vram-budget 22826M --port 8100
 ```
 
 ```text
@@ -74,7 +74,7 @@ The options below are specific to inmoloc; all other options are as in llama.cpp
 | Option | Default | Description |
 | --- | --- | --- |
 | `--vram-budget SIZE` | free device memory | Device memory the server may use, summed over the devices the model runs on (e.g. `22G`). |
-| `--max-output-tokens N` | required with elastic memory | The most tokens a request generates; its `max_tokens` is capped at it, and this much output is charged when it is admitted. |
+| `--max-output-tokens N` | required with elastic memory | The most tokens a request generates; its `max_tokens` is capped at it. A request is charged its `max_tokens` when it is admitted, at most this and what the context window leaves after its input. |
 | `--ctx-size N` | automatic | Without elastic memory, the most tokens the KV cache holds; without it the cache is sized from the budget. Not used with elastic memory. |
 | `--parallel N` | auto | Upper limit on requests at once. With elastic memory it only limits admission and takes no memory; otherwise the budget may lower it. |
 | `--prefix-share`, `--no-prefix-share` | enabled | Let a new request start from another request's cached prefix. |
@@ -162,7 +162,7 @@ llama.cpp at commit 56381e407 (2026-09-12); vLLM as of 2026-10-15.
 
 - **Models**: GGUF models supported by llama.cpp at the base commit, see [docs/models.md](docs/models.md).
 - **API**: OpenAI-compatible chat completions, completions and embeddings, see [the server documentation](tools/server/README.md).
-- **Hardware and backends**: the same as llama.cpp: all its backends build and run, on the same GPUs and CPUs. The memory budget, preemption, prefix sharing and prompt scheduling work on every backend. Elastic memory needs CUDA on Turing or newer, flash attention and a KV cache whose K and V rows have one size; elsewhere the server sizes a KV cache and per-request state at startup. Per-request attention and `--gpu-wait` are NVIDIA only (per-request attention for prompt chunks needs Turing or newer); elsewhere attention reads the whole cache with a mask, as in llama.cpp.
+- **Hardware and backends**: the same as llama.cpp: all its backends build and run, on the same GPUs and CPUs. The memory budget, preemption, prefix sharing and prompt scheduling work on every backend. Elastic memory needs CUDA, flash attention and a KV cache whose K and V rows have one size; prompts are read faster on Turing or newer, whose tensor core kernels read them through one list. Elsewhere the server sizes a KV cache and per-request state at startup. Per-request attention and `--gpu-wait` are NVIDIA only (per-request attention for prompt chunks needs Turing or newer); elsewhere attention reads the whole cache with a mask, as in llama.cpp.
 - **Multiple GPUs**: llama.cpp's multi-GPU modes work (see [Multi-GPU](docs/multi-gpu.md)); the budget is summed over devices, and multi-GPU serving is not tested yet.
 
 ## Coming from llama.cpp

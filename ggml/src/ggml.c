@@ -1965,7 +1965,7 @@ struct ggml_tensor * ggml_view_tensor(
         struct ggml_tensor  * src) {
     // the view spans what src spans: the size check of a new tensor counts contiguous rows, which a src with rows that
     // overlap (a stride less than a row) exceeds, so the view is created with one row and takes the shape of src after
-    const int64_t ne[GGML_MAX_DIMS] = { src->ne[0], 1, 1, 1 };
+    const int64_t ne[GGML_MAX_DIMS] = { src->ne[0], MIN(src->ne[1], 1), MIN(src->ne[2], 1), MIN(src->ne[3], 1) };
 
     struct ggml_tensor * result = ggml_new_tensor_impl(ctx, src->type, GGML_MAX_DIMS, ne, src, 0);
     ggml_format_name(result, "%s (view)", src->name);
@@ -5628,7 +5628,8 @@ void ggml_flash_attn_ext_set_kv_rows(
     GGML_ASSERT(q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1);
     GGML_ASSERT(rows->type == GGML_TYPE_I32 && ggml_is_contiguous(rows));
     GGML_ASSERT(rows->ne[1] == 1 && rows->ne[2] == 1 && rows->ne[3] == 1);
-    GGML_ASSERT(mask == NULL || mask->ne[0] == rows->ne[0]);
+    // a list padded with -1 may be longer than the mask: nothing reads the mask at the padding
+    GGML_ASSERT(mask == NULL || mask->ne[0] <= rows->ne[0]);
 
     // src[6] stays NULL, which tells this mode apart from ggml_flash_attn_ext_set_kv_idx()
     a->src[5] = rows;

@@ -45,7 +45,7 @@ docker run -d --name "prof-$name" --gpus all --ipc host --ulimit memlock=-1 --ul
     -o "/out/$name" -f true /app/local-inference-server \
     --model /models/Qwen3.8-27B-AP-Q4_K_XL.gguf --host 0.0.0.0 --port "$port" -ngl 999 --metrics \
     -fa on --cache-type-k q8_0 --cache-type-v q8_0 --spec-type draft-mtp --spec-draft-n-max 2 --cache-ram 0 \
-    --vram-budget 22826M --ctx-typical 2048 "$@"
+    --vram-budget 22826M "$@"
 until curl -sf "localhost:$port/health" >/dev/null; do
   if [ "$(docker inspect -f '{{.State.Running}}' "prof-$name" 2>/dev/null)" != true ]; then
     echo "prof-$name exited before the server was ready:" >&2

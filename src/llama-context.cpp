@@ -459,11 +459,15 @@ llama_context::llama_context(
             cparams.n_ctx     = box->get_n_cells();
             cparams.n_ctx_seq = box->get_n_cells();
 
-            cparams.kv_rows      = true;
+            // prompts through lists where the device reads them, every token through ranges otherwise
+            cparams.kv_rows      = box->has_row_lists();
             cparams.auto_kv_rows = false;
-            cparams.kv_idx_rest  = true;
-            cparams.kv_idx       = false;
+            cparams.kv_idx_rest  = box->has_row_lists();
+            cparams.kv_idx       = !box->has_row_lists();
             cparams.auto_kv_idx  = false;
+
+            LLAMA_LOG_INFO("%s: elastic memory: %s\n", __func__, box->has_row_lists() ?
+                    "prompts read through row lists, generation through ranges" : "all tokens read through ranges");
         }
     }
 

@@ -3917,7 +3917,7 @@ private:
                     // wait for a free recurrent-state cell here, because a decode that cannot get one errors every active slot
                     // the elastic memory: a request takes its state, its input and the most it may generate (the children of
                     // a parent task a state and an output each, they share its input); a request that does not fit even
-                    // in the empty memory, or is longer than --ctx-size, is rejected at arrival
+                    // in the empty memory, or is longer than the context window of the model, is rejected at arrival
                     const int32_t n_children = task.is_parent() ? (int32_t) task.child_tasks.size() : 0;
                     int32_t n_box_out = 0;
                     if (box) {

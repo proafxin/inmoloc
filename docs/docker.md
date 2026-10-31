@@ -21,6 +21,8 @@ docker run --gpus all -p 8080:8080 -v /path/to/models:/models ghcr.io/proafxin/i
     --ctx-size 131072 --cache-type-k q8_0 --cache-type-v q8_0 --vram-budget 22G --parallel 64
 ```
 
+A model with elastic memory takes no `--ctx-size` and needs `--max-output-tokens`, see [the README](../README.md#quick-start).
+
 The arguments after the image name are passed to `local-inference-server`; see [the server documentation](../tools/server/README.md). Every argument can also be given as an environment variable, for example `-e LOCAL_INFERENCE_ARG_CTX_SIZE=131072`.
 
 The memory budget is lowered to the device memory that is free when the server starts, so other programs on the GPU reduce the number of requests it runs at once. The log states the number and what fills the budget.

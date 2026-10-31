@@ -3284,6 +3284,13 @@ ggml_tensor * llm_graph_context::build_attn(
                     rows = inp->attn_run_idxs[r];
                     hi   = inp->attn_run_hi[r];
                 }
+
+                // the rows of a sequence are any cells of the cache, not only those of the view, which depends on the
+                // cells in use when the graph was built
+                if (hi) {
+                    k = mctx_cur->get_k_all(ctx0, il);
+                    v = mctx_cur->get_v_all(ctx0, il);
+                }
             }
 
             ggml_tensor * out = build_attn_mha(q, k, v, nullptr, hi ? nullptr : mask, sinks, v_mla, 0, kq_scale, il, rows, nullptr, hi);

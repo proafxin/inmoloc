@@ -106,6 +106,10 @@ public:
 
     bool has_draft() const { return row_bytes_draft > 0; }
 
+    // whether the device reads the rows of a prompt through one list, else every token reads through ranges of its cells
+    void set_row_lists(bool value) { row_lists = value; }
+    bool has_row_lists() const { return row_lists; }
+
     // unit index of a row of the state s, recurrent layer l (recr_index()): conv row k, the scan row, replay input half h
     int64_t r_row(int32_t s, uint32_t l, uint32_t k) const;
     int64_t s_row(int32_t s, uint32_t l) const;
@@ -185,6 +189,8 @@ private:
     size_t row_bytes      = 0; // one K or V row, the same for all layers
     size_t block_bytes    = 0;
     size_t rows_per_block = 0; // block_bytes/row_bytes
+
+    bool row_lists = false;
 
     size_t row_bytes_draft      = 0; // one K or V row of the draft layer, 0 without one
     size_t rows_per_block_draft = 0;

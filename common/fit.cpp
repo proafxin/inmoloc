@@ -1349,7 +1349,12 @@ bool common_budget_params(
             return false;
         }
         if (res.total() > avail) {
-            box_bytes -= res.total() - avail;
+            // off the size the box took, whole blocks, not the size it was asked for
+            const size_t over = res.total() - avail;
+            if (over >= box_total) {
+                return false;
+            }
+            box_bytes = box_total - over;
             return measure(n_seq_cap, 0, res) && res.total() <= avail;
         }
         return true;

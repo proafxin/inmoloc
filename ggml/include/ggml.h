@@ -2515,7 +2515,7 @@ extern "C" {
             struct ggml_tensor * sinks);
 
     // Attend every query to the K/V rows listed in rows, in that order, instead of all of them: the rows of one
-    // sequence in a cache shared by several, read in place. The mask is laid out like the list (ne[0] == rows->ne[0]):
+    // sequence in a cache shared by several, read in place. The mask is laid out like the list (ne[0] <= rows->ne[0]):
     // column i masks the row rows[i]; a row of -1 is padding and is left out.
     //
     // rows: I32 [n_rows, 1, 1, 1]

@@ -20,10 +20,12 @@
     { "name": "port21-replay", "kind": "inmoloc", "image": "inmoloc:port21", "args": "--ctx-typical 2048 --rs-rollback replay" },
     { "name": "current",  "kind": "inmoloc",  "image": "inmoloc:elastic1" },
     { "name": "replay",   "kind": "inmoloc",  "image": "inmoloc:elastic1", "args": "--rs-rollback replay --max-output-tokens 512" },
-    { "name": "replay-block", "kind": "inmoloc", "image": "inmoloc:elastic1", "args": "--rs-rollback replay --max-output-tokens 512 --gpu-wait block" }
+    { "name": "replay-block", "kind": "inmoloc", "image": "inmoloc:elastic1", "args": "--rs-rollback replay --max-output-tokens 512 --gpu-wait block" },
+    { "name": "elastic2", "kind": "inmoloc", "image": "inmoloc:elastic2", "args": "--rs-rollback replay --max-output-tokens 512" },
+    { "name": "elastic2-bs", "kind": "inmoloc", "image": "inmoloc:elastic2", "args": "--rs-rollback replay --max-output-tokens 512 --backend-sampling" }
   ],
 
-  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"], ["current", "port10"], ["current", "port12"], ["replay", "current"], ["replay", "port21-replay"], ["current", "port21"]],
+  "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"], ["current", "port10"], ["current", "port12"], ["replay", "current"], ["replay", "port21-replay"], ["current", "port21"], ["elastic2", "replay"], ["elastic2-bs", "elastic2"]],
 
   "engine": {
     "bench":   { "n_prompt": "512", "n_gen": "128", "repetitions": 3 },

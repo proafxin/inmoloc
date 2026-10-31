@@ -417,7 +417,8 @@ common_models_handler common_models_handler_init(const common_params & params, l
 }
 
 bool common_models_handler_is_preset_repo(const common_models_handler & handler) {
-    return !handler.plan.preset.url.empty();
+    // a preset from the cache has no url
+    return !handler.plan.preset.local_path.empty();
 }
 
 static std::vector<common_download_task> build_url_tasks(const common_params_model & model, common_download_opts opts) {
@@ -1724,8 +1725,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LOCAL_INFERENCE_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--max-output-tokens"}, "N",
-        "required with the elastic memory: the most tokens a request generates, its max_tokens capped at it; every "
-        "request is admitted with this much output charged, at most what the context window leaves after its input",
+        "required with the elastic memory: the most tokens a request generates, its max_tokens capped at it; a request "
+        "is admitted with its max_tokens charged, at most this and what the context window leaves after its input",
         [](common_params & params, int value) {
             if (value <= 0) {
                 throw std::invalid_argument("error: --max-output-tokens must be positive\n");

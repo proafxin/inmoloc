@@ -5,13 +5,14 @@
 #include "llama-model.h"
 #include "llama-context.h"
 
+#include <cstdlib>
 #include <limits>
 #include <map>
 
-// whether the device of the box runs the ops that read it: the list of the rows of a prompt (with the prefix of it each
-// query sees), the ranges of the cells of the other tokens and the scans of the states in place; the context only
-// describes the ops, nothing is allocated
-static bool llama_box_device_supported(const llama_hparams & hparams, ggml_backend_buffer_type_t buft, const llama_box::attn_layer & attn, bool recr) {
+// whether the device of the box runs the ops that read it: ranges of the cells of each token and the scans of the states
+// in place; row_lists tells whether it also reads the rows of a prompt through one list, each query seeing a prefix of it,
+// which the tensor core kernels do; the context only describes the ops, nothing is allocated
+static bool llama_box_device_supported(const llama_hparams & hparams, ggml_backend_buffer_type_t buft, const llama_box::attn_layer & attn, bool recr, bool & row_lists) {
     ggml_init_params params = {
         /*.mem_size   =*/ 32*ggml_tensor_overhead(),
         /*.mem_buffer =*/ NULL,
@@ -53,7 +54,13 @@ static bool llama_box_device_supported(const llama_hparams & hparams, ggml_backe
     ggml_flash_attn_ext_set_kv_idx(fa_idx,
             ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, n_idx, 1), ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, 3, nb));
 
-    if (!ggml_backend_dev_supports_op(dev, fa_rows) || !ggml_backend_dev_supports_op(dev, fa_idx)) {
+    row_lists = ggml_backend_dev_supports_op(dev, fa_rows);
+
+    if (const char * env = getenv("LOCAL_INFERENCE_BOX_ROW_LISTS"); env && atoi(env) == 0) {
+        row_lists = false;
+    }
+
+    if (!ggml_backend_dev_supports_op(dev, fa_idx)) {
         return false;
     }
 
@@ -131,6 +138,8 @@ static std::unique_ptr<llama_box> llama_memory_hybrid_make_box(
     llama_box::attn_layer draft = {};
     bool has_draft = false;
 
+    bool row_lists = false;
+
     ggml_backend_buffer_type_t buft = nullptr;
 
     const auto layer_buft = [&](uint32_t il) {
@@ -174,7 +183,7 @@ static std::unique_ptr<llama_box> llama_memory_hybrid_make_box(
             why = "K and V rows of different sizes";
         }
 
-        if (!why && !llama_box_device_supported(hparams, buft, attn[0], !recr.empty())) {
+        if (!why && !llama_box_device_supported(hparams, buft, attn[0], !recr.empty(), row_lists)) {
             why = "the device";
         }
     }
@@ -186,6 +195,7 @@ static std::unique_ptr<llama_box> llama_memory_hybrid_make_box(
 
     // the memory of box_bytes bytes, or of kv_size cells and rs_size states, elastic
     auto box = std::make_unique<llama_box>(std::move(attn), std::move(recr), has_draft ? &draft : nullptr, box_bytes, kv_size, rs_size, n_seq_max);
+    box->set_row_lists(row_lists);
     box->alloc(buft, hparams.no_alloc);
 
     return box;
