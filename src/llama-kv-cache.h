@@ -119,7 +119,9 @@ public:
         // the elastic memory that holds the cells, see llama_box: kv_size is its cells then
                   llama_box *   box = nullptr,
         // the elastic memory of a target context, whose blocks hold the rows of this draft context
-        std::shared_ptr<llama_box> box_ref = nullptr);
+        std::shared_ptr<llama_box> box_ref = nullptr,
+        // the elastic memory this cache owns, a model whose only memory is this cache
+        std::shared_ptr<llama_box> box_own = nullptr);
 
     ~llama_kv_cache();
 
@@ -169,6 +171,11 @@ public:
     //
 
     llama_box * get_box() const { return box; }
+
+    std::shared_ptr<llama_box> get_box_shared() const override { return box_own; }
+
+    bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override;
+    void box_reserve_drop(llama_seq_id seq_id) override;
 
     // the row of cell c in the K and V tensors
     int64_t cell_row(uint32_t c) const;
@@ -352,6 +359,9 @@ private:
     // a draft context keeps the box of its target alive, and takes the blocks for its own tokens
     std::shared_ptr<llama_box> box_ref;
 
+    // the box of a model whose only memory is this cache: it takes and gives back the blocks of the sequences
+    std::shared_ptr<llama_box> box_own;
+
     const uint32_t n_seq_max = 1;
     const uint32_t n_stream  = 1;
 
@@ -532,6 +542,9 @@ public:
     bool kv_idx_supported() const;
     void get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const;
     void set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const;
+
+    // whether the cells are in the elastic memory, see llama_box
+    bool has_box() const;
 
     // see llama_kv_cache::attn_read_counted_by_graph()
     void attn_read_counted_by_graph() const;

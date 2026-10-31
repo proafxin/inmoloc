@@ -1,74 +1,68 @@
 #include "llama-box.h"
 
 #include "llama-impl.h"
+#include "llama-model.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <numeric>
 #include <stdexcept>
+
+// the row stride of layers: their longest K or V row, which every row is padded to, so that a cell has one row index in
+// all of them
+static size_t llama_box_row_stride(const llama_box::attn_layer * l, size_t n) {
+    size_t row = 0;
+    for (size_t i = 0; i < n; ++i) {
+        row = std::max(row, ggml_row_size(l[i].type_k, l[i].n_embd_k));
+        if (l[i].has_v) {
+            row = std::max(row, ggml_row_size(l[i].type_v, l[i].n_embd_v));
+        }
+    }
+    return row;
+}
 
 // the bytes of a block: n_block_tokens rows of every attention layer and of the draft layer, padded to whole rows of each
 // (row indices) and whole units (state row indices)
 static size_t llama_box_block_bytes(const std::vector<llama_box::attn_layer> & attn, const llama_box::attn_layer * draft) {
-    const size_t row  = ggml_row_size(attn[0].type_k, attn[0].n_embd_k);
-    const size_t rowd = draft ? ggml_row_size(draft->type_k, draft->n_embd_k) : row;
-    const size_t size = 2*llama_box::n_block_tokens*(attn.size()*row + (draft ? rowd : 0));
+    // no attention layers: the box only holds states, see the constructor
+    if (attn.empty()) {
+        return 0;
+    }
+
+    const size_t row  = llama_box_row_stride(attn.data(), attn.size());
+    const size_t rowd = draft ? llama_box_row_stride(draft, 1) : row;
+
+    size_t size = 0;
+    for (const auto & l : attn) {
+        size += (l.has_v ? 2 : 1)*llama_box::n_block_tokens*row;
+    }
+    if (draft) {
+        size += (draft->has_v ? 2 : 1)*llama_box::n_block_tokens*rowd;
+    }
+
     const size_t mult = std::lcm(std::lcm(row, rowd), llama_box::unit); // not a power of 2, GGML_PAD does not apply
 
     return (size + mult - 1)/mult*mult;
 }
 
-bool llama_box::supported(const std::vector<attn_layer> & attn, const std::vector<recr_layer> & recr, const attn_layer * draft) {
-    if (attn.empty()) {
-        return false;
-    }
-
-    // the K and V rows of every layer share the row indices of a cell, so they have one size
-    const size_t row = ggml_row_size(attn[0].type_k, attn[0].n_embd_k);
-    for (const auto & l : attn) {
-        if (!l.has_v || ggml_row_size(l.type_k, l.n_embd_k) != row || ggml_row_size(l.type_v, l.n_embd_v) != row) {
-            return false;
-        }
-    }
-
-    if (draft && (!draft->has_v || ggml_row_size(draft->type_k, draft->n_embd_k) != ggml_row_size(draft->type_v, draft->n_embd_v))) {
-        return false;
-    }
-
-    if (recr.empty()) {
-        return true;
-    }
-
-    // the state rows of every layer are read through one view per kind, so each kind has one size
-    const auto & l0 = recr[0];
-    for (const auto & l : recr) {
-        if (l.type_r != l0.type_r || l.type_s != l0.type_s || l.n_embd_r != l0.n_embd_r || l.n_embd_s != l0.n_embd_s ||
-            l.n_embd_x != l0.n_embd_x || l.n_rows_r != l0.n_rows_r || l.n_rows_r == 0) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
 llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> recr_in, const attn_layer * draft, size_t bytes, uint32_t n_tokens, uint32_t n_states_in, uint32_t n_seq_max) :
     attn(std::move(attn_in)), recr(std::move(recr_in)) {
-    GGML_ASSERT(supported(attn, recr, draft));
-
-    row_bytes      = ggml_row_size(attn[0].type_k, attn[0].n_embd_k);
+    row_bytes      = llama_box_row_stride(attn.data(), attn.size());
     block_bytes    = llama_box_block_bytes(attn, draft);
-    rows_per_block = block_bytes/row_bytes;
+    rows_per_block = row_bytes > 0 ? block_bytes/row_bytes : 0;
 
-    for (size_t i = 0; i < attn.size(); ++i) {
-        off_k.push_back(i*2*n_block_tokens*row_bytes);
-        off_v.push_back(i*2*n_block_tokens*row_bytes + n_block_tokens*row_bytes);
+    size_t off = 0;
+    for (const auto & l : attn) {
+        off_k.push_back(off);
+        off += n_block_tokens*row_bytes;
+        off_v.push_back(off);
+        off += l.has_v ? n_block_tokens*row_bytes : 0;
     }
 
     // the draft layer after the others
     if (draft) {
-        row_bytes_draft      = ggml_row_size(draft->type_k, draft->n_embd_k);
+        row_bytes_draft      = llama_box_row_stride(draft, 1);
         rows_per_block_draft = block_bytes/row_bytes_draft;
-
-        const size_t off = attn.size()*2*n_block_tokens*row_bytes;
 
         attn.push_back(*draft);
         off_k.push_back(off);
@@ -95,9 +89,14 @@ llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> re
             pc_r.push_back(state_bytes);
             state_bytes += recr[i].n_rows_r*r_row_bytes;
             pc_s.push_back(state_bytes);
-            state_bytes += s_row_bytes;
+            state_bytes += recr[i].n_rows_s*s_row_bytes;
             pc_x.push_back(state_bytes);
             state_bytes += 2*x_row_bytes;
+        }
+
+        // a model without attention has no tokens to hold: a block is a state
+        if (block_bytes == 0) {
+            block_bytes = state_bytes;
         }
 
         state_blocks = states_blocks(1);
@@ -168,9 +167,11 @@ void llama_box::alloc(ggml_backend_buffer_type_t buft, bool no_alloc) {
 
     for (size_t i = 0; i < attn.size(); ++i) {
         const auto & l = attn[i];
-        const size_t row = ggml_row_size(l.type_k, l.n_embd_k);
+        const size_t row = row_bytes_draft > 0 && i + 1 == attn.size() ? row_bytes_draft : row_bytes;
         t_k[l.il] = view(l.type_k, l.n_embd_k, row, off_k[i], "k", l.il);
-        t_v[l.il] = view(l.type_v, l.n_embd_v, row, off_v[i], "v", l.il);
+        if (l.has_v) {
+            t_v[l.il] = view(l.type_v, l.n_embd_v, row, off_v[i], "v", l.il);
+        }
     }
 
     if (!recr.empty()) {
@@ -205,8 +206,8 @@ int64_t llama_box::r_row(int32_t s, uint32_t l, uint32_t k) const {
     return (int64_t) (((size_t) s*state_bytes + pc_r[l] + k*r_row_bytes)/unit);
 }
 
-int64_t llama_box::s_row(int32_t s, uint32_t l) const {
-    return (int64_t) (((size_t) s*state_bytes + pc_s[l])/unit);
+int64_t llama_box::s_row(int32_t s, uint32_t l, uint32_t k) const {
+    return (int64_t) (((size_t) s*state_bytes + pc_s[l] + k*s_row_bytes)/unit);
 }
 
 int64_t llama_box::x_row(int32_t s, uint32_t l, uint32_t h) const {
@@ -354,10 +355,14 @@ void llama_box::clear() {
 }
 
 uint32_t llama_box::blocks_input(uint32_t n_input) const {
-    return (n_input + n_block_tokens - 1)/n_block_tokens;
+    return attn.empty() ? 0 : (n_input + n_block_tokens - 1)/n_block_tokens;
 }
 
 uint32_t llama_box::blocks_output(uint32_t n_input, uint32_t n_output) const {
+    if (attn.empty()) {
+        return 0;
+    }
+
     const uint64_t n_all = (uint64_t) n_input + n_output;
 
     return (uint32_t) ((n_all + n_block_tokens - 1)/n_block_tokens) - blocks_input(n_input);
@@ -419,4 +424,124 @@ void llama_box::reserve_drop(llama_seq_id seq_id) {
     seq.admitted       = false;
     seq.n_input_blocks = 0;
     seq.reserve        = 0;
+}
+
+// whether the device reads the rows of a prompt through one list, each query seeing a prefix of it, which the tensor core
+// kernels do; the context only describes the op, nothing is allocated
+static bool llama_box_row_lists(const llama_hparams & hparams, ggml_backend_buffer_type_t buft, const llama_box::attn_layer & attn) {
+    ggml_init_params params = {
+        /*.mem_size   =*/ 32*ggml_tensor_overhead(),
+        /*.mem_buffer =*/ NULL,
+        /*.no_alloc   =*/ true,
+    };
+
+    ggml_context_ptr ctx { ggml_init(params) };
+    if (!ctx) {
+        return false;
+    }
+
+    ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
+    if (dev == nullptr) {
+        return false;
+    }
+
+    const int64_t hs    = hparams.n_embd_head_k(attn.il);
+    const int64_t nh    = hparams.n_head_kv(attn.il);
+    const int64_t n_q   = hparams.n_head(attn.il);
+    const int64_t nb    = 32;
+    const int64_t n_kv  = 1024;
+    const int64_t n_idx = 256;
+
+    const auto attention = [&]() {
+        ggml_tensor * q = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32, hs, nb, n_q, 1);
+        ggml_tensor * k = ggml_new_tensor_4d(ctx.get(), attn.type_k, hs, n_kv, nh, 1);
+        ggml_tensor * v = ggml_new_tensor_4d(ctx.get(), attn.type_v, hs, n_kv, nh, 1);
+
+        ggml_tensor * res = ggml_flash_attn_ext(ctx.get(), q, k, v, nullptr, 1.0f, 0.0f, 0.0f);
+        ggml_prec_set_acc(res, GGML_PREC_F32);
+        return res;
+    };
+
+    ggml_tensor * fa_rows = attention();
+    ggml_flash_attn_ext_set_kv_rows_hi(fa_rows,
+            ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, n_idx), ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, nb));
+
+    if (const char * env = getenv("LOCAL_INFERENCE_BOX_ROW_LISTS"); env && atoi(env) == 0) {
+        return false;
+    }
+
+    return ggml_backend_dev_supports_op(dev, fa_rows);
+}
+
+std::unique_ptr<llama_box> llama_box_make(
+        const llama_model & model,
+                ggml_type   type_k,
+                ggml_type   type_v,
+                 uint32_t   kv_size,
+                ggml_type   type_r,
+                ggml_type   type_s,
+                 uint32_t   rs_size,
+                 uint32_t   n_seq_max,
+                 uint32_t   n_rs_seq,
+                     bool   rs_replay_req,
+                     bool   offload,
+                   size_t   box_bytes,
+                     bool   box_draft,
+                ggml_type   box_draft_type_k,
+                ggml_type   box_draft_type_v,
+    const std::function<bool(int32_t)> & filter_attn,
+    const std::function<bool(int32_t)> & filter_recr) {
+    const auto & hparams = model.hparams;
+
+    const bool has_recr = filter_recr != nullptr;
+
+    // the state of a seq has one scan row: no rollback, or a rollback that replays (see llama_memory_recurrent::rs_replay)
+    const bool rs_replay = rs_replay_req && n_rs_seq > 0 && llm_arch_supports_rs_replay(model.arch) && hparams.n_embd_gdn_inp() > 0;
+
+    std::vector<llama_box::attn_layer> attn;
+    std::vector<llama_box::recr_layer> recr;
+
+    llama_box::attn_layer draft = {};
+    bool has_draft = false;
+
+    bool row_lists = false;
+
+    ggml_backend_buffer_type_t buft = nullptr;
+
+    const auto layer_buft = [&](uint32_t il) {
+        return offload ? ggml_backend_dev_buffer_type(model.dev_layer(il)) : ggml_backend_cpu_buffer_type();
+    };
+
+    for (uint32_t il = 0; il < hparams.n_layer_all; ++il) {
+        if (!hparams.has_kv(il) || (filter_attn && !filter_attn(il))) {
+            continue;
+        }
+        buft = layer_buft(il);
+        attn.push_back({ (int32_t) il, type_k, type_v, hparams.n_embd_k_gqa(il), hparams.n_embd_v_gqa(il), !hparams.is_mla() });
+    }
+
+    for (uint32_t il = 0; has_recr && il < hparams.n_layer(); ++il) {
+        if (!filter_recr(il)) {
+            continue;
+        }
+        buft = layer_buft(il);
+        const uint32_t n_embd_x = rs_replay ? hparams.n_embd_gdn_inp()*(1 + n_rs_seq) : 0;
+        recr.push_back({ (int32_t) il, type_r, type_s, hparams.n_embd_r(), hparams.n_embd_s(), n_embd_x, 1 + n_rs_seq, rs_replay ? 1 : 1 + n_rs_seq });
+    }
+
+    // the one layer of an MTP head keeps its rows in the blocks, next to the layers of the same tokens
+    if (box_draft && hparams.n_layer_all == hparams.n_layer() + 1 && hparams.has_kv(hparams.n_layer())) {
+        const uint32_t il = hparams.n_layer();
+        draft = { (int32_t) il, box_draft_type_k, box_draft_type_v, hparams.n_embd_k_gqa(il), hparams.n_embd_v_gqa(il), !hparams.is_mla() };
+        has_draft = true;
+    }
+
+    row_lists = !attn.empty() && llama_box_row_lists(hparams, buft, attn[0]);
+
+    // the memory of box_bytes bytes, or of kv_size cells and rs_size states, elastic
+    auto box = std::make_unique<llama_box>(std::move(attn), std::move(recr), has_draft ? &draft : nullptr, box_bytes, kv_size, rs_size, n_seq_max);
+    box->set_row_lists(row_lists);
+    box->alloc(buft, hparams.no_alloc);
+
+    return box;
 }

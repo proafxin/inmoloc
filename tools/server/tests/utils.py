@@ -234,6 +234,8 @@ class ServerProcess:
             server_args.extend(["-fa", self.fa])
         if self.n_predict:
             server_args.extend(["--n-predict", self.n_predict])
+        # required with the elastic memory
+        server_args.extend(["--max-output-tokens", self.n_ctx//2 if self.n_ctx else 1024])
         if self.slot_save_path:
             server_args.extend(["--slot-save-path", self.slot_save_path])
         if self.n_ga:

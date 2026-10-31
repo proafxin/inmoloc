@@ -8,15 +8,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <set>
 #include <utility>
 #include <vector>
 
 struct ggml_context;
 struct ggml_tensor;
+struct llama_model;
 
-// the elastic memory of a hybrid model: one buffer, the box, holds the attention KV and the recurrent states of all the
-// requests, handed out by offset as the requests come and go
+// the elastic memory: one buffer, the box, holds the attention KV and the recurrent states of all the requests, handed
+// out by offset as the requests come and go; a model without recurrent layers has no states
 //
 // the states sit on the left of the box, one after the other, each exactly as large as a state is; the rest is a row of
 // blocks of the same size, taken from the right: a block holds n_block_tokens tokens of every attention layer, laid out
@@ -54,16 +56,13 @@ public:
         uint32_t  n_embd_s;
         uint32_t  n_embd_x; // the cached replay inputs of the last tokens, 0 without replay
         uint32_t  n_rows_r; // conv rows: one per draft position
+        uint32_t  n_rows_s; // scan rows: one per draft position, or one when a rollback replays
     };
 
     static constexpr uint32_t n_block_tokens = 128;
 
     // the row unit of the recurrent views, which every state row is padded to
     static constexpr size_t unit = 256;
-
-    // whether a model with these layers can use the box: one row size for all K and V rows and one size per kind of
-    // state row
-    static bool supported(const std::vector<attn_layer> & attn, const std::vector<recr_layer> & recr, const attn_layer * draft);
 
     // a box of `bytes` bytes, or with the memory of a cache of n_tokens cells and n_states states when bytes is 0; draft
     // is the layer of an MTP draft that keeps its tokens in the blocks, nullptr for none; no memory is taken until alloc()
@@ -112,7 +111,7 @@ public:
 
     // unit index of a row of the state s, recurrent layer l (recr_index()): conv row k, the scan row, replay input half h
     int64_t r_row(int32_t s, uint32_t l, uint32_t k) const;
-    int64_t s_row(int32_t s, uint32_t l) const;
+    int64_t s_row(int32_t s, uint32_t l, uint32_t k = 0) const;
     int64_t x_row(int32_t s, uint32_t l, uint32_t h) const;
 
     // views of the whole box
@@ -186,7 +185,7 @@ private:
 
     uint32_t n_blocks = 0;
 
-    size_t row_bytes      = 0; // one K or V row, the same for all layers
+    size_t row_bytes      = 0; // the stride of the K and V rows, the longest of them
     size_t block_bytes    = 0;
     size_t rows_per_block = 0; // block_bytes/row_bytes
 
@@ -258,3 +257,25 @@ private:
 
     ggml_tensor * view(ggml_type type, int64_t ne0, size_t nb1, size_t offs, const char * name, int32_t il);
 };
+
+// the elastic memory of a model; filter_attn selects the attention layers, and filter_recr the recurrent ones (nullptr
+// for a model without them, which ignores the state parameters); kv_size cells and rs_size states size it when box_bytes
+// is 0
+std::unique_ptr<llama_box> llama_box_make(
+        const llama_model & model,
+                ggml_type   type_k,
+                ggml_type   type_v,
+                 uint32_t   kv_size,
+                ggml_type   type_r,
+                ggml_type   type_s,
+                 uint32_t   rs_size,
+                 uint32_t   n_seq_max,
+                 uint32_t   n_rs_seq,
+                     bool   rs_replay_req,
+                     bool   offload,
+                   size_t   box_bytes,
+                     bool   box_draft,
+                ggml_type   box_draft_type_k,
+                ggml_type   box_draft_type_v,
+    const std::function<bool(int32_t)> & filter_attn,
+    const std::function<bool(int32_t)> & filter_recr);

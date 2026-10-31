@@ -103,11 +103,11 @@ public:
     const llama_box * get_box() const;
 
     // for a draft context that keeps its tokens in the blocks of the box
-    std::shared_ptr<llama_box> get_box_shared() const { return box; }
+    std::shared_ptr<llama_box> get_box_shared() const override { return box; }
 
     // admission of a request: its state and its prompt pages, and the pages it may generate into, see llama_box::reserve()
-    bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output);
-    void box_reserve_drop(llama_seq_id seq_id);
+    bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override;
+    void box_reserve_drop(llama_seq_id seq_id) override;
 
 private:
     const llama_hparams & hparams;

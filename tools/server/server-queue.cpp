@@ -80,10 +80,129 @@ int server_queue::post(std::vector<server_task> && tasks, bool front) {
     return 0;
 }
 
+//
+// server_box_queue
+//
+
+static constexpr uint64_t box_seq_none = UINT64_MAX;
+
+void server_box_queue::update(size_t cost) {
+    size_t i = shards.size() + cost;
+
+    tree[i] = shards[cost].empty() ? head(box_seq_none, cost) : head(shards[cost].front().seq, cost);
+
+    for (i /= 2; i >= 1; i /= 2) {
+        tree[i] = std::min(tree[2*i], tree[2*i + 1]);
+    }
+}
+
+void server_box_queue::push(server_task && task) {
+    const size_t cost = (size_t) task.n_box_cost;
+
+    // room for this cost: the shards double, and the tree is built again
+    if (cost >= shards.size()) {
+        size_t n = std::max<size_t>(shards.size(), 256);
+        while (n <= cost) {
+            n *= 2;
+        }
+
+        shards.resize(n);
+        tree.assign(2*n, head(box_seq_none, 0));
+
+        for (size_t c = 0; c < n; ++c) {
+            tree[n + c] = shards[c].empty() ? head(box_seq_none, c) : head(shards[c].front().seq, c);
+        }
+        for (size_t i = n; i-- > 1;) {
+            tree[i] = std::min(tree[2*i], tree[2*i + 1]);
+        }
+    }
+
+    if (task.n_box_seq == 0) {
+        task.n_box_seq = seq_next++;
+    }
+
+    auto & s = shards[cost];
+
+    // a task that had to wait again goes back to its place, ahead of the later ones
+    auto it = s.begin();
+    while (it != s.end() && it->seq < task.n_box_seq) {
+        ++it;
+    }
+
+    const int      id  = task.id;
+    const uint64_t seq = task.n_box_seq;
+
+    index[id] = { cost, s.insert(it, entry{ seq, std::move(task) }) };
+
+    update(cost);
+}
+
+bool server_box_queue::pop(int64_t n_free, server_task & task) {
+    if (n_free <= 0 || index.empty()) {
+        return false;
+    }
+
+    // the earliest head of the costs up to n_free
+    const size_t n = shards.size();
+
+    size_t l = n;
+    size_t r = n + std::min<size_t>((size_t) n_free, n - 1) + 1;
+
+    head best(box_seq_none, 0);
+
+    for (; l < r; l /= 2, r /= 2) {
+        if (l & 1) {
+            best = std::min(best, tree[l++]);
+        }
+        if (r & 1) {
+            best = std::min(best, tree[--r]);
+        }
+    }
+
+    if (best.first == box_seq_none) {
+        return false;
+    }
+
+    auto & s = shards[best.second];
+
+    task = std::move(s.front().task);
+
+    index.erase(task.id);
+    s.pop_front();
+
+    update(best.second);
+
+    return true;
+}
+
+void server_box_queue::erase(int id) {
+    const auto it = index.find(id);
+    if (it == index.end()) {
+        return;
+    }
+
+    const size_t cost = it->second.first;
+
+    shards[cost].erase(it->second.second);
+    index.erase(it);
+
+    update(cost);
+}
+
+//
+// server_queue
+//
+
+static bool waits_for_memory(const server_task & task);
+
 void server_queue::defer(server_task && task) {
     std::unique_lock<std::mutex> lock(mutex_tasks);
     QUE_DBG("defer task, id = %d\n", task.id);
-    queue_tasks_deferred.push_back(std::move(task));
+    if (task.n_box_cost > 0 && waits_for_memory(task)) {
+        queue_tasks_box.push(std::move(task));
+    } else {
+        queue_tasks_deferred.push_back(std::move(task));
+    }
     time_last_task = ggml_time_ms();
     condition_tasks.notify_one();
 }
@@ -152,6 +271,26 @@ void server_queue::pop_deferred_tasks(const std::vector<int> & ids) {
     }
     time_last_task = ggml_time_ms();
     condition_tasks.notify_one();
+}
+
+size_t server_queue::pop_deferred_fit(int64_t n_free) {
+    std::unique_lock<std::mutex> lock(mutex_tasks);
+    std::vector<server_task> tasks;
+    server_task task;
+    while (queue_tasks_box.pop(n_free, task)) {
+        n_free -= task.n_box_cost;
+        tasks.push_back(std::move(task));
+    }
+    if (tasks.empty()) {
+        return 0;
+    }
+    QUE_DBG("pop %zu deferred tasks that fit\n", tasks.size());
+    for (size_t i = tasks.size(); i-- > 0;) {
+        queue_tasks.emplace_front(std::move(tasks[i]));
+    }
+    time_last_task = ggml_time_ms();
+    condition_tasks.notify_one();
+    return tasks.size();
 }
 
 void server_queue::wait_until_no_sleep() {
@@ -418,6 +557,7 @@ void server_queue::cleanup_pending_task(int id_target) {
     queue_tasks_deferred.erase(
         std::remove_if(queue_tasks_deferred.begin(),  queue_tasks_deferred.end(),  rm_func),
         queue_tasks_deferred.end());
+    queue_tasks_box.erase(id_target);
     // a task declined while yielding is not in queue_tasks yet, but it can still be cancelled
     queue_tasks_unhandled.erase(
         std::remove_if(queue_tasks_unhandled.begin(), queue_tasks_unhandled.end(), rm_func),

@@ -28,7 +28,9 @@ llama_memory_recurrent::llama_memory_recurrent(
                  uint32_t   n_rs_seq,
                      bool   rs_replay_req,
     const layer_filter_cb & filter,
-                llama_box * box) : box(box), hparams(model.hparams), n_seq_max(n_seq_max) {
+                llama_box * box_in,
+    std::shared_ptr<llama_box> box_own_in) :
+    box(box_own_in ? box_own_in.get() : box_in), box_own(std::move(box_own_in)), hparams(model.hparams), n_seq_max(n_seq_max) {
     const int32_t n_layer = hparams.n_layer();
 
     head = 0;
@@ -49,6 +51,13 @@ llama_memory_recurrent::llama_memory_recurrent(
         box_cow   .assign(n_seq_max, -1);
         box_x_cell.assign(n_seq_max, -1);
         box_fresh .assign(mem_size, 0);
+    }
+
+    // an admitted request keeps the state its admission took, see llama_box::reserve()
+    if (box_own) {
+        box_keep = [this](llama_seq_id seq_id) {
+            return this->box->seq_admitted(seq_id);
+        };
     }
 
     // define a comparator for the buft -> ctx map to ensure that the order is well-defined:
@@ -212,6 +221,10 @@ void llama_memory_recurrent::clear(bool data) {
         for (auto & [_, buf] : ctxs_bufs) {
             ggml_backend_buffer_clear(buf.get(), 0);
         }
+    }
+
+    if (box_own) {
+        box_own->clear();
     }
 
     std::fill(rs_idx.begin(), rs_idx.end(), 0);
@@ -665,7 +678,29 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_memory_recurrent::memory_brea
     for (const auto & [_, buf] : ctxs_bufs) {
         ret[ggml_backend_buffer_get_type(buf.get())] += ggml_backend_buffer_get_size(buf.get());
     }
+    if (box_own) {
+        ret[ggml_backend_buffer_get_type(box_own->get_buffer())] += box_own->get_total_bytes();
+    }
     return ret;
+}
+
+bool llama_memory_recurrent::box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) {
+    GGML_ASSERT(box_own);
+
+    std::function<int32_t()> state_alloc = nullptr;
+    if (seq_tails[seq_id] < 0) {
+        state_alloc = [&]() -> int32_t {
+            return box_state_take(seq_id) ? seq_tails[seq_id] : -1;
+        };
+    }
+
+    return box_own->reserve(seq_id, n_input, n_output, state_alloc);
+}
+
+void llama_memory_recurrent::box_reserve_drop(llama_seq_id seq_id) {
+    GGML_ASSERT(box_own);
+
+    box_own->reserve_drop(seq_id);
 }
 
 llama_memory_context_ptr llama_memory_recurrent::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {
@@ -697,6 +732,11 @@ llama_memory_context_ptr llama_memory_recurrent::init_batch(llama_batch_allocr &
 
         if (balloc.get_n_used() < balloc.get_n_tokens()) {
             // failed to find a suitable split
+            break;
+        }
+
+        // the box first gives the seqs their states
+        if (box_own && !box_prepare(ubatches)) {
             break;
         }
 
@@ -1665,7 +1705,7 @@ void llama_memory_recurrent::state_write_data(llama_io_write_i & io, const std::
             for (const auto & range : cell_ranges_s) {
                 if (box) {
                     for (uint32_t id = range.first; id < range.second; ++id) {
-                        io.write_tensor(s_l[il], (size_t) box->s_row(id % size, box->recr_index(il))*llama_box::unit, s_size_row);
+                        io.write_tensor(s_l[il], (size_t) box->s_row(id % size, box->recr_index(il), id / size)*llama_box::unit, s_size_row);
                     }
                     continue;
                 }
@@ -2198,8 +2238,8 @@ int32_t llama_memory_recurrent_context::box_row(int i, uint32_t l, box_row_kind 
     switch (kind) {
         case BOX_R_READ:  return src < 0 ? -1 : (int32_t) box->r_row(src, l, k);
         case BOX_R_WRITE: return (int32_t) box->r_row(dst, l, k);
-        case BOX_S_READ:  return src < 0 ? -1 : (int32_t) box->s_row(src, l);
-        case BOX_S_WRITE: return (int32_t) box->s_row(dst, l);
+        case BOX_S_READ:  return src < 0 ? -1 : (int32_t) box->s_row(src, l, k);
+        case BOX_S_WRITE: return (int32_t) box->s_row(dst, l, k);
         case BOX_X_READ:  return mem->box_x_src[i] < 0 ? -1 : (int32_t) box->x_row(mem->box_x_src[i], l, mem->box_x_half[i]);
         case BOX_X_WRITE: return (int32_t) box->x_row(dst, l, mem->x_cur[mem->box_lead[i]]);
     }

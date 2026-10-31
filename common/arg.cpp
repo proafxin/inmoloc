@@ -2575,7 +2575,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         // this is to make sure this option appears in the server-specific section of the help message
         add_opt(common_arg(
             {"-np", "--parallel"}, "N",
-            string_format("most requests processed at once; with the elastic memory it only limits admission, otherwise the memory budget may lower it (default: %d, -1 = as many as fit)", params.n_parallel),
+            string_format("most requests processed at once, which the memory budget may lower; no effect with the elastic memory, where what runs is what fits (default: %d, -1 = as many as fit)", params.n_parallel),
             [](common_params & params, int value) {
                 if (value == 0) {
                     throw std::invalid_argument("error: invalid value for n_parallel\n");

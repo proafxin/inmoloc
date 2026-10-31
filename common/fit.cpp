@@ -1,6 +1,7 @@
 #include "fit.h"
 
 #include "log.h"
+#include "sampling.h"
 
 #include "../src/llama-ext.h"
 
@@ -1110,7 +1111,8 @@ bool common_budget_params(
                            bool   size_ctx,
                  ggml_log_level   log_level,
                        size_t *   predicted,
-                       size_t *   free_before) {
+                       size_t *   free_before,
+ const common_params_sampling * sampling) {
     constexpr double MiB = 1024.0*1024.0;
 
     // the dry runs print what a real load prints; below log_level it goes to the debug log
@@ -1180,6 +1182,22 @@ bool common_budget_params(
         cp.n_seq_max  = n_seq;
         cp.n_rs_cells = box ? 1 : 0; // one recurrent state per sequence, or a box of states and cells
         cp.box_bytes  = box ? box_bytes : 0;
+
+        // the same samplers as the real context: they outlive the context
+        std::vector<common_sampler_ptr> smpls;
+        std::vector<llama_sampler_seq_config> smpl_seqs;
+        common_params_sampling smpl_params;
+        if (sampling) {
+            smpl_params = *sampling;
+            smpls.resize(n_seq);
+            smpl_seqs.resize(n_seq);
+            for (uint32_t i = 0; i < n_seq; ++i) {
+                smpls[i].reset(common_sampler_init(model, smpl_params));
+                smpl_seqs[i] = { (llama_seq_id) i, common_sampler_get(smpls[i].get()) };
+            }
+            cp.samplers   = smpl_seqs.data();
+            cp.n_samplers = smpl_seqs.size();
+        }
 
         llama_context * ctx = llama_init_from_model(model, cp);
         if (ctx == nullptr) {
@@ -1267,7 +1285,7 @@ bool common_budget_params(
     };
     set_avail();
 
-    const uint32_t n_seq_cap   = std::max<uint32_t>(1, cparams->n_seq_max);
+    uint32_t n_seq_cap = std::max<uint32_t>(1, cparams->n_seq_max);
     const uint32_t n_ctx_train = llama_model_n_ctx_train(model);
 
     // size_ctx: the tokens of a request are those of the longest request; n_ctx on entry (--ctx-size)
@@ -1375,8 +1393,11 @@ bool common_budget_params(
             box_probed = true;
         }
 
-        // the elastic memory takes all the budget the fixed costs leave, and the requests are admitted by what fits in it
+        // the elastic memory takes all the budget the fixed costs leave, and the requests are admitted by what fits in it:
+        // no number of requests is set for it
         if (box) {
+            n_seq_cap = (uint32_t) llama_max_parallel_sequences();
+
             measured m;
             if (!box_size(m)) {
                 restore_log();

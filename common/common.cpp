@@ -1392,7 +1392,8 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
                 has_draft || spec_mtp ? &extra : nullptr, params.vram_budget, params.vram_budget_used,
                 params.vram_budget_ctx,
                 log_level_fit,
-                &params.vram_predicted, &params.vram_free_at_start)) {
+                &params.vram_predicted, &params.vram_free_at_start,
+                params.sampling.backend_sampling ? &params.sampling : nullptr)) {
             return;
         }
 

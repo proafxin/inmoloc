@@ -6,12 +6,50 @@
 #include <condition_variable>
 #include <deque>
 #include <exception>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
+
+// the tasks that wait for the elastic memory, in shards by their cost in blocks, each shard in arrival order; a tree over
+// the costs holds the earliest task of each range of them, so the earliest task that fits in any number of free blocks
+// is found in log(costs) steps, whatever the number of tasks; a task is removed the same way
+struct server_box_queue {
+    void push(server_task && task);
+
+    // the earliest task of at most n_free blocks; false when none fits
+    bool pop(int64_t n_free, server_task & task);
+
+    // removes the task with this id, if it waits here
+    void erase(int id);
+
+    size_t size() const { return index.size(); }
+
+private:
+    struct entry {
+        uint64_t    seq;
+        server_task task;
+    };
+
+    using shard = std::list<entry>;
+
+    // the arrival order and the cost of the earliest task of a range of costs
+    using head = std::pair<uint64_t, size_t>;
+
+    std::vector<shard> shards; // by cost, a power of 2 of them
+    std::vector<head>  tree;   // a binary tree over the shards, the leaves at shards.size()
+
+    std::unordered_map<int, std::pair<size_t, shard::iterator>> index; // task id -> its shard and place in it
+
+    uint64_t seq_next = 1;
+
+    // the leaf of a shard changed: the heads up to the root
+    void update(size_t cost);
+};
 
 // struct for managing server tasks
 // in most cases, use server_response_reader to post new tasks and retrieve results
@@ -26,6 +64,8 @@ private:
     // queues
     std::deque<server_task> queue_tasks;
     std::deque<server_task> queue_tasks_deferred;
+    // tasks that wait for the elastic memory
+    server_box_queue queue_tasks_box;
     // tasks declined while yielding, put back in queue_tasks once the yield is done
     // note: kept as a member so that cleanup_pending_task() can also reach them
     std::deque<server_task> queue_tasks_unhandled;
@@ -83,6 +123,10 @@ public:
     // move the deferred tasks with these ids to the front of the main queue, in this order
     void pop_deferred_tasks(const std::vector<int> & ids);
 
+    // the elastic memory: move the deferred tasks that fit in n_free blocks to the front of the main queue, oldest first;
+    // a later task that fits goes ahead of an earlier one that does not; returns how many moved
+    size_t pop_deferred_fit(int64_t n_free);
+
     // if sleeping, request exiting sleep state and wait until it is done
     // returns immediately if not sleeping
     void wait_until_no_sleep();
@@ -124,12 +168,12 @@ public:
     // for metrics
     size_t queue_tasks_deferred_size() {
         std::unique_lock<std::mutex> lock(mutex_tasks);
-        return queue_tasks_deferred.size();
+        return queue_tasks_deferred.size() + queue_tasks_box.size();
     }
 
     // for the sleeping state callbacks, which are called with mutex_tasks held
     size_t queue_tasks_deferred_size_locked() const {
-        return queue_tasks_deferred.size();
+        return queue_tasks_deferred.size() + queue_tasks_box.size();
     }
 
     //

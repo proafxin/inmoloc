@@ -190,7 +190,7 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
 
         // read conv state
         auto * conv_state = mctx_cur->get_r_l(il);
-        auto * conv_rs    = build_rs(inp_recr, conv_state, hparams.n_embd_r(), n_seqs);
+        auto * conv_rs    = build_rs(inp_recr, conv_state, hparams.n_embd_r(), n_seqs, nullptr, il);
         auto * conv       = ggml_reshape_3d(ctx0, conv_rs, d_conv, hparams.n_embd, n_seqs);
 
         // causal prepends the state, non-causal pads symmetrically for a centered window
@@ -213,10 +213,8 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
         for (int64_t slot = 0; slot < n_written; ++slot) {
             auto * conv_snap = ggml_view_3d(ctx0, bx, d_conv, bx->ne[1], bx->ne[2], bx->nb[1], bx->nb[2],
                                             (bx->ne[0] - d_conv - slot) * ggml_element_size(bx));
-            ggml_build_forward_expand(gf, ggml_cpy(ctx0, conv_snap,
-                                                   ggml_view_2d(ctx0, conv_state, (int64_t) d_conv * n_embd, n_seqs,
-                                                                conv_state->nb[1],
-                                                                ((size_t) slot * mem_size + kv_head) * row_size)));
+            ggml_build_forward_expand(gf, build_rs_store(inp_recr, conv_state, conv_snap,
+                                                         ((size_t) slot * mem_size + kv_head) * row_size, il, (uint32_t) slot));
         }
 
         auto * conv_kernel = model.layers[il].shortconv.conv;

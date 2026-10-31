@@ -321,16 +321,18 @@ public:
     // device once, each layer reading views of it: per recurrent layer, runs of n_seqs rows of the kinds of
     // llama_memory_recurrent_context::box_row_kind, conv write rows one run per conv row
     ggml_tensor * box_rows = nullptr; // I32 [n_seqs*n_box_runs*n_layers]
+    ggml_tensor * box_ids  = nullptr; // I32 [n_seqs], 0..n_seqs-1: the seqs of a gather of their states
 
     uint32_t box_n_seqs     = 0;
     uint32_t box_n_rows_r   = 0; // conv rows per state: 1 + n_rs_seq
+    uint32_t box_n_rows_s   = 0; // scan rows per state: as many, or one when a rollback replays
     uint32_t box_n_runs     = 0; // runs per layer: conv read, conv write per conv row, scan read, scan write, replay read, replay write
 
     // the rows of model layer il: conv read, conv write of conv row k, scan read and write, replay read and write
     ggml_tensor * box_r_read  (ggml_context * ctx, int il) const;
     ggml_tensor * box_r_write (ggml_context * ctx, int il, uint32_t k) const;
     ggml_tensor * box_s_read  (ggml_context * ctx, int il) const;
-    ggml_tensor * box_s_write (ggml_context * ctx, int il) const;
+    ggml_tensor * box_s_write (ggml_context * ctx, int il, uint32_t k = 0) const;
     ggml_tensor * box_x_read  (ggml_context * ctx, int il) const;
     ggml_tensor * box_x_write (ggml_context * ctx, int il) const;
 
@@ -594,6 +596,12 @@ public:
     ggml_tensor * self_kq_mask_cnv     = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
     ggml_tensor * self_kq_mask_swa     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
     ggml_tensor * self_kq_mask_swa_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
+
+    // the elastic memory: each token reads a range of the cells of its sequence
+    ggml_tensor * self_kv_idx     = nullptr; // I32 [n_idx, n_group]
+    ggml_tensor * self_q_rng      = nullptr; // I32 [3, n_batch]
+    ggml_tensor * self_kv_idx_swa = nullptr; // I32 [n_idx, n_group]
+    ggml_tensor * self_q_rng_swa  = nullptr; // I32 [3, n_batch]
 
     ggml_tensor * self_k_rot = nullptr;
     ggml_tensor * self_v_rot = nullptr;
@@ -1427,12 +1435,23 @@ struct llm_graph_context {
             const llm_graph_get_rows_fn & get_state_rows = nullptr,
                     int   il = -1) const;
 
+    // stores the states of the seqs of the ubatch in s: by their rows in the elastic memory, else at offs; k is the conv
+    // row, see llm_graph_input_rs::box_r_write()
+    ggml_tensor * build_rs_store(
+            llm_graph_input_rs * inp,
+            ggml_tensor * s,
+            ggml_tensor * states,
+                 size_t   offs,
+                    int   il,
+               uint32_t   k = 0) const;
+
     ggml_tensor * build_rwkv_token_shift_load(
         llm_graph_input_rs * inp,
         const llama_ubatch & ubatch,
                        int   il) const;
 
     ggml_tensor * build_rwkv_token_shift_store(
+      llm_graph_input_rs * inp,
              ggml_tensor * token_shift,
       const llama_ubatch & ubatch,
                      int   il) const;

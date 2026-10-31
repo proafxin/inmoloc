@@ -794,8 +794,10 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
     const int64_t D = S_v * S_v * H_v;
     const int64_t K = cparams.n_rs_seq + 1;
 
-    // the box keeps one scan row per seq: no rollback or a rollback that replays, see llama_memory_hybrid_make_box()
-    GGML_ASSERT(!mctx_cur->is_box());
+    // the box has no gathered state: this path takes one, through the rollback row of each seq
+    if (mctx_cur->is_box() && s == nullptr) {
+        s = ggml_reshape_4d(ctx0, ggml_get_rows(ctx0, ssm_states_all, inp->box_s_read(ctx0, il)), S_v, S_v, H_v, n_seqs);
+    }
 
     // state s is 4D [S_v, S_v, H_v, n_seqs]; K snapshot slots are written into the output.
     ggml_tensor * gdn_out = ggml_gated_delta_net(ctx0, q, k, v, g, b, s, K);
@@ -820,6 +822,16 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
 
     // op writes the last min(n_seq_tokens, K) snapshots; trailing slots are left unwritten
     const int64_t n_written = std::min<int64_t>(n_seq_tokens, K);
+
+    if (mctx_cur->is_box()) {
+        for (int64_t slot = 0; slot < n_written; ++slot) {
+            ggml_tensor * snap = ggml_view_2d(ctx0, gdn_out, D, n_seqs, ggml_row_size(gdn_out->type, D),
+                    ggml_row_size(gdn_out->type, attn_score_elems + slot*state_size_per_snap));
+            ggml_build_forward_expand(gf, build_rs_store(inp, ssm_states_all, snap, 0, il, (uint32_t) slot));
+        }
+
+        return output;
+    }
 
     // write the produced snapshots into the recurrent cache (snapshot slot i -> rollback group i)
     ggml_tensor * src = ggml_view_3d(ctx0, gdn_out,

@@ -182,7 +182,8 @@ static ggml_tensor * bailingmoe3_causal_conv1d(
         int64_t n_tokens,
         int64_t cache_head,
         uint32_t mem_size,
-        uint32_t n_rs_seq) {
+        uint32_t n_rs_seq,
+        std::vector<ggml_tensor *> * last) {
     const int64_t d_inner = head_dim * n_head;
     const int64_t conv_state_size = (d_conv - 1) * d_inner;
     const int64_t total_state_size = 3 * conv_state_size;
@@ -202,6 +203,14 @@ static ggml_tensor * bailingmoe3_causal_conv1d(
     for (int64_t slot = 0; slot < n_written; ++slot) {
         ggml_tensor * conv_snap = ggml_view_3d(ctx0, conv_x, d_conv - 1, d_inner, n_seqs,
                 conv_x->nb[1], conv_x->nb[2], (conv_x->ne[0] - (d_conv - 1) - slot) * conv_x->nb[0]);
+
+        // a store of the whole row by the caller: this part of it, [conv_state_size, n_seqs], for this slot
+        if (last) {
+            ggml_tensor * part = ggml_reshape_2d(ctx0, ggml_cont(ctx0, conv_snap), conv_state_size, n_seqs);
+            (*last)[slot] = (*last)[slot] ? ggml_concat(ctx0, (*last)[slot], part, 0) : part;
+            continue;
+        }
+
         ggml_build_forward_expand(gf, ggml_cpy(ctx0, conv_snap,
                 ggml_view_3d(ctx0, conv_states_all, d_conv - 1, d_inner, n_seqs,
                     (d_conv - 1) * ggml_element_size(conv_states_all),
@@ -257,17 +266,26 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
             const auto cache_head = mctx_cur->get_head();
             const auto mem_size = mctx_cur->get_size();
             ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
-            ggml_tensor * conv_state_all = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs);
+            ggml_tensor * conv_state_all = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs, nullptr, il);
+
+            std::vector<ggml_tensor *> last(cparams.n_rs_seq + 1, nullptr);
+            auto * last_box = mctx_cur->is_box() ? &last : nullptr;
 
             ggml_tensor * q = bailingmoe3_causal_conv1d(
                     gf, ctx0, conv_states_all, conv_state_all, 0, cur, layer.wq, layer.ssm_q_conv,
-                    d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, cache_head, mem_size, cparams.n_rs_seq);
+                    d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, cache_head, mem_size, cparams.n_rs_seq, last_box);
             ggml_tensor * k = bailingmoe3_causal_conv1d(
                     gf, ctx0, conv_states_all, conv_state_all, 1, cur, layer.wk, layer.ssm_k_conv,
-                    d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, cache_head, mem_size, cparams.n_rs_seq);
+                    d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, cache_head, mem_size, cparams.n_rs_seq, last_box);
             ggml_tensor * v = bailingmoe3_causal_conv1d(
                     gf, ctx0, conv_states_all, conv_state_all, 2, cur, layer.wv, layer.ssm_v_conv,
-                    d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, cache_head, mem_size, cparams.n_rs_seq);
+                    d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, cache_head, mem_size, cparams.n_rs_seq, last_box);
+
+            if (last_box) {
+                for (size_t slot = 0; slot < last.size() && last[slot]; ++slot) {
+                    ggml_build_forward_expand(gf, build_rs_store(inp_rs, conv_states_all, last[slot], 0, il, (uint32_t) slot));
+                }
+            }
 
             ggml_tensor * gate = ggml_mul_mat(ctx0, layer.ssm_f_a, cur);
             gate = ggml_add(ctx0, gate, layer.ssm_dt_b);
@@ -284,7 +302,7 @@ llama_model_bailingmoe3::graph::graph(const llama_model & model, const llm_graph
             k = build_gdn_l2_norm(ctx0, k, hparams.f_norm_rms_eps);
 
             ggml_tensor * states_all = mctx_cur->get_s_l(il);
-            ggml_tensor * state = build_rs(inp_rs, states_all, hparams.n_embd_s(), n_seqs);
+            ggml_tensor * state = build_rs(inp_rs, states_all, hparams.n_embd_s(), n_seqs, nullptr, il);
             state = ggml_reshape_4d(ctx0, state, head_dim, head_dim, n_head, n_seqs);
 
             ggml_tensor * out = ggml_cont(ctx0, build_recurrent_attn(

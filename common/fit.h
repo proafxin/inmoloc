@@ -5,6 +5,8 @@
 
 #include <vector>
 
+struct common_params_sampling;
+
 enum common_params_fit_status {
     COMMON_PARAMS_FIT_STATUS_SUCCESS = 0, // found allocations that are projected to fit
     COMMON_PARAMS_FIT_STATUS_FAILURE = 1, // could not find allocations that are projected to fit
@@ -62,7 +64,9 @@ bool common_budget_params(
                            bool   size_ctx,
                  ggml_log_level   log_level,
                        size_t *   predicted = nullptr,
-                       size_t *   free_before = nullptr);
+                       size_t *   free_before = nullptr,
+ // the samplers of the sequences when they run in the context, whose graphs are part of what is measured
+ const common_params_sampling * sampling = nullptr);
 
 // the free device memory of the devices a model runs on, summed
 size_t common_device_memory_free(const llama_model * model);

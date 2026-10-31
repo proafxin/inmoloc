@@ -2520,16 +2520,28 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     params.ctx_type == LLAMA_CONTEXT_TYPE_MTP && arch == LLM_ARCH_NEMOTRON_H_MOE;
 
                 if (llm_arch_is_recurrent(arch)) {
+                    // the states are all the memory of the model: they hold the elastic memory
+                    std::shared_ptr<llama_box> box_own;
+                    if (cparams.elastic) {
+                        box_own = llama_box_make(*this, GGML_TYPE_F16, GGML_TYPE_F16, 0,
+                                GGML_TYPE_F32, GGML_TYPE_F32, std::max((uint32_t) 1, cparams.n_rs_cells), cparams.n_seq_max,
+                                cparams.n_rs_seq, cparams.rs_replay, cparams.offload_kqv,
+                                cparams.box_bytes, false, GGML_TYPE_F16, GGML_TYPE_F16,
+                                [](int32_t) { return false; }, [](int32_t) { return true; });
+                    }
+
                     res = new llama_memory_recurrent(
                             *this,
                             GGML_TYPE_F32,
                             GGML_TYPE_F32,
                             cparams.offload_kqv,
-                            std::max((uint32_t) 1, cparams.n_rs_cells),
+                            box_own ? std::max<uint32_t>(1, box_own->get_max_states()) : std::max((uint32_t) 1, cparams.n_rs_cells),
                             cparams.n_seq_max,
                             cparams.n_rs_seq,
                             cparams.rs_replay,
-                            nullptr);
+                            nullptr,
+                            nullptr,
+                            box_own);
                 } else if (llm_arch_is_hybrid(arch) && !mtp_on_hybrid_qwen && !mtp_on_hybrid_nemotron) {
                     // The main difference between hybrid architectures is the
                     // layer filters, so pick the right one here
@@ -2698,6 +2710,15 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                     reuse,
                                     share);
                         } else {
+                            // both caches are the memory of the model: they hold the elastic memory
+                            std::shared_ptr<llama_box> box_own;
+                            if (cparams.elastic && !cparams.ctx_other && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
+                                box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
+                                        GGML_TYPE_F32, GGML_TYPE_F32, 0, cparams.n_seq_max, 0, false, cparams.offload_kqv,
+                                        cparams.box_bytes, false, GGML_TYPE_F16, GGML_TYPE_F16,
+                                        filter ? filter : [](int32_t) { return true; }, nullptr);
+                            }
+
                             res = new llama_kv_cache_iswa(
                                     *this,
                                     params.type_k,
@@ -2706,20 +2727,31 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                     cparams.offload_kqv,
                                     params.swa_full,
                                     cparams.kv_unified,
-                                    cparams.n_ctx_seq,
+                                    box_own ? box_own->get_n_cells() : cparams.n_ctx_seq,
                                     cparams.n_seq_max,
                                     cparams.n_ubatch,
                                     1,
                                     nullptr,
                                     filter,
                                     reuse,
-                                    share);
+                                    share,
+                                    box_own);
                         }
                     } else {
                         GGML_ASSERT(!hparams.is_swa_any());
 
                         // an MTP draft keeps its tokens in the blocks of the elastic memory of its target
                         const bool in_box = params.box && params.box->has_draft();
+
+                        // this cache is all the memory of the model: it holds the elastic memory; a draft on a model of
+                        // its own decodes next to a target that admits the requests, and has none
+                        std::shared_ptr<llama_box> box_own;
+                        if (cparams.elastic && !in_box && !cparams.ctx_other && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
+                            box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
+                                    GGML_TYPE_F32, GGML_TYPE_F32, 0, cparams.n_seq_max, 0, false, cparams.offload_kqv,
+                                    cparams.box_bytes, cparams.box_draft, cparams.box_draft_type_k, cparams.box_draft_type_v,
+                                    filter ? filter : [](int32_t) { return true; }, nullptr);
+                        }
 
                         res = new llama_kv_cache(
                                 *this,
@@ -2729,7 +2761,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 !cparams.flash_attn,
                                 cparams.offload_kqv,
                                 cparams.kv_unified,
-                                in_box ? params.box->get_n_cells() : cparams.n_ctx_seq,
+                                in_box ? params.box->get_n_cells() : (box_own ? box_own->get_n_cells() : cparams.n_ctx_seq),
                                 cparams.n_seq_max,
                                 1,
                                 hparams.n_swa,
@@ -2740,7 +2772,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 nullptr,
                                 "",
                                 nullptr,
-                                in_box ? params.box : nullptr);
+                                in_box ? params.box : nullptr,
+                                box_own);
                     }
                 }
             }

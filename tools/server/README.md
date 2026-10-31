@@ -179,7 +179,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--spm-infill` | use Suffix/Prefix/Middle pattern for infill (instead of Prefix/Suffix/Middle) as some models prefer this. (default: disabled) |
 | `--max-output-tokens N` | required with the elastic memory: the most tokens a request generates, its max_tokens capped at it; a request is admitted with its max_tokens charged, at most this and what the context window leaves after its input<br/>(env: LOCAL_INFERENCE_ARG_MAX_OUTPUT_TOKENS) |
 | `--pooling {none,mean,cls,last,rank}` | pooling type for embeddings, use model default if unspecified<br/>(env: LOCAL_INFERENCE_ARG_POOLING) |
-| `-np, --parallel N` | most requests processed at once; with the elastic memory it only limits admission, otherwise the memory budget may lower it (default: -1, -1 = as many as fit)<br/>(env: LOCAL_INFERENCE_ARG_N_PARALLEL) |
+| `-np, --parallel N` | most requests processed at once, which the memory budget may lower; no effect with the elastic memory, where what runs is what fits (default: -1, -1 = as many as fit)<br/>(env: LOCAL_INFERENCE_ARG_N_PARALLEL) |
 | `-cb, --cont-batching, -nocb, --no-cont-batching` | whether to enable continuous batching (a.k.a dynamic batching) (default: enabled)<br/>(env: LOCAL_INFERENCE_ARG_CONT_BATCHING) |
 | `-mm, --mmproj FILE` | path to a multimodal projector file. see tools/mtmd/README.md<br/>note: if -hf is used, this argument can be omitted<br/>(env: LOCAL_INFERENCE_ARG_MMPROJ) |
 | `-mmu, --mmproj-url URL` | URL to a multimodal projector file. see tools/mtmd/README.md<br/>(env: LOCAL_INFERENCE_ARG_MMPROJ_URL) |

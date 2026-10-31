@@ -166,6 +166,12 @@ struct server_task {
     int32_t  n_kv_wait_at = 0;
     uint32_t n_rs_need    = 0;
 
+    // the elastic memory: the blocks the task takes, computed once; it is only offered again when that many are free
+    int64_t n_box_cost = 0;
+
+    // its place in the arrival order, which it keeps when it is offered and has to wait again; 0 = not set yet
+    uint64_t n_box_seq = 0;
+
     // only used by CLI, this allow tokenizing CLI inputs on server side
     // we need this because mtmd_context and vocab are not accessible outside of server_context
     bool                    cli = false;

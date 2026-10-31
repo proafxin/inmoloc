@@ -443,12 +443,19 @@ ggml_tensor * llm_graph_input_rs::box_run(ggml_context * ctx, int il, uint32_t r
 ggml_tensor * llm_graph_input_rs::box_r_read (ggml_context * ctx, int il)             const { return box_run(ctx, il, 0); }
 ggml_tensor * llm_graph_input_rs::box_r_write(ggml_context * ctx, int il, uint32_t k) const { return box_run(ctx, il, 1 + k); }
 ggml_tensor * llm_graph_input_rs::box_s_read (ggml_context * ctx, int il)             const { return box_run(ctx, il, 1 + box_n_rows_r); }
-ggml_tensor * llm_graph_input_rs::box_s_write(ggml_context * ctx, int il)             const { return box_run(ctx, il, 2 + box_n_rows_r); }
-ggml_tensor * llm_graph_input_rs::box_x_read (ggml_context * ctx, int il)             const { return box_run(ctx, il, 3 + box_n_rows_r); }
-ggml_tensor * llm_graph_input_rs::box_x_write(ggml_context * ctx, int il)             const { return box_run(ctx, il, 4 + box_n_rows_r); }
+ggml_tensor * llm_graph_input_rs::box_s_write(ggml_context * ctx, int il, uint32_t k) const { return box_run(ctx, il, 2 + box_n_rows_r + k); }
+ggml_tensor * llm_graph_input_rs::box_x_read (ggml_context * ctx, int il)             const { return box_run(ctx, il, 2 + box_n_rows_r + box_n_rows_s); }
+ggml_tensor * llm_graph_input_rs::box_x_write(ggml_context * ctx, int il)             const { return box_run(ctx, il, 3 + box_n_rows_r + box_n_rows_s); }
 
 void llm_graph_input_rs::set_input(const llama_ubatch * ubatch) {
     GGML_UNUSED(ubatch);
+
+    if (box_ids && box_ids->buffer) {
+        GGML_ASSERT(ggml_backend_buffer_is_host(box_ids->buffer));
+        for (uint32_t i = 0; i < box_n_seqs; ++i) {
+            ((int32_t *) box_ids->data)[i] = (int32_t) i;
+        }
+    }
 
     // the elastic memory: the rows of every seq in every recurrent layer, see box_rows
     if (box_rows) {
@@ -472,10 +479,12 @@ void llm_graph_input_rs::set_input(const llama_ubatch * ubatch) {
                     for (uint32_t k = 0; k < box_n_rows_r; ++k) {
                         run[(1 + k)*ns + i] = mctx->box_row((int) i, l, kind::BOX_R_WRITE, k);
                     }
-                    run[(1 + box_n_rows_r)*ns + i] = mctx->box_row((int) i, l, kind::BOX_S_READ);
-                    run[(2 + box_n_rows_r)*ns + i] = mctx->box_row((int) i, l, kind::BOX_S_WRITE);
-                    run[(3 + box_n_rows_r)*ns + i] = mctx->get_n_x() > 0 ? mctx->box_row((int) i, l, kind::BOX_X_READ)  : -1;
-                    run[(4 + box_n_rows_r)*ns + i] = mctx->get_n_x() > 0 ? mctx->box_row((int) i, l, kind::BOX_X_WRITE) : -1;
+                    run[(1 + box_n_rows_r)*ns + i] = mctx->box_row((int) i, l, kind::BOX_S_READ, box_n_rows_s > 1 ? rb : 0);
+                    for (uint32_t k = 0; k < box_n_rows_s; ++k) {
+                        run[(2 + box_n_rows_r + k)*ns + i] = mctx->box_row((int) i, l, kind::BOX_S_WRITE, k);
+                    }
+                    run[(2 + box_n_rows_r + box_n_rows_s)*ns + i] = mctx->get_n_x() > 0 ? mctx->box_row((int) i, l, kind::BOX_X_READ)  : -1;
+                    run[(3 + box_n_rows_r + box_n_rows_s)*ns + i] = mctx->get_n_x() > 0 ? mctx->box_row((int) i, l, kind::BOX_X_WRITE) : -1;
                 }
             }
         }
@@ -889,6 +898,14 @@ void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
         mctx->get_swa()->set_input_kq_mask(self_kq_mask_swa, ubatch, cparams.causal_attn);
     }
 
+    if (self_kv_idx && self_kv_idx->buffer) {
+        mctx->get_base()->set_input_kv_idx(self_kv_idx, self_q_rng, ubatch, cparams.causal_attn);
+    }
+
+    if (self_kv_idx_swa && self_kv_idx_swa->buffer) {
+        mctx->get_swa()->set_input_kv_idx(self_kv_idx_swa, self_q_rng_swa, ubatch, cparams.causal_attn);
+    }
+
     if (self_k_rot && self_k_rot->buffer) {
         mctx->get_base()->set_input_k_rot(self_k_rot);
     }
@@ -912,6 +929,23 @@ bool llm_graph_input_attn_kv_iswa::can_reuse(const llm_graph_params & params) {
     this->mctx = mctx;
 
     bool res = true;
+
+    // the index lists are sized by the cells of the sequences in the ubatch
+    const auto can_reuse_idx = [&](const ggml_tensor * kv_idx, const ggml_tensor * q_rng, const llama_kv_cache_context * mctx_cur) {
+        uint32_t n_idx   = 0;
+        uint32_t n_group = 0;
+        mctx_cur->get_kv_idx_shape(params.ubatch, n_idx, n_group);
+
+        return kv_idx->ne[0] == n_idx && kv_idx->ne[1] == n_group && q_rng->ne[1] == params.ubatch.n_tokens;
+    };
+
+    if (self_kv_idx) {
+        res &= can_reuse_idx(self_kv_idx, self_q_rng, mctx->get_base());
+    }
+
+    if (self_kv_idx_swa) {
+        res &= can_reuse_idx(self_kv_idx_swa, self_q_rng_swa, mctx->get_swa());
+    }
 
     // base tensors may not be allocated if there are no non-SWA attention layers
     if (self_k_idxs && self_k_idxs->buffer) {
@@ -3550,10 +3584,13 @@ ggml_tensor * llm_graph_context::build_attn(
     const auto & kq_mask = is_swa ? inp->get_kq_mask_swa() : inp->get_kq_mask();
 
     ggml_tensor * q = q_cur;
-    ggml_tensor * k = mctx_cur->get_k(ctx0, il);
-    ggml_tensor * v = mctx_cur->get_v(ctx0, il);
 
-    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
+    ggml_tensor * kv_idx = is_swa ? inp->self_kv_idx_swa : inp->self_kv_idx;
+    ggml_tensor * q_rng  = is_swa ? inp->self_q_rng_swa  : inp->self_q_rng;
+
+    ggml_tensor * cur = kv_idx ?
+        build_attn_mha(q, mctx_cur->get_k_all(ctx0, il), mctx_cur->get_v_all(ctx0, il), nullptr, nullptr, sinks, v_mla, 0, kq_scale, il, kv_idx, q_rng) :
+        build_attn_mha(q, mctx_cur->get_k(ctx0, il), mctx_cur->get_v(ctx0, il), kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
     cb(cur, "kqv_out", il);
 
     if (v_rot) {
@@ -3813,6 +3850,26 @@ llm_graph_input_attn_kv_iswa * llm_graph_context::build_attn_inp_kv_iswa() const
         inp->self_kq_mask_swa_cnv = inp->self_kq_mask_swa;
     }
 
+    // the elastic memory is read through the cells of the sequences only
+    if (mctx_cur->get_base()->has_box()) {
+        const auto build_idx = [&](const llama_kv_cache_context * mctx_kv, ggml_tensor *& kv_idx, ggml_tensor *& q_rng) {
+            uint32_t n_idx   = 0;
+            uint32_t n_group = 0;
+            mctx_kv->get_kv_idx_shape(ubatch, n_idx, n_group);
+
+            kv_idx = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, n_idx, n_group);
+            ggml_set_input(kv_idx);
+            ggml_set_name(kv_idx, "attn_inp_kv_idx");
+
+            q_rng = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, 3, ubatch.n_tokens);
+            ggml_set_input(q_rng);
+            ggml_set_name(q_rng, "attn_inp_q_rng");
+        };
+
+        build_idx(mctx_cur->get_base(), inp->self_kv_idx,     inp->self_q_rng);
+        build_idx(mctx_cur->get_swa(),  inp->self_kv_idx_swa, inp->self_q_rng_swa);
+    }
+
     inp->self_k_rot = mctx_cur->get_base()->build_input_k_rot(ctx0);
     inp->self_v_rot = mctx_cur->get_base()->build_input_v_rot(ctx0);
 
@@ -3937,11 +3994,16 @@ static std::unique_ptr<llm_graph_input_rs> build_rs_inp_impl(
         // conv rows: one per draft position, see llama_memory_recurrent
         inp->box_n_seqs   = (uint32_t) n_seqs;
         inp->box_n_rows_r = 1 + mctx_cur->get_n_rs_seq();
-        inp->box_n_runs   = inp->box_n_rows_r + 5;
+        inp->box_n_rows_s = mctx_cur->get_n_x() > 0 ? 1 : inp->box_n_rows_r;
+        inp->box_n_runs   = inp->box_n_rows_r + inp->box_n_rows_s + 4;
 
         inp->box_rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, (int64_t) n_seqs*inp->box_n_runs*mctx_cur->box_n_layers());
         ggml_set_input(inp->box_rows);
         ggml_set_name(inp->box_rows, "rs_box_rows");
+
+        inp->box_ids = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_seqs);
+        ggml_set_input(inp->box_ids);
+        ggml_set_name(inp->box_ids, "rs_box_ids");
 
         // the replay reads the pending inputs through box_rows, only the mask of the pending tokens is apart
         if (mctx_cur->get_n_x() > 0) {
@@ -4018,7 +4080,11 @@ ggml_tensor * llm_graph_context::build_rs(
 
         ggml_tensor * rows = kv_state->is_s_l(s) ? inp->box_s_read(ctx0, il) : inp->box_r_read(ctx0, il);
 
-        ggml_tensor * states = get_state_rows ? get_state_rows(ctx0, s, rows) : ggml_get_rows(ctx0, s, rows);
+        // the rows of the view overlap: a custom getter gets the states of the ubatch gathered, in the order of the seqs
+        ggml_tensor * states = ggml_get_rows(ctx0, s, rows);
+        if (get_state_rows) {
+            states = get_state_rows(ctx0, states, inp->box_ids);
+        }
         ggml_build_forward_expand(gf, states);
 
         return states;
@@ -4039,6 +4105,22 @@ ggml_tensor * llm_graph_context::build_rs(
                     get_state_rows);
 }
 
+ggml_tensor * llm_graph_context::build_rs_store(
+        llm_graph_input_rs * inp,
+        ggml_tensor * s,
+        ggml_tensor * states,
+             size_t   offs,
+                int   il,
+           uint32_t   k) const {
+    if (inp->mctx->is_box()) {
+        ggml_tensor * rows = inp->mctx->is_s_l(s) ? inp->box_s_write(ctx0, il, k) : inp->box_r_write(ctx0, il, k);
+
+        return ggml_set_rows(ctx0, s, ggml_reshape_2d(ctx0, ggml_cont(ctx0, states), s->ne[0], inp->box_n_seqs), rows);
+    }
+
+    return ggml_cpy(ctx0, states, ggml_view_1d(ctx0, s, ggml_nelements(states), offs));
+}
+
 ggml_tensor * llm_graph_context::build_rwkv_token_shift_load(
     llm_graph_input_rs * inp,
     const llama_ubatch & ubatch,
@@ -4053,7 +4135,7 @@ ggml_tensor * llm_graph_context::build_rwkv_token_shift_load(
 
     ggml_tensor * token_shift = build_rs(
             inp, token_shift_all,
-            hparams.n_embd_r(), n_seqs);
+            hparams.n_embd_r(), n_seqs, nullptr, il);
 
     token_shift = ggml_reshape_3d(ctx0, token_shift, hparams.n_embd, token_shift_count, n_seqs);
 
@@ -4061,6 +4143,7 @@ ggml_tensor * llm_graph_context::build_rwkv_token_shift_load(
 }
 
 ggml_tensor * llm_graph_context::build_rwkv_token_shift_store(
+  llm_graph_input_rs * inp,
          ggml_tensor * token_shift,
   const llama_ubatch & ubatch,
                  int   il) const {
@@ -4073,11 +4156,9 @@ ggml_tensor * llm_graph_context::build_rwkv_token_shift_store(
 
     const auto kv_head = mctx_cur->get_head();
 
-    return ggml_cpy(
-        ctx0,
+    return build_rs_store(inp, mctx_cur->get_r_l(il),
         ggml_view_1d(ctx0, token_shift, n_embd * n_seqs * token_shift_count, 0),
-        ggml_view_1d(ctx0, mctx_cur->get_r_l(il), hparams.n_embd_r()*n_seqs, hparams.n_embd_r()*kv_head*ggml_element_size(mctx_cur->get_r_l(il)))
-    );
+        hparams.n_embd_r()*kv_head*ggml_element_size(mctx_cur->get_r_l(il)), il);
 }
 
 llm_graph_input_mem_hybrid * llm_graph_context::build_inp_mem_hybrid() const {

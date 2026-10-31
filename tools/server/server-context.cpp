@@ -1185,8 +1185,9 @@ private:
     // generate (policy A), so a running request never waits for memory and nothing is preempted
     bool box = false;
 
-    // a request ended, the tasks that wait for memory try again
-    bool box_retry = false;
+    // the blocks that were free at the last look: the waiting tasks only need a look when more are free, see
+    // mem_offer_waiting()
+    int64_t box_free_seen = -1;
 
     // the tokens a finished request generated, a running mean over the recent ones, see kv_gen_expected()
     double   gen_mean   = 0.0;
@@ -1626,8 +1627,6 @@ private:
             SLT_TRC(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
 
             slot.callback_on_release = [this](int id_slot) {
-                box_retry = true;
-
                 queue_tasks.pop_deferred_task(id_slot);
             };
 
@@ -2134,6 +2133,19 @@ private:
         return info;
     }
 
+    // the blocks idle slots give up for a request that fits: their tokens and their states
+    int64_t box_blocks_evictable(const llama_memory_box_info & info) const {
+        const int64_t bt = info.block_tokens;
+
+        int64_t n = 0;
+        for (const auto & slot : slots) {
+            if (!slot.is_processing() && slot.prompt.n_tokens() > 0) {
+                n += (slot.prompt.n_tokens() + bt - 1)/bt + info.state_blocks;
+            }
+        }
+        return n;
+    }
+
     // a slot that was not admitted after all: no charge, and no state when it holds no tokens
     void box_admission_undo(server_slot & slot) {
         llama_memory_t mem = llama_get_memory(ctx_tgt);
@@ -2215,16 +2227,18 @@ private:
     // in the order they wait, every one that fits, see kv_schedule() for the same with preempted slots
     // with no slot at work, all of them are offered: the first one is admitted whatever its size
     void mem_offer_waiting(bool all) {
-        // the elastic memory knows what fits: whenever a request ended, the waiting tasks try again, in the order they wait
+        // the elastic memory knows what fits: the free blocks are compared with the cost of the waiting tasks, in the order
+        // they wait, and only a task that fits goes on to a slot; with no slot at work all of them are offered
         if (box) {
-            if (box_retry || all) {
-                box_retry = false;
+            const auto info = box_info();
 
-                std::vector<int> offer;
-                for (const auto & w : queue_tasks.get_deferred_mem_tasks()) {
-                    offer.push_back(w.id);
-                }
-                queue_tasks.pop_deferred_tasks(offer);
+            const int64_t n_free = all ? INT64_MAX : (int64_t) info.n_free - (int64_t) info.n_reserved + box_blocks_evictable(info);
+
+            if (all || n_free > box_free_seen) {
+                // what they take is known at the next look, which may find room for more
+                box_free_seen = queue_tasks.pop_deferred_fit(n_free) > 0 ? -1 : n_free;
+            } else {
+                box_free_seen = n_free;
             }
             return;
         }
@@ -3920,6 +3934,7 @@ private:
                     // in the empty memory, or is longer than the context window of the model, is rejected at arrival
                     const int32_t n_children = task.is_parent() ? (int32_t) task.child_tasks.size() : 0;
                     int32_t n_box_out = 0;
+                    int64_t n_box_cost = 0;
                     if (box) {
                         const auto    info    = box_info();
                         const int32_t n_input = task.n_tokens();
@@ -3946,6 +3961,9 @@ private:
                                         "lower max_tokens or the input", n_input, n_box_out), ERROR_TYPE_EXCEED_CONTEXT_SIZE);
                             break;
                         }
+
+                        // what it takes, less the whole blocks of the prefix it reuses
+                        n_box_cost = std::max<int64_t>(1, n_most - n_reuse/bt);
                     }
 
                     const bool     is_rs      = (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) && !box;
@@ -4055,6 +4073,7 @@ private:
                             box_admission_undo(*slot);
 
                             SRV_DBG("the memory is held by running requests, defer task, id_task = %d\n", id_task);
+                            task.n_box_cost = n_box_cost;
                             defer_task_mem(std::move(task), SERVER_DEFER_KV_CELLS, 0, 0, 0);
                             break;
                         }

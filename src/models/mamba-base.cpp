@@ -37,7 +37,7 @@ ggml_tensor * llm_build_mamba_base::build_mamba_layer(llm_graph_input_rs * inp,
     ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
     ggml_tensor * ssm_states_all  = mctx_cur->get_s_l(il);
 
-    ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
+    ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs, nullptr, il);
     conv               = ggml_reshape_3d(ctx0, conv, d_conv - 1, d_inner, n_seqs);
 
     // {n_embd, n_tokens} => {n_embd, n_seq_tokens, n_seqs}
@@ -60,10 +60,8 @@ ggml_tensor * llm_build_mamba_base::build_mamba_layer(llm_graph_input_rs * inp,
         ggml_tensor * last_conv = ggml_view_3d(ctx0, conv_x, d_conv - 1, d_inner, n_seqs, conv_x->nb[1], conv_x->nb[2],
                                                n_seq_tokens * (conv_x->nb[0]));
 
-        ggml_build_forward_expand(
-            gf, ggml_cpy(ctx0, last_conv,
-                         ggml_view_1d(ctx0, conv_states_all, (d_conv - 1) * (d_inner) * (n_seqs),
-                                      kv_head * (d_conv - 1) * (d_inner) *ggml_element_size(conv_states_all))));
+        ggml_build_forward_expand(gf, build_rs_store(inp, conv_states_all, last_conv,
+                                                     kv_head * (d_conv - 1) * (d_inner) *ggml_element_size(conv_states_all), il));
 
         // 1D convolution
         // The equivalent is to make a self-overlapping view of conv_x
@@ -115,7 +113,7 @@ ggml_tensor * llm_build_mamba_base::build_mamba_layer(llm_graph_input_rs * inp,
         // (this is necessary in order to properly use the states before they are overwritten,
         //  while avoiding to make unnecessary copies of the states)
         auto get_ssm_rows = [&](ggml_context * ctx, ggml_tensor * states, ggml_tensor * ids) {
-            ggml_tensor * ssm = ggml_reshape_4d(ctx, states, d_state, head_dim, n_head, mctx_cur->get_size());
+            ggml_tensor * ssm = ggml_reshape_4d(ctx, states, d_state, head_dim, n_head, states->ne[1]);
 
             // Custom operator to optimize the parallel associative scan
             // as described in the Annex D of the Mamba paper.
@@ -123,13 +121,12 @@ ggml_tensor * llm_build_mamba_base::build_mamba_layer(llm_graph_input_rs * inp,
             return ggml_ssm_scan(ctx, ssm, x, dt, A, B, C, ids, /*K=*/1);
         };
 
-        ggml_tensor * y_ssm = build_rs(inp, ssm_states_all, hparams.n_embd_s(), ubatch.n_seqs, get_ssm_rows);
+        ggml_tensor * y_ssm = build_rs(inp, ssm_states_all, hparams.n_embd_s(), ubatch.n_seqs, get_ssm_rows, il);
 
         // store last states
-        ggml_build_forward_expand(
-            gf, ggml_cpy(ctx0, ggml_view_1d(ctx0, y_ssm, d_state * d_inner * n_seqs, x->nb[3] * x->ne[3]),
-                         ggml_view_1d(ctx0, ssm_states_all, d_state * d_inner * n_seqs,
-                                      kv_head * d_state * d_inner * ggml_element_size(ssm_states_all))));
+        ggml_build_forward_expand(gf, build_rs_store(inp, ssm_states_all,
+                                                     ggml_view_1d(ctx0, y_ssm, d_state * d_inner * n_seqs, x->nb[3] * x->ne[3]),
+                                                     kv_head * d_state * d_inner * ggml_element_size(ssm_states_all), il));
 
         ggml_tensor * y = ggml_view_3d(ctx0, y_ssm, d_inner, n_seq_tokens, n_seqs, x->nb[2], x->nb[3], 0);
 
@@ -177,9 +174,8 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
 
     ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
     ggml_tensor * ssm_states_all  = mctx_cur->get_s_l(il);
-    const int64_t state_slots     = ssm_states_all->ne[1];
 
-    ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
+    ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs, nullptr, il);
     conv               = ggml_reshape_3d(ctx0, conv, d_conv - 1, d_inner + 2 * n_group * d_state, n_seqs);
 
     // d_in_proj = 2 * self.d_inner + 2 * self.ngroups * self.d_state + self.nheads
@@ -212,10 +208,8 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
             ggml_tensor * last_conv = ggml_view_3d(ctx0, conv_x, d_conv - 1, d_inner + 2 * n_group * d_state, n_seqs,
                                                    conv_x->nb[1], conv_x->nb[2], (n_seq_tokens - slot) * conv_x->nb[0]);
 
-            ggml_build_forward_expand(gf, ggml_cpy(ctx0, last_conv,
-                                                   ggml_view_2d(ctx0, conv_states_all, row_count, n_seqs,
-                                                                conv_states_all->nb[1],
-                                                                ((size_t) slot * mem_size + kv_head) * row_size)));
+            ggml_build_forward_expand(gf, build_rs_store(inp, conv_states_all, last_conv,
+                                                         ((size_t) slot * mem_size + kv_head) * row_size, il, (uint32_t) slot));
         }
 
         // 1D convolution
@@ -254,7 +248,7 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
         // (this is necessary in order to properly use the states before they are overwritten,
         //  while avoiding to make unnecessary copies of the states)
         auto get_ssm_rows = [&](ggml_context * ctx, ggml_tensor * states, ggml_tensor * ids) {
-            ggml_tensor * ssm = ggml_reshape_4d(ctx, states, d_state, head_dim, n_head, state_slots);
+            ggml_tensor * ssm = ggml_reshape_4d(ctx, states, d_state, head_dim, n_head, states->ne[1]);
 
             // TODO: use semistructured matrices to implement state-space duality
             // => {d_inner, n_seq_tokens, n_seqs} and {d_state, d_inner, n_seqs}
@@ -262,19 +256,27 @@ ggml_tensor * llm_build_mamba_base::build_mamba2_layer(llm_graph_input_rs * inp,
             return ggml_ssm_scan(ctx, ssm, x, dt, A, B, C, ids, K);
         };
 
-        ggml_tensor * y_ssm = build_rs(inp, ssm_states_all, hparams.n_embd_s(), ubatch.n_seqs, get_ssm_rows);
+        ggml_tensor * y_ssm = build_rs(inp, ssm_states_all, hparams.n_embd_s(), ubatch.n_seqs, get_ssm_rows, il);
         const int64_t D            = d_state * d_inner;
         const int64_t n_written    = std::min<int64_t>(n_seq_tokens, K);
         const size_t  row_size     = ggml_row_size(ssm_states_all->type, D);
         const size_t  y_row_size   = ggml_row_size(y_ssm->type, D);
         const size_t  state_offset = ggml_nelements(x) * ggml_element_size(x);
 
-        ggml_build_forward_expand(
-            gf, ggml_cpy(ctx0,
-                         ggml_view_3d(ctx0, y_ssm, D, n_seqs, n_written,
-                                      y_row_size, y_row_size * n_seqs, state_offset),
-                         ggml_view_3d(ctx0, ssm_states_all, D, n_seqs, n_written,
-                                      ssm_states_all->nb[1], (size_t) mem_size * row_size, kv_head * row_size)));
+        if (mctx_cur->is_box()) {
+            for (int64_t slot = 0; slot < n_written; ++slot) {
+                ggml_build_forward_expand(gf, build_rs_store(inp, ssm_states_all,
+                                                             ggml_view_2d(ctx0, y_ssm, D, n_seqs, y_row_size, state_offset + slot * y_row_size * n_seqs),
+                                                             0, il, (uint32_t) slot));
+            }
+        } else {
+            ggml_build_forward_expand(
+                gf, ggml_cpy(ctx0,
+                             ggml_view_3d(ctx0, y_ssm, D, n_seqs, n_written,
+                                          y_row_size, y_row_size * n_seqs, state_offset),
+                             ggml_view_3d(ctx0, ssm_states_all, D, n_seqs, n_written,
+                                          ssm_states_all->nb[1], (size_t) mem_size * row_size, kv_head * row_size)));
+        }
 
         ggml_tensor * y = ggml_view_4d(ctx0, y_ssm, head_dim, n_head, n_seq_tokens, n_seqs, x->nb[1], n_head * x->nb[1],
                                        n_seq_tokens * n_head * x->nb[1], 0);

@@ -85,8 +85,10 @@ llama_kv_cache::llama_kv_cache(
     const  layer_share_cb & share,
              const char *   name_tag,
                 llama_box *   box_in,
-    std::shared_ptr<llama_box>  box_ref_in) :
-    model(model), hparams(hparams), v_trans(v_trans), box(box_ref_in ? box_ref_in.get() : box_in), box_ref(std::move(box_ref_in)),
+    std::shared_ptr<llama_box>  box_ref_in,
+    std::shared_ptr<llama_box>  box_own_in) :
+    model(model), hparams(hparams), v_trans(v_trans), box(box_ref_in ? box_ref_in.get() : (box_own_in ? box_own_in.get() : box_in)),
+    box_ref(std::move(box_ref_in)), box_own(std::move(box_own_in)),
     n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), swa_type(swa_type),
     other(static_cast<llama_kv_cache *>(mem_other)),
     v_cells_impl(other ? other->v_cells_impl : std::make_shared<llama_kv_cells_vec>()),
@@ -247,7 +249,7 @@ llama_kv_cache::llama_kv_cache(
             // views of the whole box, read and written through the rows of the cells, see cell_row()
             ggml_tensor * k = box->get_k(il);
             ggml_tensor * v = box->get_v(il);
-            GGML_ASSERT(k && v && k->type == type_k && v->type == type_v);
+            GGML_ASSERT(k && (v || !has_v) && k->type == type_k);
 
             map_layer_ids[il] = layers.size();
 
@@ -411,6 +413,10 @@ void llama_kv_cache::clear(bool data) {
             ggml_backend_buffer_clear(buf.get(), 0);
         }
     }
+
+    if (box_own) {
+        box_own->clear();
+    }
 }
 
 bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
@@ -479,7 +485,32 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
         }
     }
 
+    if (box_own) {
+        // all positions of a seq: its blocks go back to the box, except those holding cells of other seqs
+        if (p0 == 0 && p1 == std::numeric_limits<llama_pos>::max()) {
+            for (llama_seq_id s = seq_id >= 0 ? seq_id : 0; s < (seq_id >= 0 ? seq_id + 1 : (llama_seq_id) n_seq_max); ++s) {
+                box_own->seq_release(s);
+            }
+        }
+
+        // blocks held for other seqs may be empty now
+        box_own->reclaim();
+    }
+
     return true;
+}
+
+bool llama_kv_cache::box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) {
+    GGML_ASSERT(box_own);
+
+    // no recurrent layers, no state
+    return box_own->reserve(seq_id, n_input, n_output, nullptr);
+}
+
+void llama_kv_cache::box_reserve_drop(llama_seq_id seq_id) {
+    GGML_ASSERT(box_own);
+
+    box_own->reserve_drop(seq_id);
 }
 
 void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
@@ -598,6 +629,14 @@ void llama_kv_cache::seq_keep(llama_seq_id seq_id) {
     // If we freed up a slot, set head to it so searching can start there.
     if (new_head != cells.size() && new_head < head) {
         head = new_head;
+    }
+
+    if (box_own) {
+        for (llama_seq_id s = 0; s < (llama_seq_id) n_seq_max; ++s) {
+            if (s != seq_id) {
+                box_own->seq_release(s);
+            }
+        }
     }
 }
 
@@ -730,6 +769,10 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache::memory_breakdown() 
         }
     }
 
+    if (box_own) {
+        ret[ggml_backend_buffer_get_type(box_own->get_buffer())] += box_own->get_total_bytes();
+    }
+
     return ret;
 }
 
@@ -785,8 +828,9 @@ llama_memory_context_ptr llama_kv_cache::init_update(llama_context * lctx, bool 
 llama_kv_cache::slot_info_vec_t llama_kv_cache::prepare(const std::vector<llama_ubatch> & ubatches) {
     llama_kv_cache::slot_info_vec_t res;
 
-    // a draft context fills the blocks of its sequences, a sequence short of empty cells takes a block
-    if (box_ref) {
+    // a draft context, or the cache that owns the box, fills the blocks of its sequences: a sequence short of empty cells
+    // takes a block
+    if (box_ref || box_own) {
         std::map<llama_seq_id, uint32_t> n_new;
         for (const auto & ubatch : ubatches) {
             for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
@@ -3795,6 +3839,10 @@ const ggml_fp16_t * llama_kv_cache_context::fill_kq_mask_scratch(const llama_uba
 
 bool llama_kv_cache_context::kv_idx_supported() const {
     return kv->kv_idx_supported();
+}
+
+bool llama_kv_cache_context::has_box() const {
+    return kv->get_box() != nullptr;
 }
 
 void llama_kv_cache_context::get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const {

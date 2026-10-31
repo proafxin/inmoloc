@@ -124,6 +124,17 @@ struct llama_memory_i {
     virtual std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const = 0;
 
     //
+    // elastic memory, see llama_box
+    //
+
+    // the box this memory owns, nullptr when it has none
+    virtual std::shared_ptr<llama_box> get_box_shared() const { return nullptr; }
+
+    // admission of a request: its state and its input, and the output it may generate, see llama_box::reserve()
+    virtual bool box_reserve(llama_seq_id /*seq_id*/, uint32_t /*n_input*/, uint32_t /*n_output*/) { return false; }
+    virtual void box_reserve_drop(llama_seq_id /*seq_id*/) {}
+
+    //
     // state write/read
     //
 

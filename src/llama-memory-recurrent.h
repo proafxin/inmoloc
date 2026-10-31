@@ -30,7 +30,9 @@ public:
                          bool   rs_replay_req, // replay if the model supports it, see rs_replay
         const layer_filter_cb & filter,
         // the elastic memory that holds the states, see llama_box: mem_size is its pages then
-                    llama_box * box = nullptr);
+                    llama_box * box = nullptr,
+        // the elastic memory this memory owns, a model whose only memory is the recurrent states
+        std::shared_ptr<llama_box> box_own = nullptr);
 
     ~llama_memory_recurrent() = default;
 
@@ -59,6 +61,11 @@ public:
     llama_pos seq_pos_max(llama_seq_id seq_id) const override;
 
     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override;
+
+    std::shared_ptr<llama_box> get_box_shared() const override { return box_own; }
+
+    bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override;
+    void box_reserve_drop(llama_seq_id seq_id) override;
 
     bool prepare(const std::vector<llama_ubatch> & ubatches);
 
@@ -189,6 +196,9 @@ public:
     //
 
     llama_box * box = nullptr;
+
+    // the box of a model whose only memory is this one
+    std::shared_ptr<llama_box> box_own;
 
     // per seq: a state that the seq shared (seq_cp) when it took a cell of its own, read by the next step of the seq,
     // which writes the cell of the seq, see box_prepare(); -1 when the seq reads its own cell

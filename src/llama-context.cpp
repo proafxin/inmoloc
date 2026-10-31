@@ -442,18 +442,19 @@ llama_context::llama_context(
 
         // an MTP draft on the same model keeps its tokens in the elastic memory of its target
         if (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP && params.ctx_other) {
-            if (auto * mem_hyb = dynamic_cast<llama_memory_hybrid *>(llama_get_memory(params.ctx_other)); mem_hyb) {
-                params_mem.box = mem_hyb->get_box_shared();
+            if (auto * mem_other = llama_get_memory(params.ctx_other); mem_other) {
+                params_mem.box = mem_other->get_box_shared();
             }
         }
 
         memory.reset(model.create_memory(params_mem, cparams));
 
         // the elastic memory: a box of blocks read through lists of its rows only, see llama_box
-        const auto * mem_hyb = dynamic_cast<const llama_memory_hybrid *>(memory.get());
         const auto * mem_kv  = dynamic_cast<const llama_kv_cache *>(memory.get());
 
-        const llama_box * box = mem_hyb ? mem_hyb->get_box() : (mem_kv ? mem_kv->get_box() : nullptr);
+        const auto box_own = memory ? memory->get_box_shared() : nullptr;
+
+        const llama_box * box = box_own ? box_own.get() : (mem_kv ? mem_kv->get_box() : nullptr);
         if (box) {
             // the box sets the cells, not the context size
             cparams.n_ctx     = box->get_n_cells();
@@ -647,7 +648,7 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
     if (const auto * mem_kv = dynamic_cast<const llama_kv_cache *>(memory.get()); mem_kv && mem_kv->get_box() && !cparams.flash_attn) {
         throw std::runtime_error("the elastic memory needs flash attention");
     }
-    if (const auto * mem_hyb = dynamic_cast<const llama_memory_hybrid *>(memory.get()); mem_hyb && mem_hyb->get_box() && !cparams.flash_attn) {
+    if (memory && memory->get_box_shared() && !cparams.flash_attn) {
         throw std::runtime_error("the elastic memory needs flash attention");
     }
 
@@ -981,7 +982,7 @@ uint32_t llama_context::n_seq_max_ubatch() const {
     // the elastic memory reads and writes the states in place, nothing per seq is reserved: the graphs are sized for the
     // most seqs a ubatch can hold, whatever the number of seqs that run at once (n_seq_max only caps the admission);
     // so is the draft context next to it, which decodes the same seqs
-    const bool elastic = (mem_hyb != nullptr && mem_hyb->get_box() != nullptr) ||
+    const bool elastic = (mem != nullptr && mem->get_box_shared() != nullptr) ||
         (cparams.elastic && cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP);
     if (elastic) {
         return std::min<uint32_t>(n_tokens_max, LLAMA_MAX_SEQ);
@@ -4492,9 +4493,7 @@ llama_memory_usage llama_memory_get_usage(llama_memory_t mem) {
     }
 
     // the elastic memory: the cells of the pages that hold tokens or states are used, see llama_box
-    if (const auto * m = dynamic_cast<const llama_memory_hybrid *>(mem); m && m->get_box()) {
-        const auto * box = m->get_box();
-
+    if (const auto box = mem ? mem->get_box_shared() : nullptr; box) {
         res.kv_used = (box->get_n_blocks() - box->n_free())*llama_box::n_block_tokens;
         res.rs_size = 0;
         res.rs_used = 0;
@@ -4504,12 +4503,10 @@ llama_memory_usage llama_memory_get_usage(llama_memory_t mem) {
 }
 
 bool llama_memory_box_get_info(llama_memory_t mem, llama_memory_box_info * info) {
-    const auto * m = dynamic_cast<const llama_memory_hybrid *>(mem);
-    if (!m || !m->get_box()) {
+    const auto box = mem ? mem->get_box_shared() : nullptr;
+    if (!box) {
         return false;
     }
-
-    const auto * box = m->get_box();
 
     info->block_tokens = llama_box::n_block_tokens;
     info->n_blocks     = box->get_n_blocks();
@@ -4522,16 +4519,14 @@ bool llama_memory_box_get_info(llama_memory_t mem, llama_memory_box_info * info)
 }
 
 bool llama_memory_box_reserve(llama_memory_t mem, llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) {
-    auto * m = dynamic_cast<llama_memory_hybrid *>(mem);
-    GGML_ASSERT(m && m->get_box());
+    GGML_ASSERT(mem && mem->get_box_shared());
 
-    return m->box_reserve(seq_id, n_input, n_output);
+    return mem->box_reserve(seq_id, n_input, n_output);
 }
 
 void llama_memory_box_reserve_drop(llama_memory_t mem, llama_seq_id seq_id) {
-    auto * m = dynamic_cast<llama_memory_hybrid *>(mem);
-    if (m && m->get_box()) {
-        m->box_reserve_drop(seq_id);
+    if (mem && mem->get_box_shared()) {
+        mem->box_reserve_drop(seq_id);
     }
 }
 
