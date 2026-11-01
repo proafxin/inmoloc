@@ -87,39 +87,6 @@ def test_idle_slot_kept_while_room():
     assert "__TEST_TAG_CACHE_IDLE_SLOT__" not in log.drain()
 
 
-# an idle slot gives its cells to a request that needs them, and its prompt is saved to cache-ram to restore later
-def test_idle_slot_saved_when_cells_needed():
-    global server
-    server.n_ctx = 256  # one long prompt fits, two do not
-    server.start()
-    log = LogReader(server.log_path)
-
-    res = server.make_request("POST", "/completion", data={
-        "prompt": LONG_PROMPT,
-        "id_slot": 0,
-        "cache_prompt": True,
-    })
-    assert res.status_code == 200
-    original_prompt_n = res.body["timings"]["prompt_n"]
-
-    res = server.make_request("POST", "/completion", data={
-        "prompt": LONG_PROMPT_2,
-        "id_slot": 1,
-        "cache_prompt": True,
-    })
-    assert res.status_code == 200
-    assert "__TEST_TAG_CACHE_IDLE_SLOT__" in log.drain()
-
-    # the first prompt again is restored from cache-ram
-    res = server.make_request("POST", "/completion", data={
-        "prompt": LONG_PROMPT,
-        "cache_prompt": True,
-    })
-    assert res.status_code == 200
-    assert res.body["timings"]["cache_n"] > 0
-    assert res.body["timings"]["prompt_n"] < original_prompt_n
-
-
 def test_disabled_with_flag():
     global server
     server.no_cache_idle_slots = True

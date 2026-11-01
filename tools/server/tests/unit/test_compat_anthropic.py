@@ -11,10 +11,7 @@ server: ServerProcess
 def get_test_image_base64() -> str:
     """Get a test image in base64 format"""
     # Use the same test image as test_vision_api.py
-    IMG_URL = "https://huggingface.co/ggml-org/tinygemma3-GGUF/resolve/main/test/11_truck.png"
-    response = requests.get(IMG_URL)
-    response.raise_for_status()
-    return base64.b64encode(response.content).decode("utf-8")
+    return base64.b64encode(cached_file_bytes(IMG_URL_TRUCK)).decode("utf-8")
 
 @pytest.fixture(autouse=True)
 def create_server():
@@ -31,7 +28,6 @@ def vision_server():
     """Separate fixture for vision tests that require multimodal support"""
     global server
     server = ServerPreset.tinygemma3()
-    server.offline = False  # Allow downloading the model
     server.model_alias = "tinygemma3-anthropic"
     server.n_slots = 1
     return server

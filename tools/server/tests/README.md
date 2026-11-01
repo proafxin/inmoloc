@@ -77,8 +77,8 @@ $ gdb --args ../../../build/bin/local-inference-server \
     --host 127.0.0.1 --port 8080 \
     --temp 0.8 --seed 42 \
     --hf-repo ggml-org/models --hf-file tinyllamas/stories260K.gguf \
-    --batch-size 32 --no-slots --alias tinyllama-2 --ctx-size 512 \
-    --parallel 2 --n-predict 64
+    --batch-size 32 --no-slots --alias tinyllama-2 \
+    --max-output-tokens 64 --vram-budget 2G
 ```
 And a break point can be set in before running:
 ```console

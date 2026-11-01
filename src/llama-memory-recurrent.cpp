@@ -31,6 +31,12 @@ llama_memory_recurrent::llama_memory_recurrent(
                 llama_box * box_in,
     std::shared_ptr<llama_box> box_own_in) :
     box(box_own_in ? box_own_in.get() : box_in), box_own(std::move(box_own_in)), hparams(model.hparams), n_seq_max(n_seq_max) {
+    // with the elastic memory, the sequences are what fits in it
+    if (box) {
+        n_seq_max       = box->get_n_seq_max();
+        this->n_seq_max = n_seq_max;
+    }
+
     const int32_t n_layer = hparams.n_layer();
 
     head = 0;

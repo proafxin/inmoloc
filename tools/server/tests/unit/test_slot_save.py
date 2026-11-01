@@ -218,14 +218,8 @@ def test_slot_erase():
 # Erase remains gated on the slot's content.
 #
 
-IMG_URL_CAT = "https://huggingface.co/ggml-org/tinygemma3-GGUF/resolve/main/test/91_cat.png"
-IMG_URL_TRUCK = "https://huggingface.co/ggml-org/tinygemma3-GGUF/resolve/main/test/11_truck.png"
-
-
 def _get_img_base64(url: str) -> str:
-    response = requests.get(url)
-    response.raise_for_status()  # Raise an exception for bad status codes
-    return base64.b64encode(response.content).decode("utf-8")
+    return base64.b64encode(cached_file_bytes(url)).decode("utf-8")
 
 
 @pytest.fixture
@@ -474,10 +468,8 @@ def test_slot_save_restore_image_payload_larger_than_context(mmproj_server):
     server.swa_full = True
     server.start()
 
-    # the slot context, as the server computed it (n_ctx split across the slots)
-    res = server.make_request("GET", "/props")
-    assert res.status_code == 200
-    n_ctx_slot = res.body["default_generation_settings"]["n_ctx"]
+    # the prompt length to grow to: any payload longer than this makes the point, and it has to fit in the elastic memory
+    n_ctx_slot = 1024
 
     # a filler token, used to grow the prompt up to the slot context
     res = server.make_request("POST", "/tokenize", data={"content": " hello" * 8})
@@ -789,6 +781,7 @@ def test_slot_restore_checkpoints_draft_kv_type_change(swa_server, ctkd_restore)
     server.model_draft_hf_repo = "ggml-org/tinygemma3-GGUF:Q8_0"  # same file as the target, already in the HF cache
     server.spec_type = "draft-simple"
     server.ctkd = "f16"
+    server.vram_budget = "4G"  # the draft model holds a whole context window of its own
     server.start()
 
     base = "The quick brown fox jumps over the lazy dog. " * 20

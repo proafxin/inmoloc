@@ -17,6 +17,7 @@ inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps
 llama.cpp and vLLM are as of the versions in [the comparison](#compared-with-llamacpp-and-vllm). The models that use elastic memory are listed under [Compatibility](#compatibility).
 
 - **No slot count or context size to guess.** llama.cpp needs `--parallel` and `--ctx-size` chosen by hand, and vLLM a fraction of GPU memory, and a wrong choice wastes memory or fails requests. inmoloc needs a memory budget and an output limit.
+- **No fixed limit on requests at once.** llama.cpp stops at 256 sequences. With elastic memory the only limit is the memory that requests take, and nothing is set aside for requests that have not arrived.
 - **Long and short requests share all the memory.** llama.cpp splits its cache into fixed parts by default, so a long request cannot use what another part leaves idle. With elastic memory, any mix of requests fits as long as its total size does.
 - **A full memory does not fail or undo running requests.** When llama.cpp's cache fills, every active request fails, and vLLM preempts requests that then have to recompute. With elastic memory, running requests never run out of memory, and new ones wait.
 - **Large requests do not hold up small ones.** In an arrival-order queue like vLLM's, smaller requests wait behind a large one. inmoloc starts the earliest request that fits.
@@ -69,6 +70,7 @@ The options below are specific to inmoloc. `--n-predict`, `--fit`, `--fit-target
 | --- | --- | --- |
 | `--vram-budget SIZE` | free device memory | Device memory the server may use, summed over the devices the model runs on (e.g. `22G`). |
 | `--max-output-tokens N` | required with elastic memory | The most tokens a request generates. A request's `max_tokens` is capped at it, and a request without `max_tokens` uses it. |
+| `--ubatch-size N` | `512` | The most tokens in one GPU step. It sets the compute memory of the model and of an MTP draft, which are fixed costs of the budget, and not how many requests run. |
 | `--ctx-size N` | automatic | Without elastic memory, the most tokens the KV cache holds; without it the cache is sized from the budget. Not used with elastic memory. |
 | `--parallel N` | auto | Upper limit on requests at once; the budget may lower it. No effect with elastic memory, where what runs is what fits. |
 | `--prefix-share`, `--no-prefix-share` | enabled | Let a new request start from another request's cached prefix. |
@@ -77,13 +79,32 @@ The options below are specific to inmoloc. `--n-predict`, `--fit`, `--fit-target
 | `--gpu-wait {spin,yield,block}` | driver | How a thread waits for the GPU (CUDA). `block` sleeps and frees the CPU core. |
 | `--slow-loop-ms N` | `1000` | Log a time breakdown of server iterations slower than N ms. `0`: off. |
 
-Unless `--gpu-layers` says otherwise, all layers go on the device, and a model that does not fit there fails at load instead of running partly on the CPU. `--flash-attn` does not apply to elastic memory.
+Unless `--gpu-layers` says otherwise, all layers go on the device, and a model that does not fit there fails at load instead of running partly on the CPU. `--flash-attn` does not apply to elastic memory. When a budget is more than the device has free, 128 MiB of the device stay free, since allocations fail in the last of its memory.
 
 ## Measured
 
-### Elastic memory
+### Generation
 
-On one RTX 5090 laptop GPU (24 GiB) with Qwen3.8-27B, MTP drafting of 2 tokens, replay rollback, a q8_0 cache and `--vram-budget 22826M`, N requests of 64 to 2048 input tokens and 32 to 512 output tokens were sent at once, one run per level:
+On one RTX 5090 laptop GPU (24 GiB) with Qwen3.8-27B, MTP drafting of 2 tokens, replay rollback, a q8_0 cache and `--vram-budget 22826M`, N requests were sent at once, each with its own text of about 64 tokens and each generating 512 tokens, one run per level. Time to first token counts from when the server starts processing a request; the wait before that is listed apart.
+
+| Requests | Tokens/s | Tokens/s per request | Time to first token | Wait | Median between tokens | Longest gap | Failed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 43.2 | 44.2 | 0.26 s | 0.01 s | 50 ms | 59 ms | 0 |
+| 2 | 60.0 | 32.1 | 0.37 s | 0.00 s | 68 ms | 78 ms | 0 |
+| 4 | 169.9 | 46.3 | 0.67 s | 0.01 s | 49 ms | 72 ms | 0 |
+| 8 | 262.5 | 37.9 | 1.28 s | 0.12 s | 60 ms | 716 ms | 0 |
+| 16 | 339.3 | 25.7 | 2.73 s | 0.12 s | 88 ms | 1389 ms | 0 |
+| 32 | 333.2 | 21.7 | 2.63 s | 9.01 s | 118 ms | 1779 ms | 0 |
+| 64 | 379.6 | 19.0 | 1.77 s | 28.87 s | 117 ms | 2063 ms | 0 |
+
+- **Scaling**: throughput rises to 16 requests and holds from there, with more requests waiting for memory.
+- **Memory**: 1033 blocks of 128 tokens, about 4.8 GiB, and a state takes 37 blocks, so at most 27 requests of this size run at once. At `--ubatch-size 512`, compute takes 528 MiB and the draft 1011 MiB.
+- **Startup**: ready in 15 seconds.
+- **Open**: two requests run slower per request than one or four, and a burst of new requests stalls the running ones for up to 2 seconds. The cause of the first is not known yet.
+
+### Mixed requests
+
+On an earlier build, on the same GPU and settings, N requests of 64 to 2048 input tokens and 32 to 512 output tokens were sent at once, one run per level:
 
 | Requests | Tokens/s | Seconds per request | Median between tokens | Failed |
 | --- | --- | --- | --- | --- |
@@ -95,9 +116,9 @@ On one RTX 5090 laptop GPU (24 GiB) with Qwen3.8-27B, MTP drafting of 2 tokens, 
 | 32 | 178.9 | 1.79 | 125 ms | 0 |
 | 64 | 155.7 | 1.75 | 126 ms | 0 |
 
-Each level draws its own request sizes and tokens/s counts output only, so compare levels by seconds per request. Past the point where memory is full, more requests wait and throughput holds.
+Each level drew its own request sizes and tokens/s counts output only. At 64 requests the output rate falls below that of 32, while those requests asked for 15% less output and 11% more input and the rate of input and output tokens together rose from 878 to 945 per second. Why output falls under a mix is still open.
 
-- **Memory**: 5675 MiB of elastic memory, with a state of 172 MiB and 4.8 MiB per block of 128 tokens. The draft takes 278 MiB of fixed memory, and its tokens live in the blocks.
+- **Memory**: 5675 MiB of elastic memory, with a state of 172 MiB and 4.8 MiB per block of 128 tokens. The draft took 278 MiB of fixed memory, and its tokens live in the blocks.
 - **Requests at once**: about 20 on average, set by what the requests take and not by a number chosen at startup.
 - **GPU limits**: during the run the GPU held 1700 to 2100 of 3090 MHz under its power cap, and reached 89°C. Results on this machine differ between sessions.
 
@@ -156,6 +177,7 @@ llama.cpp at commit 56381e407 (2026-09-12); vLLM as of 2026-10-15.
 | Startup | Loads the model | Profiles memory, captures CUDA graphs, compiles the model | Loads the model; with elastic memory, no dry runs |
 | GPU memory taken | What the model and context need | A fixed fraction (`--gpu-memory-utilization`) | What the model and context need, within `--vram-budget` |
 | KV cache | `--parallel` fixed parts by default, shared with `--kv-unified` | Shared pool of blocks | Shared, per token |
+| Requests at once | `--parallel`, at most 256 | A configured limit | Elastic memory: what fits, with no fixed limit |
 | Memory per request | Fixed at startup | Fixed at startup | Taken at admission with elastic memory, else fixed at startup |
 | Cache full | Every active request fails | Newest requests preempted | Elastic memory: requests wait, running ones never run out. Other models: newest requests preempted |
 | Waiting requests | Wait for a slot; waiting requests are offered again when one frees | Arrival-order queue | Elastic memory: no slots, a queue partitioned by cost in blocks; the earliest request that fits starts |
@@ -169,13 +191,13 @@ llama.cpp at commit 56381e407 (2026-09-12); vLLM as of 2026-10-15.
 
 - **Models**: GGUF models supported by llama.cpp at the base commit, see [docs/models.md](docs/models.md).
 - **API**: OpenAI-compatible chat completions, completions and embeddings, see [the server documentation](tools/server/README.md).
-- **Hardware and backends**: the same as llama.cpp: all its backends build and run, on the same GPUs and CPUs. Elastic memory needs all layers on one device for now, and is tested on CUDA only; prompts are read faster on Turing or newer, whose tensor core kernels read them through one list. Per-request attention and `--gpu-wait` are NVIDIA only (per-request attention for prompt chunks needs Turing or newer).
+- **Hardware and backends**: all of llama.cpp's backends build, but serving is for GPUs: elastic memory needs all layers on one device for now, is tested on CUDA only, and does not serve from the CPU; prompts are read faster on Turing or newer, whose tensor core kernels read them through one list. Per-request attention and `--gpu-wait` are NVIDIA only (per-request attention for prompt chunks needs Turing or newer).
 - **Elastic memory by model**: attention models with one KV cache, sliding-window models, recurrent models and hybrid models use it, including hybrid models with sliding-window caches. K-only MLA models are not tested on it yet. Models with sparse attention caches (MSA, DSA, DSV4) and hybrid models with indexer caches use a KV cache and per-request state sized at startup.
 - **Multiple GPUs**: llama.cpp's multi-GPU modes work (see [Multi-GPU](docs/multi-gpu.md)); the budget is summed over devices, and multi-GPU serving is not tested yet.
 
 ## Coming from llama.cpp
 
-Most `llama-server` command lines run unchanged under the new name. To let inmoloc size the server for you, replace the fixed sizes with a memory budget:
+`llama-server` command lines need the new name and `--max-output-tokens`, and those with `--n-predict` or the `--fit` options need those removed. To let inmoloc size the server for you, replace the fixed sizes with a memory budget:
 
 ```sh
 # llama.cpp
@@ -200,7 +222,7 @@ local-inference-server -m model.gguf -ngl 999 --max-output-tokens 512 --vram-bud
 | `llamacpp:*` metrics | `local_inference:*` |
 | `ghcr.io/ggml-org/llama.cpp:server-cuda` | `ghcr.io/proafxin/inmoloc:latest` |
 
-The HTTP API, GGUF models and chat templates are the same. The C API is source compatible; bindings that copy the `llama_context_params` layout need updating. All option changes are listed in [differences from llama.cpp](docs/differences-from-llama.cpp.md#options).
+The HTTP API, GGUF models and chat templates are the same. The C API has additions, and `llama_max_parallel_sequences()` is removed since there is no fixed limit; bindings that copy the `llama_context_params` layout need updating. All option changes are listed in [differences from llama.cpp](docs/differences-from-llama.cpp.md#options).
 
 ## Documentation
 

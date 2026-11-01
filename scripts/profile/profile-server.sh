@@ -56,7 +56,7 @@ until curl -sf "localhost:$port/health" >/dev/null; do
   sleep 2
 done
 python3 scripts/bench-server-concurrency.py --url "http://localhost:$port" --levels 128 --seed 0 \
-  --prompt-tokens 64 --prompt-tokens-max 2048 --max-tokens 32 --max-tokens-max 512 || true
+  --prompt-tokens 64-2048 || true
 docker wait "prof-$name" >/dev/null
 docker logs "prof-$name" > "$out/$name-server.log" 2>&1
 docker rm "prof-$name" >/dev/null

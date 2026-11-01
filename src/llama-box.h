@@ -66,10 +66,16 @@ public:
 
     // a box of `bytes` bytes, or with the memory of a cache of n_tokens cells and n_states states when bytes is 0; draft
     // is the layer of an MTP draft that keeps its tokens in the blocks, nullptr for none; no memory is taken until alloc()
-    llama_box(std::vector<attn_layer> attn, std::vector<recr_layer> recr, const attn_layer * draft, size_t bytes, uint32_t n_tokens, uint32_t n_states, uint32_t n_seq_max);
+    llama_box(std::vector<attn_layer> attn, std::vector<recr_layer> recr, const attn_layer * draft, size_t bytes, uint32_t n_tokens, uint32_t n_states);
 
     // takes the buffer from buft and creates the views; a dry run (no_alloc) takes none
     void alloc(ggml_backend_buffer_type_t buft, bool no_alloc);
+
+    // the box was created with no buffer: it takes its real size, at most what it was created with, and its buffer; the
+    // tensors of the views stay the same ones
+    void finalize(size_t bytes);
+
+    uint32_t n_blocks_max = 0;
 
     //
     // layout
@@ -77,6 +83,9 @@ public:
 
     size_t   get_block_bytes()  const { return block_bytes; }
     uint32_t get_n_blocks()     const { return n_blocks; }
+
+    // sequence ids are kept per block, like the free list: a sequence that runs holds a block
+    uint32_t get_n_seq_max()    const { return (uint32_t) seqs.size(); }
     uint32_t get_state_blocks() const { return state_blocks; } // the blocks one state covers, rounded up
     size_t   get_state_bytes()  const { return state_bytes; }
     size_t   get_total_bytes()  const { return (size_t) n_blocks*block_bytes; }
@@ -108,6 +117,10 @@ public:
     // whether the device reads the rows of a prompt through one list, else every token reads through ranges of its cells
     void set_row_lists(bool value) { row_lists = value; }
     bool has_row_lists() const { return row_lists; }
+
+    // whether the device has no kernel that reads the rows of these layers in place: attention copies them
+    void set_row_copies(bool value) { row_copies = value; }
+    bool has_row_copies() const { return row_copies; }
 
     // unit index of a row of the state s, recurrent layer l (recr_index()): conv row k, the scan row, replay input half h
     int64_t r_row(int32_t s, uint32_t l, uint32_t k) const;
@@ -189,7 +202,8 @@ private:
     size_t block_bytes    = 0;
     size_t rows_per_block = 0; // block_bytes/row_bytes
 
-    bool row_lists = false;
+    bool row_lists  = false;
+    bool row_copies = false;
 
     size_t row_bytes_draft      = 0; // one K or V row of the draft layer, 0 without one
     size_t rows_per_block_draft = 0;
@@ -213,6 +227,8 @@ private:
     ggml_context_ptr        ctx;
     ggml_backend_buffer_ptr buf;
     ggml_tensor *           pool = nullptr;
+
+    ggml_backend_buffer_type_t buft = nullptr;
 
     std::vector<ggml_tensor *> t_k; // by model layer, nullptr for the others
     std::vector<ggml_tensor *> t_v;
@@ -274,6 +290,7 @@ std::unique_ptr<llama_box> llama_box_make(
                      bool   rs_replay_req,
                      bool   offload,
                    size_t   box_bytes,
+                     bool   box_deferred,
                      bool   box_draft,
                 ggml_type   box_draft_type_k,
                 ggml_type   box_draft_type_v,

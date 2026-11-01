@@ -26,7 +26,8 @@
     { "name": "elastic3", "kind": "inmoloc", "image": "inmoloc:elastic3", "args": "--rs-rollback replay --max-output-tokens 512" },
     { "name": "elastic3-bs", "kind": "inmoloc", "image": "inmoloc:elastic3", "args": "--rs-rollback replay --max-output-tokens 512 --backend-sampling" },
     { "name": "elastic4", "kind": "inmoloc", "image": "inmoloc:elastic4", "args": "--rs-rollback replay --max-output-tokens 512" },
-    { "name": "elastic5", "kind": "inmoloc", "image": "inmoloc:elastic5", "args": "--rs-rollback replay --max-output-tokens 512" }
+    { "name": "elastic5", "kind": "inmoloc", "image": "inmoloc:elastic5", "args": "--rs-rollback replay --max-output-tokens 512" },
+    { "name": "elastic18", "kind": "inmoloc", "image": "inmoloc:elastic18", "args": "--rs-rollback replay --max-output-tokens 512" }
   ],
 
   "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"], ["current", "port10"], ["current", "port12"], ["replay", "current"], ["replay", "port21-replay"], ["current", "port21"], ["elastic2", "replay"], ["elastic2-bs", "elastic2"], ["elastic3-bs", "elastic3"], ["elastic4", "elastic3"]],
@@ -37,10 +38,10 @@
   },
 
   "workloads": {
-    "mixed":    { "prompt_tokens": 64,   "prompt_tokens_max": 2048, "max_tokens": 32, "max_tokens_max": 512 },
-    "short":    { "prompt_tokens": 256,  "max_tokens": 256 },
-    "long-in":  { "prompt_tokens": 4096, "max_tokens": 256 },
-    "long-out": { "prompt_tokens": 256,  "max_tokens": 1024 }
+    "generate": { "prompt_tokens": 64 },
+    "mixed":    { "prompt_tokens": "64-2048" },
+    "short":    { "prompt_tokens": 256 },
+    "long-in":  { "prompt_tokens": 4096 }
   },
 
   "models": [
@@ -98,7 +99,7 @@
       "common_args": "--mmproj /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-GGUF-mmproj.gguf --chat-template-file /models/PaddleOCR-VL-1.6/chat_template.jinja --cache-type-k bf16 --cache-type-v bf16 -fa on --cache-ram 0",
       "llamacpp_args": "-c 184320 --parallel 45",
       "inmoloc_args": "--vram-budget 5G",
-      "vision": { "images": "", "n_requests": 256, "prompt": "OCR:", "max_tokens": 1024 },
+      "vision": { "images": "", "n_requests": 256, "prompt": "OCR:" },
       "levels": [128]
     }
   ]

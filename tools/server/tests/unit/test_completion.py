@@ -230,7 +230,7 @@ def test_nocache_long_input_prompt():
     global server
     server.start()
     res = server.make_request("POST", "/completion", data={
-        "prompt": "I believe the meaning of life is"*32,
+        "prompt": "I believe the meaning of life is"*2000, # longer than the context window of the model
         "seed": 42,
         "temperature": 1.0,
         "cache_prompt": False,
@@ -409,6 +409,7 @@ def test_completion_unified(n_ctx, n_slots, n_predict_vals, expected_success):
     server.n_slots = n_slots
     server.kv_unified = True
     server.n_ctx = n_ctx
+    server.n_predict = max(n_predict_vals)
     server.start()
     prompt = "A"
     tasks = []

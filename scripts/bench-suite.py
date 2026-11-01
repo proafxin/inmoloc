@@ -16,7 +16,7 @@
 # The servers are the bench-* services of compose.yaml. Run from the repository root, with nothing else on the GPU:
 #   python3 scripts/bench-suite.py --out ~/Projects/bench-results/run1                  (default models, all targets)
 #   python3 scripts/bench-suite.py --models qwen3.8-mtp --tiers engine --targets base current
-#   python3 scripts/bench-suite.py --models qwen3.8-mtp --tiers server --workloads short long-in long-out mixed
+#   python3 scripts/bench-suite.py --models qwen3.8-mtp --tiers server --workloads generate short long-in mixed
 #   python3 scripts/bench-suite.py --summarize ~/Projects/bench-results/run1     (rebuild the summary from the raw files)
 
 import argparse
@@ -160,10 +160,7 @@ def run_server(model: dict, target: dict, raw: str, workloads: dict, seed: int) 
             out_json = f"{raw}-{name}.json"
             cmd = [sys.executable, os.path.join(ROOT, "scripts", "bench-server-concurrency.py"), "--url", url,
                    "--levels", *map(str, model["levels"]), "--seed", str(seed), "--json", out_json,
-                   "--prompt-tokens", str(w["prompt_tokens"]), "--max-tokens", str(w["max_tokens"]),
-                   "--prompt-tokens-max", str(w.get("prompt_tokens_max", 0)),
-                   "--max-tokens-max", str(w.get("max_tokens_max", 0)),
-                   "--per-client", str(w.get("per_client", 1))]
+                   "--prompt-tokens", str(w["prompt_tokens"])]
             log(f"  workload {name}")
             out = subprocess.run(cmd, capture_output=True, text=True)
             open(f"{raw}-{name}.log", "w").write(out.stdout + out.stderr)
@@ -271,7 +268,7 @@ def run_vision(model: dict, target: dict, raw: str, seed: int) -> dict:
                 "messages": [{"role": "user", "content": [
                     {"type": "image_url", "image_url": {"url": f"data:image/{ext};base64,{data}"}},
                     {"type": "text", "text": cfg["prompt"]}]}],
-                "max_tokens": cfg["max_tokens"], "temperature": 0.0,
+                "temperature": 0.0,
             }
             t0 = time.time()
             r = post_json(url + "/v1/chat/completions", body)

@@ -93,6 +93,10 @@ llama_kv_cache::llama_kv_cache(
     other(static_cast<llama_kv_cache *>(mem_other)),
     v_cells_impl(other ? other->v_cells_impl : std::make_shared<llama_kv_cells_vec>()),
     v_cells(*v_cells_impl) {
+    // with the elastic memory, the sequences are what fits in it
+    if (box) {
+        this->n_seq_max = box->get_n_seq_max();
+    }
 
     // shared cells view the source cache's K/V tensors, so the cell count
     // follows the source allocation: a fitted target can be smaller than the
@@ -160,7 +164,7 @@ llama_kv_cache::llama_kv_cache(
     }
 
     // by default, all sequence ids are mapped to the 0th stream
-    seq_to_stream.resize(LLAMA_MAX_SEQ, 0);
+    seq_to_stream.resize(this->n_seq_max, 0);
 
     if (n_stream > 1) {
         seq_to_stream.resize(n_stream, 0);
@@ -500,6 +504,21 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     return true;
 }
 
+bool llama_kv_cache::box_row_copies() const {
+    return box && box->has_row_copies();
+}
+
+uint32_t llama_kv_cache::attn_n_cells_max() const {
+    return box_row_copies() ? std::min(get_size(), GGML_PAD(hparams.n_ctx_train, 256u)) : get_size();
+}
+
+void llama_kv_cache::box_finalized() {
+    if (box) {
+        v_cells[0].resize(box->get_n_cells());
+        v_heads[0] = 0;
+    }
+}
+
 bool llama_kv_cache::box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) {
     GGML_ASSERT(box_own);
 
@@ -787,7 +806,8 @@ llama_memory_context_ptr llama_kv_cache::init_batch(
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
+            auto ubatch = box_row_copies() ? balloc.split_seq(n_ubatch) :
+                n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
 
             if (ubatch.n_tokens == 0) {
                 break;
@@ -1211,7 +1231,7 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
                 LLAMA_LOG_DEBUG("\n%s\n", ss.c_str());
             }
 
-            for (int s = 0; s < LLAMA_MAX_SEQ; ++s) {
+            for (int s = 0; s < (int) n_seq_max; ++s) {
                 if (cells.seq_pos_min(s) < 0) {
                     continue;
                 }
@@ -1232,7 +1252,7 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
     }
 
     slot_info res = {
-        /*.s0   =*/ LLAMA_MAX_SEQ,
+        /*.s0   =*/ n_seq_max,
         /*.s1   =*/ 0,
         /*.strm =*/ { },
         /*.idxs =*/ { },
@@ -1377,8 +1397,8 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
 
     // keep track of the max sequence position that we would overwrite with this ubatch
     // for non-SWA cache, this would be always empty
-    llama_seq_id seq_pos_max_rm[LLAMA_MAX_SEQ];
-    for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
+    std::vector<llama_seq_id> seq_pos_max_rm(n_seq_max);
+    for (uint32_t s = 0; s < n_seq_max; ++s) {
         seq_pos_max_rm[s] = -1;
     }
 
@@ -1435,7 +1455,7 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
     // note: we want to preserve the invariant that all positions between [pos_min, pos_max] for each sequence
     //       will be present in the cache. so we have to purge any position which is less than those we would overwrite
     //       ref: https://github.com/ggml-org/llama.cpp/pull/13746#issuecomment-2916057092
-    for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
+    for (uint32_t s = 0; s < n_seq_max; ++s) {
         if (seq_pos_max_rm[s] == -1) {
             continue;
         }
@@ -2261,8 +2281,7 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
     const T mask_drop = llama_cast<T>(-INFINITY);
 
     // the min position in the batch for each sequence
-    llama_pos seq_pos_min[LLAMA_MAX_SEQ];
-    std::fill(seq_pos_min, seq_pos_min + LLAMA_MAX_SEQ, INT32_MAX);
+    std::vector<llama_pos> seq_pos_min(args.seq_to_stream.size(), INT32_MAX);
 
     for (uint32_t i = 0; i < ubatch->n_tokens; ++i) {
         const llama_seq_id seq_id = ubatch->seq_id[i][0];
@@ -2523,7 +2542,7 @@ void llama_kv_cache::get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_
 
     const auto & cells = v_cells[0];
 
-    std::bitset<LLAMA_MAX_SEQ> seen;
+    std::vector<bool> seen(n_seq_max, false);
 
     // one list of the cells of all the sequences of the ubatch, one after the other, each token reading a range of it
     // (see set_input_kv_idx()); sized by the cells read, whatever the number of sequences
@@ -2531,8 +2550,8 @@ void llama_kv_cache::get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_
         uint32_t n_all = 0;
         for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
             const llama_seq_id seq_id = ubatch.seq_id[i][0];
-            if (!seen.test(seq_id)) {
-                seen.set(seq_id);
+            if (!seen[seq_id]) {
+                seen[seq_id] = true;
                 n_all += cells.seq_n_cells(seq_id);
             }
         }
@@ -2630,13 +2649,39 @@ void llama_kv_cache::causal_range(const llama_ubatch * ubatch, uint32_t i, bool 
 }
 
 void llama_kv_cache::set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const {
-    GGML_ASSERT(n_stream == 1);
-    GGML_ASSERT(ggml_backend_buffer_is_host(kv_idx->buffer));
     GGML_ASSERT(ggml_backend_buffer_is_host(q_rng->buffer));
+    GGML_ASSERT(q_rng->ne[0] == 3 && q_rng->ne[1] == ubatch->n_tokens);
+
+    fill_kv_idx(kv_idx, (int32_t *) q_rng->data, ubatch, causal_attn);
+}
+
+void llama_kv_cache::set_input_kv_mask(ggml_tensor * kv_idx, ggml_tensor * kv_mask, const llama_ubatch * ubatch, bool causal_attn) const {
+    GGML_ASSERT(ggml_backend_buffer_is_host(kv_mask->buffer));
 
     const uint32_t n_tokens = ubatch->n_tokens;
+    const int64_t  n_idx    = kv_idx->ne[0];
 
-    GGML_ASSERT(q_rng->ne[0] == 3 && q_rng->ne[1] == n_tokens);
+    GGML_ASSERT(kv_mask->ne[0] == n_idx && kv_mask->ne[1] == n_tokens);
+
+    std::vector<int32_t> rng(3*n_tokens);
+
+    fill_kv_idx(kv_idx, rng.data(), ubatch, causal_attn);
+
+    float * data = (float *) kv_mask->data;
+
+    std::fill(data, data + n_idx*n_tokens, -INFINITY);
+
+    // a token sees the range of the list that its ranges say, in the rows copied from the list
+    for (uint32_t i = 0; i < n_tokens; ++i) {
+        std::fill(data + i*n_idx + rng[3*i + 1], data + i*n_idx + rng[3*i + 2], 0.0f);
+    }
+}
+
+void llama_kv_cache::fill_kv_idx(ggml_tensor * kv_idx, int32_t * rng, const llama_ubatch * ubatch, bool causal_attn) const {
+    GGML_ASSERT(n_stream == 1);
+    GGML_ASSERT(ggml_backend_buffer_is_host(kv_idx->buffer));
+
+    const uint32_t n_tokens = ubatch->n_tokens;
 
     // see llama_non_causal_type
     if (!causal_attn && hparams.non_causal_type == LLAMA_NON_CAUSAL_TYPE_SWA_ONLY) {
@@ -2649,14 +2694,13 @@ void llama_kv_cache::set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng,
     const int64_t n_group = kv_idx->ne[1];
 
     int32_t * idx = (int32_t *) kv_idx->data;
-    int32_t * rng = (int32_t *) q_rng->data;
 
     std::fill(idx, idx + n_idx*n_group, 0);
 
     // group of each sequence of the ubatch, its cells in causal order with their positions, and the min position of
     // the sequence in the ubatch
-    std::vector<int32_t>   seq_group(LLAMA_MAX_SEQ, -1);
-    std::vector<llama_pos> seq_pos_min(LLAMA_MAX_SEQ, std::numeric_limits<llama_pos>::max());
+    std::vector<int32_t>   seq_group(n_seq_max, -1);
+    std::vector<llama_pos> seq_pos_min(n_seq_max, std::numeric_limits<llama_pos>::max());
 
     std::vector<std::vector<int32_t>>   group_cells;
     std::vector<std::vector<llama_pos>> group_pos;
@@ -3848,15 +3892,19 @@ bool llama_kv_cache_context::has_box() const {
 void llama_kv_cache_context::get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const {
     kv->get_kv_idx_shape(ubatch, n_idx, n_group);
 
-    // a reserve has no cells yet: its lists take the whole cache, the most a sequence can hold, so that the input
-    // buffers do not grow once the sequences do
+    // a reserve has no cells yet: its lists take the most a ubatch reads, so that the input buffers do not grow once the
+    // sequences do
     if (is_full) {
-        n_idx = kv->get_size();
+        n_idx = kv->attn_n_cells_max();
     }
 }
 
 void llama_kv_cache_context::set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const {
     kv->set_input_kv_idx(kv_idx, q_rng, ubatch, causal_attn);
+}
+
+void llama_kv_cache_context::set_input_kv_mask(ggml_tensor * kv_idx, ggml_tensor * kv_mask, const llama_ubatch * ubatch, bool causal_attn) const {
+    kv->set_input_kv_mask(kv_idx, kv_mask, ubatch, causal_attn);
 }
 
 void llama_kv_cache_context::attn_read_counted_by_graph() const {

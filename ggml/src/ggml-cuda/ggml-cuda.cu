@@ -4832,7 +4832,12 @@ static void ggml_backend_cuda_set_wait(enum ggml_backend_wait wait) {
 }
 #endif // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
 
-// the device memory a cuBLAS handle takes with its workspace, measured once per device on a handle created for it
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+static bool ggml_backend_cuda_dev_process_memory(ggml_backend_dev_t dev, size_t * used);
+#endif
+
+// the device memory a cuBLAS handle takes with its workspace, measured once per device on a handle created for it;
+// by what this process holds
 static size_t ggml_cuda_cublas_cost(int device) {
     static std::mutex mutex;
     static size_t     cost[GGML_CUDA_MAX_DEVICES] = {};
@@ -4841,13 +4846,18 @@ static size_t ggml_cuda_cublas_cost(int device) {
     if (cost[device] == 0) {
         ggml_cuda_set_device(device);
 
-        size_t free_0 = 0;
-        size_t free_1 = 0;
-        size_t total  = 0;
-        CUDA_CHECK(cudaMemGetInfo(&free_0, &total));
+        size_t own_0 = 0;
+        size_t own_1 = 0;
+        bool   own   = false;
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+        ggml_backend_dev_t dev = ggml_backend_reg_dev_get(ggml_backend_cuda_reg(), device);
+        own = ggml_backend_cuda_dev_process_memory(dev, &own_0);
+#endif
         cublasHandle_t handle = nullptr;
         CUBLAS_CHECK(cublasCreate(&handle));
-        CUDA_CHECK(cudaMemGetInfo(&free_1, &total));
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+        own = own && ggml_backend_cuda_dev_process_memory(dev, &own_1);
+#endif
 
         {
             // as in ~ggml_backend_cuda_context: no handle is destroyed while a graph is captured in another thread
@@ -4856,7 +4866,15 @@ static size_t ggml_cuda_cublas_cost(int device) {
             CUBLAS_CHECK(cublasDestroy(handle));
         }
 
-        cost[device] = (free_0 > free_1 ? free_0 - free_1 : 0) + ggml_cuda_cublas_workspace_size(device);
+        // a process the device does not list yet held nothing to compare with; the free memory of the device is no
+        // measure, since it moves with the other processes: then only the workspace is known
+        const size_t taken = own && own_0 > 0 && own_1 > own_0 ? own_1 - own_0 : 0;
+
+        GGML_LOG_INFO("%s: device %d: handle %zu MiB, process %zu -> %zu MiB (%s), workspace %zu MiB\n", __func__, device,
+                taken/(1024*1024), own_0/(1024*1024), own_1/(1024*1024), own ? "measured" : "not measured",
+                ggml_cuda_cublas_workspace_size(device)/(1024*1024));
+
+        cost[device] = taken + ggml_cuda_cublas_workspace_size(device);
     }
     return cost[device];
 }
@@ -4947,13 +4965,8 @@ static size_t ggml_backend_cuda_graph_scratch(ggml_backend_t backend, ggml_cgrap
             }
             if (ctx->scratch_cublas[d][s] && d == ctx->device && ctx->cublas_handles[d][s] == nullptr) {
                 ggml_cuda_set_device(d);
-                size_t free_0 = 0;
-                size_t free_1 = 0;
-                size_t total  = 0;
-                CUDA_CHECK(cudaMemGetInfo(&free_0, &total));
+                ctx->cublas_held += ggml_cuda_cublas_cost(d);
                 ctx->cublas_handle();
-                CUDA_CHECK(cudaMemGetInfo(&free_1, &total));
-                ctx->cublas_held += free_0 > free_1 ? free_0 - free_1 : 0;
             }
             ctx->curr_stream_no = stream_no;
             held += ctx->pools[d][s] ? ctx->pools[d][s]->held() : 0;

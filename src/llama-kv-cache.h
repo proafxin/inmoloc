@@ -172,9 +172,17 @@ public:
 
     llama_box * get_box() const { return box; }
 
+    // whether attention copies the rows of the cells, see llama_cparams::box_gather: a ubatch holds one sequence then, so
+    // that what is copied is bounded by the context window of the model
+    bool box_row_copies() const;
+
+    // the most cells attention reads for a ubatch, what its input lists are reserved for
+    uint32_t attn_n_cells_max() const;
+
     std::shared_ptr<llama_box> get_box_shared() const override { return box_own; }
 
     bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override;
+    void box_finalized() override;
     void box_reserve_drop(llama_seq_id seq_id) override;
 
     // the row of cell c in the K and V tensors
@@ -281,6 +289,12 @@ public:
     // kv_idx: I32 [n_idx, n_group], q_rng: I32 [3, n_tokens]
     void set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const;
 
+    // kv_idx as above, kv_mask: F32 [n_idx, n_tokens], over the rows copied from the list
+    void set_input_kv_mask(ggml_tensor * kv_idx, ggml_tensor * kv_mask, const llama_ubatch * ubatch, bool causal_attn) const;
+
+    // the list of the cells and the range rng [3, n_tokens] of it that each token reads
+    void fill_kv_idx(ggml_tensor * kv_idx, int32_t * rng, const llama_ubatch * ubatch, bool causal_attn) const;
+
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
@@ -362,7 +376,7 @@ private:
     // the box of a model whose only memory is this cache: it takes and gives back the blocks of the sequences
     std::shared_ptr<llama_box> box_own;
 
-    const uint32_t n_seq_max = 1;
+    uint32_t n_seq_max = 1;
     const uint32_t n_stream  = 1;
 
     // required padding
@@ -542,6 +556,9 @@ public:
     bool kv_idx_supported() const;
     void get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const;
     void set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const;
+
+    // the list of the cells, and a mask over the rows copied from it, when the device cannot read the rows in place
+    void set_input_kv_mask(ggml_tensor * kv_idx, ggml_tensor * kv_mask, const llama_ubatch * ubatch, bool causal_attn) const;
 
     // whether the cells are in the elastic memory, see llama_box
     bool has_box() const;

@@ -29,7 +29,10 @@ def stop_server_after_each_test():
 def load_server_presets(configure_worker_port, tmp_path_factory):
     # this will be run once per test session, before any tests
 
-    # serialize model downloads across parallel workers.
+    # serialize model downloads across parallel workers: the first one does them, once.
     root_tmp_dir = tmp_path_factory.getbasetemp().parent
     with FileLock(str(root_tmp_dir / "load_all.lock")):
-        ServerPreset.load_all()
+        done = root_tmp_dir / "load_all.done"
+        if not done.exists():
+            ServerPreset.load_all()
+            done.touch()

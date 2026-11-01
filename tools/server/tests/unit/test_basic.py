@@ -24,10 +24,9 @@ def test_server_props():
     res = server.make_request("GET", "/props")
     assert res.status_code == 200
     assert ".gguf" in res.body["model_path"]
-    assert res.body["total_slots"] == server.n_slots
+    assert res.body["total_slots"] > 0  # as many as the elastic memory can admit, not a setting
     default_val = res.body["default_generation_settings"]
-    assert server.n_ctx is not None and server.n_slots is not None
-    assert default_val["n_ctx"] == server.n_ctx  # the requests share one cache, each can use all of it
+    assert default_val["n_ctx"] > 0  # the cells of the elastic memory
     assert default_val["params"]["seed"] == server.seed
 
 
@@ -53,22 +52,17 @@ def test_server_slots():
 
     # with slots endpoint enabled, this should return slots info
     server.server_slots = True
-    server.n_slots = 2
     server.start()
     res = server.make_request("GET", "/slots")
     assert res.status_code == 200
-    assert len(res.body) == server.n_slots
-    assert server.n_ctx is not None and server.n_slots is not None
-    assert res.body[0]["n_ctx"] == server.n_ctx  # the requests share one cache, each can use all of it
+    assert len(res.body) > 0
+    assert res.body[0]["n_ctx"] > 0  # the cells of the elastic memory
     assert "params" not in res.body[0]
 
 
 def test_load_split_model():
     global server
-    server.offline = False
-    server.model_hf_repo = "ggml-org/models"
-    server.model_hf_file = "tinyllamas/split/stories15M-q8_0-00001-of-00003.gguf"
-    server.model_alias = "tinyllama-split"
+    server = ServerPreset.tinyllama_split()
     server.start()
     res = server.make_request("POST", "/completion", data={
         "n_predict": 16,

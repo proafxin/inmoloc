@@ -7,9 +7,9 @@
 #include <array>
 #include <vector>
 #include <set>
-#include <bitset>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 
 // keep this struct lightweight
 struct llama_ubatch {
@@ -48,7 +48,7 @@ struct llama_ubatch {
     int32_t      *  n_seq_id;   // [n_tokens]         | i   | -
     llama_seq_id ** seq_id;     // [n_tokens]         | s   | s0, s1, seq_id
     llama_seq_id *  seq_id_unq; // [n_seqs_unq]       | s   | seq_id
-    int32_t      *  seq_idx;    // [LLAMA_MAX_SEQ]    | -   | seq_idx
+    int32_t      *  seq_idx;    // [n_seq_max]        | -   | seq_idx
     int8_t       *  output;     // [n_tokens]         | i   | -
 
     struct data_t {
@@ -148,20 +148,33 @@ private:
     std::vector<int8_t>         output;
 
     using pos_set_t = std::set<llama_pos>;
-    using seq_cpl_t = std::vector<bool>;
 
     // helper flag to quickly determine if there are any coupled sequences in the batch
     bool has_cpl = false;
 
     std::vector<pos_set_t> seq_pos; // seq_pos[s]: the set of positions in sequence s
-    std::vector<seq_cpl_t> seq_cpl; // seq_cpl[s0][s1]: if sequence s0 is coupled to sequence s1
+
+    // the pairs (s0, s1) of the batch where sequence s0 is coupled to sequence s1
+    std::vector<std::pair<llama_seq_id, llama_seq_id>> seq_cpl;
 
     using idx_vec_t = std::vector<int32_t>;
-    using seq_set_t = std::bitset<LLAMA_MAX_SEQ>;
+
+    // a set of sequences: their ids, sorted
+    using seq_set_t = std::vector<llama_seq_id>;
+
+    struct seq_set_hash {
+        size_t operator()(const seq_set_t & set) const {
+            size_t res = set.size();
+            for (const llama_seq_id s : set) {
+                res = res*31 + (size_t) s;
+            }
+            return res;
+        }
+    };
 
     std::vector<seq_set_t> seq_set; // seq_set[i]: the sequence set of token i
 
-    std::unordered_map<seq_set_t, idx_vec_t> seq_set_map; // the indices at which the sequence set appears
+    std::unordered_map<seq_set_t, idx_vec_t, seq_set_hash> seq_set_map; // the indices at which the sequence set appears
 
     // batch indices of the output
     std::vector<int32_t> out_ids;

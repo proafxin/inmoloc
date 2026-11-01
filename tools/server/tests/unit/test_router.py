@@ -481,6 +481,7 @@ def test_router_dedup_cache_models():
         os.remove(preset_path)
 
 
+@pytest.mark.slow
 def test_router_remote_preset():
     global server
     server.model_hf_repo = "ggml-org/test-preset-ci"
@@ -539,6 +540,7 @@ def _wait_for_sse_event(collected: list, event_type: str, model: str, timeout: i
     return False
 
 
+@pytest.mark.slow
 def test_router_download_model():
     """Case 1: download a model at the model limit, verify SSE events and GET /models."""
     global server
@@ -587,6 +589,7 @@ def test_router_download_model():
     assert _get_model_status(MODEL_B) == "loaded"
 
 
+@pytest.mark.slow
 def test_router_delete_model():
     """Case 2: delete the downloaded model, verify it disappears from GET /models."""
     global server

@@ -1648,7 +1648,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, int value) {
             params.n_predict = value;
         }
-    ).set_env("LOCAL_INFERENCE_ARG_N_PREDICT"));
+    ).set_env("LOCAL_INFERENCE_ARG_N_PREDICT").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-b", "--batch-size"}, "N",
         string_format("logical maximum batch size (default: %d)", params.n_batch),
@@ -1715,7 +1715,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     add_opt(common_arg(
         {"-kvu", "--kv-unified"},
         {"-no-kvu", "--no-kv-unified"},
-        "the requests processed at once always share one KV cache; accepted for compatibility",
+        "the requests processed at once always share one KV cache: --kv-unified is accepted, --no-kv-unified is refused",
         [](common_params & params, bool value) {
             if (!value) {
                 throw std::invalid_argument("error: the server always shares one KV cache between the requests it processes at once, --no-kv-unified is not supported\n");
@@ -1725,8 +1725,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LOCAL_INFERENCE_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--max-output-tokens"}, "N",
-        "required with the elastic memory: the most tokens a request generates, its max_tokens capped at it; a request "
-        "is admitted with its max_tokens charged, at most this and what the context window leaves after its input",
+        "required with the elastic memory: the most tokens a request generates; a request's max_tokens is capped at it, "
+        "and a request without max_tokens uses it",
         [](common_params & params, int value) {
             if (value <= 0) {
                 throw std::invalid_argument("error: --max-output-tokens must be positive\n");
@@ -2597,7 +2597,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "device memory the server may use, summed over the devices the model runs on, e.g. 10G, 10240M or 10240 (MiB);\n"
         "the weights, the vision encoder, the draft model, the KV cache, the per-request state, the compute buffers and\n"
         "the memory the process holds outside them (e.g. the CUDA context) are measured; with the elastic memory, what the\n"
-        "fixed costs leave is one box that holds the running requests, as many as fit (at most --parallel); otherwise a\n"
+        "fixed costs leave is one region that holds the running requests, as many as fit; otherwise a\n"
         "model with memory per request (e.g. recurrent state, which depends on --rs-rollback) runs the most requests at\n"
         "once (at most --parallel) that fit in the KV cache, a model without it runs --parallel requests that share the\n"
         "KV cache, as many at once as their sizes allow, and the memory left goes to the cache (at most --ctx-size)\n"
@@ -2987,7 +2987,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     string_format("error: unknown value for --fit: '%s'\n", value.c_str()));
             }
         }
-    ).set_env("LOCAL_INFERENCE_ARG_FIT"));
+    ).set_env("LOCAL_INFERENCE_ARG_FIT").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         { "-fitp", "--fit-print" }, "[on|off]",
         string_format("print the estimated required memory ('on' or 'off', default: '%s')", params.fit_params_print ? "on" : "off"),
@@ -3026,14 +3026,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 params.fit_params_target[i] = std::stoull(split_arg[i]) * 1024*1024;
             }
         }
-    ).set_env("LOCAL_INFERENCE_ARG_FIT_TARGET"));
+    ).set_env("LOCAL_INFERENCE_ARG_FIT_TARGET").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         { "-fitc", "--fit-ctx" }, "N",
         string_format("minimum ctx size that can be set by --fit option, default: %" PRIu32, params.fit_params_min_ctx),
         [](common_params & params, int value) {
             params.fit_params_min_ctx = value;
         }
-    ).set_env("LOCAL_INFERENCE_ARG_FIT_CTX"));
+    ).set_env("LOCAL_INFERENCE_ARG_FIT_CTX").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--check-tensors"},
         string_format("check model tensor data for invalid values (default: %s)", params.check_tensors ? "true" : "false"),

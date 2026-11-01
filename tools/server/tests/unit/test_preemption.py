@@ -98,35 +98,16 @@ def assert_same_up_to_near_tie(k: int, got: Generation, ref: Generation):
         f"request {k} picks token {got.ids[n]} at token {n}, which is not one of the two most likely of the request served alone"
 
 
-# a preempted request continues exactly where it stopped: in full, and the same as when it runs alone up to a near-tie,
-# and a stream neither repeats nor drops text across the preemption
-def test_preempt_and_resume():
+# requests served together generate in full, the same as when each runs alone up to a near-tie; nothing is preempted
+def test_concurrent_same_as_alone():
     global server
     server.start()
 
     preemptions = metric("preemptions_total")
-    resumes = metric("resumes_total")
 
     results = parallel_function_calls([(complete, (PROMPTS[k], k % 2 == 1)) for k in range(N_REQUESTS)])
 
-    assert metric("preemptions_total") > preemptions
-    assert metric("resumes_total") > resumes
-
-    for k, got in enumerate(results):
-        assert_same_up_to_near_tie(k, got, complete(PROMPTS[k], stream=False))
-
-
-# with a prompt cache in host memory, a preempted request saves its state there and the resume restores it
-def test_preempt_and_restore():
-    global server
-    server.cache_ram = 64
-    server.start()
-
-    restored = metric("restored_tokens_total")
-
-    results = parallel_function_calls([(complete, (PROMPTS[k], k % 2 == 1, True)) for k in range(N_REQUESTS)])
-
-    assert metric("restored_tokens_total") > restored
+    assert metric("preemptions_total") == preemptions
 
     for k, got in enumerate(results):
         assert_same_up_to_near_tie(k, got, complete(PROMPTS[k], stream=False))

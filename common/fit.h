@@ -68,6 +68,19 @@ bool common_budget_params(
  // the samplers of the sequences when they run in the context, whose graphs are part of what is measured
  const common_params_sampling * sampling = nullptr);
 
+// the elastic memory of a real context created with box_deferred: all of the budget that is left once the weights, the
+// compute buffers of the context, what the process holds and the context of an MTP draft are in; no dry run is needed
+bool common_budget_box(
+                  llama_model * model,
+                llama_context * ctx,
+   const llama_context_params * cparams_dft,
+                           bool   dft_backend_sampling,
+                         size_t   budget,
+                         size_t   budget_used,
+                       size_t *   box_bytes,
+                       size_t *   predicted = nullptr,
+                       size_t *   free_before = nullptr);
+
 // the free device memory of the devices a model runs on, summed
 size_t common_device_memory_free(const llama_model * model);
 

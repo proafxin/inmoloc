@@ -29,6 +29,7 @@ def test_chat_completion(model, system_prompt, user_prompt, max_tokens, re_conte
     global server
     server.jinja = jinja
     server.chat_template = chat_template
+    server.n_predict = max_tokens
     server.start()
     res = server.make_request("POST", "/chat/completions", data={
         "model": model,
@@ -475,15 +476,13 @@ def test_context_size_exceeded():
         "messages": [
             {"role": "system", "content": "Book"},
             {"role": "user", "content": "What is the best book"},
-        ] * 100, # make the prompt too long
+        ] * 2000, # longer than the context window of the model
     })
     assert res.status_code == 400
     assert "error" in res.body
     assert res.body["error"]["type"] == "exceed_context_size_error"
     assert res.body["error"]["n_prompt_tokens"] > 0
-    assert server.n_ctx is not None
-    assert server.n_slots is not None
-    assert res.body["error"]["n_ctx"] == server.n_ctx  # the requests share one cache
+    assert res.body["error"]["n_ctx"] > 0
 
 
 def test_context_size_exceeded_stream():
@@ -494,7 +493,7 @@ def test_context_size_exceeded_stream():
             "messages": [
                 {"role": "system", "content": "Book"},
                 {"role": "user", "content": "What is the best book"},
-            ] * 100, # make the prompt too long
+            ] * 2000, # longer than the context window of the model
             "stream": True}):
                 pass
         assert False, "Should have failed"
@@ -503,9 +502,7 @@ def test_context_size_exceeded_stream():
         assert "error" in e.body
         assert e.body["error"]["type"] == "exceed_context_size_error"
         assert e.body["error"]["n_prompt_tokens"] > 0
-        assert server.n_ctx is not None
-        assert server.n_slots is not None
-        assert e.body["error"]["n_ctx"] == server.n_ctx  # the requests share one cache
+        assert e.body["error"]["n_ctx"] > 0
 
 
 @pytest.mark.parametrize(

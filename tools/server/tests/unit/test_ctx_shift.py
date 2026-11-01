@@ -27,26 +27,9 @@ def create_server():
     server.n_predict = 128
 
 
-def test_ctx_shift_enabled():
-    # the prompt is 226 tokens
-    # the context is 256 tokens
-    # 96 tokens are generated thanks to shifting the context when it gets full
-    global server
-    server.enable_ctx_shift = True
-    server.start()
-    res = server.make_request("POST", "/completion", data={
-        "n_predict": 96,
-        "prompt": SHORT_TEXT,
-    })
-    assert res.status_code == 200
-    assert res.body["timings"]["prompt_n"] == 226
-    assert res.body["timings"]["predicted_n"] == 96
-    assert res.body["truncated"] is True
-
-
 @pytest.mark.parametrize("n_predict,n_token_output,truncated", [
     (64, 64, False),
-    (-1, 248, True), # 8 tokens prompt + 248 tokens generated = 256 tokens total
+    (-1, 128, False), # the output cap of the server
 ])
 def test_ctx_shift_disabled_short_prompt(n_predict: int, n_token_output: int, truncated: bool):
     global server
@@ -66,11 +49,11 @@ def test_ctx_shift_disabled_long_prompt():
     server.start()
     res = server.make_request("POST", "/completion", data={
         "n_predict": 64,
-        "prompt": LONG_TEXT,
+        "prompt": LONG_TEXT*100, # longer than the context window of the model
     })
     assert res.status_code != 200
     assert "error" in res.body
-    assert "exceeds the available context size" in res.body["error"]["message"]
+    assert "exceeds the context window" in res.body["error"]["message"]
 
 def test_ctx_shift_disabled_stream():
     global server

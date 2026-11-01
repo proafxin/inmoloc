@@ -56,6 +56,9 @@ struct llama_context {
     //   - etc.
     void sched_reserve();
 
+    // reserves whether or not something asked for it, e.g. for outputs that changed
+    void sched_reserve_now();
+
     void synchronize();
 
     const llama_model   & get_model()   const;
@@ -77,6 +80,9 @@ struct llama_context {
     uint32_t n_threads_batch() const;
 
     llama_memory_t get_memory() const;
+
+    // allocates an elastic memory created with box_deferred: the cells and the context size follow it
+    bool box_finalize(size_t bytes);
 
     // return true if the memory was updated
     bool memory_update(bool optimize);

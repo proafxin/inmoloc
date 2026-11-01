@@ -108,7 +108,7 @@ int main(int argc, char ** argv) {
     params.embedding = true;
 
     // get max number of sequences per batch
-    const int n_seq_max = llama_max_parallel_sequences();
+    const int n_seq_max = std::max(params.n_parallel, 64);
 
     // if the number of prompts that would be encoded is known in advance, it's more efficient to specify the
     //   --parallel argument accordingly. for convenience, if not specified, we fallback to unified KV cache

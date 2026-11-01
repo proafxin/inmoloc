@@ -339,7 +339,7 @@ void llama_memory_hybrid_idx::set_input_qsa(
 
         int n_seq_present = 0;
 
-        for (int sq = 0; sq < LLAMA_MAX_SEQ && n_seq_present < 2; ++sq) {
+        for (int sq = 0; sq < (int) get_mem_idx()->get_n_seq_max() && n_seq_present < 2; ++sq) {
             if (cells.seq_pos_min(sq) >= 0) {
                 n_seq_present++;
             }

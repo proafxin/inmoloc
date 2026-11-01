@@ -5,8 +5,6 @@
 #include <cstdint>
 #include <vector>
 
-#define LLAMA_MAX_SEQ 256
-
 struct llama_cparams {
     uint32_t n_ctx;           // context size used during inference
     uint32_t n_ctx_seq;       // context for a single sequence
@@ -47,6 +45,8 @@ struct llama_cparams {
     bool auto_kv_rows;
     bool kv_idx_rest;        // with kv_rows: the tokens outside the gather runs (e.g. generation) read the cells of their
                              // sequence through indexed ranges instead of all the cells of the cache with a mask
+    bool box_gather;         // the elastic memory: the device has no kernel that reads these rows in place, so attention
+                             // copies the rows of the sequences of the ubatch and reads them with a mask
     bool fused_gdn_ar;       // use fused gated delta net (autoregressive)
     bool fused_gdn_ch;       // use fused gated delta net (chunked)
     bool auto_fgdn;
@@ -62,6 +62,7 @@ struct llama_cparams {
     bool kv_unified;
     bool elastic;            // the elastic memory, see llama_box
     size_t box_bytes;        // its size, 0 for n_ctx cells and n_rs_cells states
+    bool box_deferred;       // box_bytes is its most, it is allocated by llama_memory_box_finalize()
     bool box_draft;          // an MTP draft keeps its tokens in its blocks
     ggml_type box_draft_type_k;
     ggml_type box_draft_type_v;

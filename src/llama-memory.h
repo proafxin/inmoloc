@@ -134,6 +134,9 @@ struct llama_memory_i {
     virtual bool box_reserve(llama_seq_id /*seq_id*/, uint32_t /*n_input*/, uint32_t /*n_output*/) { return false; }
     virtual void box_reserve_drop(llama_seq_id /*seq_id*/) {}
 
+    // the box has its final size: the cells follow it
+    virtual void box_finalized() {}
+
     //
     // state write/read
     //

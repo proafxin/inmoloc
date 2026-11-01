@@ -85,6 +85,7 @@ public:
 
     bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override { return kv_base->box_reserve(seq_id, n_input, n_output); }
     void box_reserve_drop(llama_seq_id seq_id) override { kv_base->box_reserve_drop(seq_id); }
+    void box_finalized() override { kv_base->box_finalized(); kv_swa->box_finalized(); }
 
     // state write/load
 

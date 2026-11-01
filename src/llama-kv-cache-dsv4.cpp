@@ -116,7 +116,7 @@ static llama_ubatch dsv4_build_raw_write_ubatch(const llama_ubatch & ubatch) {
     data->seq_id.reserve(n_tokens);
     data->seq_id_data.reserve(n_tokens);
     data->seq_id_unq.assign(ubatch.seq_id_unq, ubatch.seq_id_unq + ubatch.n_seqs_unq);
-    data->seq_idx.assign(LLAMA_MAX_SEQ, -1);
+    data->seq_idx.assign(data->seq_id_unq.empty() ? 1 : *std::max_element(data->seq_id_unq.begin(), data->seq_id_unq.end()) + 1, -1);
     data->output.assign(n_tokens, 0);
     if (ubatch.token) {
         data->token.reserve(n_tokens);
@@ -777,7 +777,7 @@ static llama_kv_cache::slot_info_vec_t dsv4_build_comp_sinfos(
 
         const uint32_t ns = (uint32_t) dsv4_comp_graph_n_stream(ubatch, n_stream);
         llama_kv_cache::slot_info sinfo;
-        sinfo.s0 = n_stream > 1 ? LLAMA_MAX_SEQ : 0;
+        sinfo.s0 = n_stream > 1 ? n_stream : 0;
         sinfo.s1 = 0;
         sinfo.resize(ns);
 

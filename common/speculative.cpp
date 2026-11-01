@@ -1453,28 +1453,19 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         // TODO: fix, how to call without malloc
         batch.token = (llama_token *) malloc(sizeof(llama_token) * n_b);
 
+        // created when a sequence first drafts
         smpls.resize(n_seq);
-        for (auto & s : smpls) {
-            common_params_sampling sparams;
-            sparams.no_perf  = false;
-            sparams.top_k    = 10;
-            sparams.samplers = { COMMON_SAMPLER_TYPE_TOP_K };
-            s.reset(common_sampler_init(llama_get_model(ctx_dft), sparams));
-        }
 
-        // offload draft sampling to the backend
-        backend_chains.assign(n_seq, nullptr);
+        // offload draft sampling to the backend: one chain for the output rows of every sequence, it holds no state
         if (this->params.backend_sampling) {
-            for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
-                llama_sampler * chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
-                llama_sampler_chain_add(chain, llama_sampler_init_top_k(10));
+            llama_sampler * chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
+            llama_sampler_chain_add(chain, llama_sampler_init_top_k(10));
 
-                if (!llama_set_sampler(ctx_dft, seq_id, chain)) {
-                    SPC_WRN("backend offload failed for seq_id=%d; using CPU sampler\n", (int) seq_id);
-                    llama_sampler_free(chain);
-                    chain = nullptr;
-                }
-                backend_chains[seq_id] = chain;
+            if (llama_set_sampler(ctx_dft, LLAMA_SEQ_ID_ALL, chain)) {
+                backend_chains.push_back(chain);
+            } else {
+                SPC_WRN("%s", "backend offload failed; using CPU sampler\n");
+                llama_sampler_free(chain);
             }
         }
 
@@ -1488,13 +1479,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
             this->params.n_max = std::min(this->params.n_max, n_mtp_layers);
 
             chain_h.assign(n_seq, {});
-            for (auto & c : chain_h) {
-                c.reserve((size_t) (this->params.n_max + 1) * n_embd);
-            }
         }
         this->n_max = this->params.n_max;
 
-        pending_h.assign(n_seq, std::vector<float>(n_embd, 0.0f));
+        pending_h.assign(n_seq, {});
 
         i_last.assign(n_seq, -1);
         i_batch_beg.assign(n_seq, -1);
@@ -1506,14 +1494,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
 
     ~common_speculative_impl_draft_mtp() override {
         auto * ctx_dft = this->params.ctx_dft;
-        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) backend_chains.size(); ++seq_id) {
-            if (backend_chains[seq_id] == nullptr) {
-                continue;
-            }
+        for (auto * chain : backend_chains) {
             if (ctx_dft) {
-                llama_set_sampler(ctx_dft, seq_id, nullptr);
+                llama_set_sampler(ctx_dft, LLAMA_SEQ_ID_ALL, nullptr);
             }
-            llama_sampler_free(backend_chains[seq_id]);
+            llama_sampler_free(chain);
         }
         backend_chains.clear();
 
@@ -1525,6 +1510,22 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
     }
 
     void begin(llama_seq_id seq_id, const llama_tokens & prompt) override {
+        // the state of a sequence, the first time it drafts
+        if (!smpls[seq_id]) {
+            common_params_sampling sparams;
+            sparams.no_perf  = false;
+            sparams.top_k    = 10;
+            sparams.samplers = { COMMON_SAMPLER_TYPE_TOP_K };
+            smpls[seq_id].reset(common_sampler_init(llama_get_model(this->params.ctx_dft), sparams));
+
+            if (pending_h[seq_id].empty()) {
+                pending_h[seq_id].assign(n_embd, 0.0f);
+            }
+            if (chain_heads) {
+                chain_h[seq_id].reserve((size_t) (this->params.n_max + 1) * n_embd);
+            }
+        }
+
         // reset here rather than per round, or two identical requests differ
         common_sampler_reset(smpls[seq_id].get());
 
@@ -1562,14 +1563,17 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
         std::fill(i_batch_end.begin(), i_batch_end.end(), -1);
 
         for (int k = 0; k < n_tokens; ++k) {
-            for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
-                GGML_ASSERT(batch_in.n_seq_id[k] == 1);
+            GGML_ASSERT(batch_in.n_seq_id[k] == 1);
 
-                if (batch_in.seq_id[k][0] == seq_id) {
-                    i_batch_end[seq_id] = k;
-                    if (i_batch_beg[seq_id] < 0) {
-                        i_batch_beg[seq_id] = k;
-                    }
+            const llama_seq_id seq_id = batch_in.seq_id[k][0];
+
+            i_batch_end[seq_id] = k;
+            if (i_batch_beg[seq_id] < 0) {
+                i_batch_beg[seq_id] = k;
+
+                // a sequence is first seen here, while its prompt is processed
+                if (pending_h[seq_id].empty()) {
+                    pending_h[seq_id].assign(n_embd, 0.0f);
                 }
             }
         }
@@ -2578,7 +2582,7 @@ common_params common_base_params_to_speculative(const common_params & params) {
 
     result.cache_type_k  = params_spec.cache_type_k;
     result.cache_type_v  = params_spec.cache_type_v;
-    result.n_outputs_max = params.n_parallel;
+    result.n_outputs_max = std::min(params.n_parallel, params.n_ubatch);
     result.n_outputs_max_per_seq = 1;
 
     // dflash/dspark decode the whole noise block in a single pass and sample every block position on the backend
@@ -2592,7 +2596,7 @@ common_params common_base_params_to_speculative(const common_params & params) {
     if (has_block_draft) {
         // per-seq output positions: DFlash decodes anchor + n_max masks (n_max + 1); DSpark n_max -> +1 covers both
         const int32_t per_seq = std::max(1, params_spec.n_max + 1);
-        result.n_outputs_max = params.n_parallel * per_seq;
+        result.n_outputs_max = (int32_t) std::min<int64_t>((int64_t) params.n_parallel * per_seq, params.n_ubatch);
         if (params_spec.backend_sampling) {
             result.n_outputs_max_per_seq = per_seq;
         }

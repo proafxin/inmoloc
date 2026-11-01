@@ -116,9 +116,6 @@ llama_context::llama_context(
     const auto & hparams = model.hparams;
 
     cparams.n_seq_max = std::max(1u, params.n_seq_max);
-    if (cparams.n_seq_max > LLAMA_MAX_SEQ) {
-        throw std::runtime_error("n_seq_max must be <= " + std::to_string(LLAMA_MAX_SEQ));
-    }
 
     cparams.n_rs_seq = params.n_rs_seq;
     if (cparams.n_rs_seq > 0 && !llm_arch_supports_rs_rollback(model.arch)) {
@@ -251,8 +248,9 @@ llama_context::llama_context(
         cparams.causal_attn = params.attention_type == LLAMA_ATTENTION_TYPE_CAUSAL;
     }
 
-    cparams.flash_attn = params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED;
-    cparams.auto_fa    = params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO;
+    // the elastic memory is read by flash attention: there is nothing left to choose
+    cparams.flash_attn = params.elastic || params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    cparams.auto_fa    = !params.elastic && params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO;
 
     // resolved with the fused ops, once flash attention is resolved
     cparams.kv_idx      = false;
@@ -260,6 +258,7 @@ llama_context::llama_context(
     cparams.kv_rows     = false;
     cparams.auto_kv_rows = true;
     cparams.kv_idx_rest = false;
+    cparams.box_gather  = false;
 
     cparams.fused_gdn_ar = true;
     cparams.fused_gdn_ch = true;
@@ -302,9 +301,10 @@ llama_context::llama_context(
     }
 
     cparams.op_offload = params.op_offload;
-    cparams.kv_unified = params.kv_unified;
+    cparams.kv_unified = params.kv_unified || params.elastic;
     cparams.elastic    = params.elastic;
     cparams.box_bytes  = params.box_bytes;
+    cparams.box_deferred = params.box_deferred;
     cparams.box_draft  = params.box_draft;
     cparams.box_draft_type_k = params.box_draft_type_k;
     cparams.box_draft_type_v = params.box_draft_type_v;
@@ -419,7 +419,10 @@ llama_context::llama_context(
 
         // graph outputs buffer
         {
-            if (output_reserve(params.n_seq_max) < params.n_seq_max) {
+            // with the elastic memory n_seq_max is no limit that was asked for, and can pass the outputs of a batch
+            const uint32_t n_outputs_init = std::min(params.n_seq_max, cparams.n_outputs_max);
+
+            if (output_reserve(n_outputs_init) < n_outputs_init) {
                 throw std::runtime_error("failed to reserve initial output buffer");
             }
 
@@ -456,18 +459,21 @@ llama_context::llama_context(
 
         const llama_box * box = box_own ? box_own.get() : (mem_kv ? mem_kv->get_box() : nullptr);
         if (box) {
-            // the box sets the cells, not the context size
+            // the box sets the cells, not the context size, and the sequences that can run, not a number given
             cparams.n_ctx     = box->get_n_cells();
             cparams.n_ctx_seq = box->get_n_cells();
+            cparams.n_seq_max = box->get_n_seq_max();
 
             // prompts through lists where the device reads them, every token through ranges otherwise
             cparams.kv_rows      = box->has_row_lists();
             cparams.auto_kv_rows = false;
             cparams.kv_idx_rest  = box->has_row_lists();
-            cparams.kv_idx       = !box->has_row_lists();
+            cparams.kv_idx       = !box->has_row_lists() && !box->has_row_copies();
             cparams.auto_kv_idx  = false;
+            cparams.box_gather   = box->has_row_copies();
 
-            LLAMA_LOG_INFO("%s: elastic memory: %s\n", __func__, box->has_row_lists() ?
+            LLAMA_LOG_INFO("%s: elastic memory: %s\n", __func__, box->has_row_copies() ?
+                    "attention reads copies of the rows of the sequences" : box->has_row_lists() ?
                     "prompts read through row lists, generation through ranges" : "all tokens read through ranges");
         }
     }
@@ -746,7 +752,9 @@ void llama_context::sched_reserve() {
     // avoid reserving graphs with zero outputs - assume one output per sequence
     const int n_outputs = n_seqs;
 
-    LLAMA_LOG_DEBUG("%s: worst-case: n_tokens = %d, n_seqs = %d, n_outputs = %d\n", __func__, n_tokens, n_seqs, n_outputs);
+    LLAMA_LOG_WARN("%s: %s context: n_tokens = %d, n_seqs = %d, n_outputs = %d, n_outputs_max = %u, samplers = %zu\n", __func__,
+            cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP ? "draft" : "main", n_tokens, n_seqs, n_outputs, cparams.n_outputs_max,
+            sampling.samplers.size());
 
     resolve_fused_ops(mctx.get(), n_seqs);
 
@@ -985,7 +993,7 @@ uint32_t llama_context::n_seq_max_ubatch() const {
     const bool elastic = (mem != nullptr && mem->get_box_shared() != nullptr) ||
         (cparams.elastic && cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP);
     if (elastic) {
-        return std::min<uint32_t>(n_tokens_max, LLAMA_MAX_SEQ);
+        return std::min(n_tokens_max, cparams.n_seq_max);
     }
 
     const bool has_rs =
@@ -1657,7 +1665,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
     const int64_t n_vocab = model.vocab.n_tokens();
 
     // note: during encode, we always pass the full sequence starting from pos = 0
-    if (!balloc->init(batch_inp, model.vocab, nullptr, n_embd, cparams.kv_unified ? LLAMA_MAX_SEQ : cparams.n_seq_max, true)) {
+    if (!balloc->init(batch_inp, model.vocab, nullptr, n_embd, cparams.n_seq_max, true)) {
         LLAMA_LOG_ERROR("%s: failed to initialize batch\n", __func__);
         return -1;
     }
@@ -1862,6 +1870,10 @@ static void copy_tensor_async_rows(
 }
 
 static bool needs_raw_logits(const llama_ubatch & ubatch, const std::map<llama_seq_id, llama_sampler *> & samplers) {
+    if (samplers.count(LLAMA_SEQ_ID_ALL) > 0) {
+        return false;
+    }
+
     for (uint32_t i = 0; i < ubatch.n_tokens; i++) {
         if (!ubatch.output[i]) {
             continue;
@@ -1906,7 +1918,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
     const bool output_all   = cparams.embeddings;
     const bool has_samplers = !sampling.samplers.empty();
 
-    const uint32_t n_seq_max = cparams.kv_unified ? LLAMA_MAX_SEQ : cparams.n_seq_max;
+    const uint32_t n_seq_max = cparams.n_seq_max;
 
     // embedding contexts output every token even when batch.logits is not set
     if (has_samplers && (output_all || batch_inp.logits)) {
@@ -2066,10 +2078,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
         if (!res) {
             // the last ubatch failed or was aborted -> remove all positions of that ubatch from the memory module
-            llama_pos pos_min[LLAMA_MAX_SEQ];
-            for (int s = 0; s < LLAMA_MAX_SEQ; ++s) {
-                pos_min[s] = std::numeric_limits<llama_pos>::max();
-            }
+            std::vector<llama_pos> pos_min(cparams.n_seq_max, std::numeric_limits<llama_pos>::max());
 
             for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
                 const auto & seq_id = ubatch.seq_id[i][0];
@@ -2077,7 +2086,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 pos_min[seq_id] = std::min(pos_min[seq_id], ubatch.pos[i]);
             }
 
-            for (int s = 0; s < LLAMA_MAX_SEQ; ++s) {
+            for (int s = 0; s < (int) cparams.n_seq_max; ++s) {
                 if (pos_min[s] == std::numeric_limits<llama_pos>::max()) {
                     continue;
                 }
@@ -2291,7 +2300,8 @@ uint32_t llama_context::output_reserve(int32_t n_outputs) {
     const auto & hparams = model.hparams;
     const auto & vocab   = model.vocab;
 
-    const int64_t n_outputs_max = std::max<int64_t>(n_outputs, n_seq_max());
+    // with the elastic memory n_seq_max is no limit that was asked for, and can pass the outputs of a batch
+    const int64_t n_outputs_max = std::max<int64_t>(n_outputs, std::min(n_seq_max(), cparams.n_outputs_max));
 
     const auto n_batch    = cparams.n_batch;
     const auto n_vocab    = vocab.n_tokens();
@@ -2608,7 +2618,7 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
     for (const auto & [seq_id, sampler] : sampling.samplers) {
         const uint32_t n_nodes = llama_sampler_backend_n_nodes(sampler);
         n_sampling_nodes += n_nodes;
-        if (cparams.n_outputs_max_per_seq > 1) {
+        if (cparams.n_outputs_max_per_seq > 1 || seq_id == LLAMA_SEQ_ID_ALL) {
             n_sampling_nodes_max = std::max(n_sampling_nodes_max, n_nodes);
         }
     }
@@ -3810,7 +3820,7 @@ void llama_context::opt_epoch_iter(
             batch.logits  [pos_batch]    = true;
         }
 
-        if (!balloc->init(batch, model.vocab, nullptr, model.hparams.n_embd_inp(), cparams.kv_unified ? LLAMA_MAX_SEQ : cparams.n_seq_max, true)) {
+        if (!balloc->init(batch, model.vocab, nullptr, model.hparams.n_embd_inp(), cparams.n_seq_max, true)) {
             LLAMA_LOG_ERROR("%s: failed to initialize batch\n", __func__);
             return;
         }
@@ -3988,6 +3998,7 @@ llama_context_params llama_context_default_params() {
         /*.rs_rollback                 =*/ LLAMA_RS_ROLLBACK_SNAPSHOT,
         /*.elastic                     =*/ true,
         /*.box_bytes                   =*/ 0,
+        /*.box_deferred                =*/ false,
         /*.box_draft                   =*/ false,
         /*.box_draft_type_k            =*/ GGML_TYPE_F16,
         /*.box_draft_type_v            =*/ GGML_TYPE_F16,
@@ -4514,6 +4525,34 @@ bool llama_memory_box_get_info(llama_memory_t mem, llama_memory_box_info * info)
     info->n_reserved   = box->n_reserved();
     info->state_blocks = box->get_state_blocks();
     info->total_bytes  = box->get_total_bytes();
+
+    return true;
+}
+
+bool llama_context_box_finalize(llama_context * ctx, size_t bytes) {
+    return ctx->box_finalize(bytes);
+}
+
+void llama_context_reserve(llama_context * ctx) {
+    ctx->sched_reserve_now();
+}
+
+void llama_context::sched_reserve_now() {
+    sched_need_reserve = true;
+    sched_reserve();
+}
+
+bool llama_context::box_finalize(size_t bytes) {
+    const auto box = memory ? memory->get_box_shared() : nullptr;
+    if (!box) {
+        return false;
+    }
+
+    box->finalize(bytes);
+    memory->box_finalized();
+
+    cparams.n_ctx     = box->get_n_cells();
+    cparams.n_ctx_seq = box->get_n_cells();
 
     return true;
 }

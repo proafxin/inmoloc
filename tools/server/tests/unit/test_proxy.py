@@ -26,10 +26,10 @@ def test_mcp_proxy():
     server.ui_mcp_proxy = True
     server.start()
 
-    url = f"http://{server.server_host}:{server.server_port}/cors-proxy?url=http://example.com"
+    url = f"http://{server.server_host}:{server.server_port}/cors-proxy?url={local_file_url('README.md')}"
     res = requests.get(url)
     assert res.status_code == 200
-    assert "Example Domain" in res.text
+    assert "Server tests" in res.text
 
 
 def test_mcp_proxy_custom_port():

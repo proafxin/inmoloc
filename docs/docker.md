@@ -17,7 +17,7 @@ Serve a model from a host directory with a q8_0 KV cache and a 22 GiB memory bud
 
 ```sh
 docker run --gpus all -p 8080:8080 -v /path/to/models:/models ghcr.io/proafxin/inmoloc:latest \
-    -m /models/model.gguf -ngl 999 --flash-attn on \
+    -m /models/model.gguf -ngl 999 \
     --cache-type-k q8_0 --cache-type-v q8_0 --max-output-tokens 512 --vram-budget 22G
 ```
 
@@ -36,7 +36,7 @@ services:
     volumes:
       - /path/to/models:/models:ro
     command: >
-      -m /models/model.gguf -ngl 999 --flash-attn on
+      -m /models/model.gguf -ngl 999
       --cache-type-k q8_0 --cache-type-v q8_0 --max-output-tokens 512 --vram-budget 22G
     deploy:
       resources:

@@ -248,7 +248,7 @@ private:
     //const llama_model & model;
     const llama_hparams & hparams;
 
-    const uint32_t n_seq_max = 1;
+    uint32_t n_seq_max = 1;
 
     // ggml contexts for the KV cache along with the allocated backend buffers:
     std::vector<std::pair<ggml_context_ptr, ggml_backend_buffer_ptr>> ctxs_bufs;

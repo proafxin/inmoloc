@@ -6,28 +6,22 @@ import requests
 server: ServerProcess
 
 def get_img_url(id: str) -> str:
-    IMG_URL_0 = "https://huggingface.co/ggml-org/tinygemma3-GGUF/resolve/main/test/11_truck.png"
-    IMG_URL_1 = "https://huggingface.co/ggml-org/tinygemma3-GGUF/resolve/main/test/91_cat.png"
     if id == "IMG_URL_0":
-        return IMG_URL_0
+        return local_file_url(download_file(IMG_URL_TRUCK).removeprefix("./"))
     elif id == "IMG_URL_1":
-        return IMG_URL_1
+        return local_file_url(download_file(IMG_URL_CAT).removeprefix("./"))
+    elif id == "URL_NOT_FOUND":
+        return local_file_url("tmp/not_found.png")
+    elif id == "URL_NOT_IMAGE":
+        return local_file_url("README.md")
     elif id == "IMG_BASE64_URI_0":
-        response = requests.get(IMG_URL_0)
-        response.raise_for_status() # Raise an exception for bad status codes
-        return "data:image/png;base64," + base64.b64encode(response.content).decode("utf-8")
+        return "data:image/png;base64," + base64.b64encode(cached_file_bytes(IMG_URL_TRUCK)).decode("utf-8")
     elif id == "IMG_BASE64_0":
-        response = requests.get(IMG_URL_0)
-        response.raise_for_status() # Raise an exception for bad status codes
-        return base64.b64encode(response.content).decode("utf-8")
+        return base64.b64encode(cached_file_bytes(IMG_URL_TRUCK)).decode("utf-8")
     elif id == "IMG_BASE64_URI_1":
-        response = requests.get(IMG_URL_1)
-        response.raise_for_status() # Raise an exception for bad status codes
-        return "data:image/png;base64," + base64.b64encode(response.content).decode("utf-8")
+        return "data:image/png;base64," + base64.b64encode(cached_file_bytes(IMG_URL_CAT)).decode("utf-8")
     elif id == "IMG_BASE64_1":
-        response = requests.get(IMG_URL_1)
-        response.raise_for_status() # Raise an exception for bad status codes
-        return base64.b64encode(response.content).decode("utf-8")
+        return base64.b64encode(cached_file_bytes(IMG_URL_CAT)).decode("utf-8")
     else:
         return id
 
@@ -69,8 +63,8 @@ def test_v1_models_supports_multimodal_capability():
         ("What is this:\n", "IMG_URL_1",              True, "(frog)+"),
         ("Test test\n",     "IMG_URL_1",              True, "(frog)+"), # test invalidate cache
         ("What is this:\n", "malformed",              False, None),
-        ("What is this:\n", "https://google.com/404", False, None), # non-existent image
-        ("What is this:\n", "https://ggml.ai",        False, None), # non-image data
+        ("What is this:\n", "URL_NOT_FOUND",          False, None), # non-existent image
+        ("What is this:\n", "URL_NOT_IMAGE",          False, None), # non-image data
         ("What is this:\n", "data:text/html;base64,aGVsbG8=", False, None), # unsupported data uri mime
         # TODO @ngxson : test with multiple images, no images and with audio
     ]

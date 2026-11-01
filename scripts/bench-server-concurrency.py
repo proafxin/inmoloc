@@ -4,23 +4,19 @@
 # For each level, that many streaming chat requests with different prompts run at once. Reported per level:
 #   agg tok/s  - generated tokens of all requests / wall time of the level (what the server delivers in total)
 #   req tok/s  - mean generation speed of a single request, from the server timings
-#   ttft       - mean time to first token
+#   ttft       - mean time from when the server starts processing a request to its first token
+#   wait       - mean time a request waited for that, from when it was sent
 #   itl p50/p99/max - gaps between decoding steps of a request (tokens arriving within 2 ms count as one step)
 #   accept     - draft tokens accepted / drafted, when speculative decoding is on
 #
 # Compare speculative decoding by running it against a server with and without --spec-type, e.g.
-#   python3 scripts/bench-server-concurrency.py --url http://localhost:8100 --levels 1 2 4 8 --max-tokens 512
+#   python3 scripts/bench-server-concurrency.py --url http://localhost:8100 --levels 1 2 4 8
 #
-# --long N --long-tokens T gives N requests of each level a unique document of about T tokens to summarize, so long
-# and short requests share the memory; ttft is then reported for both, and failed requests are counted
-#
-# --prompt-tokens P gives every short request its own text of about P tokens to continue, different in every request of
-# every level (and for every --seed), so that no server can reuse a cached prompt; --per-client K makes each of the
-# clients of a level send K requests one after another, so that a level is a sustained load and not one burst
-#
-# --prompt-tokens-max and --max-tokens-max make the requests differ in size: each request draws its prompt length from
-# [--prompt-tokens, --prompt-tokens-max] and its output length from [--max-tokens, --max-tokens-max], fixed by --seed so
-# that every server gets the same requests; --json writes the numbers of every level, for scripts/bench-suite.py
+# --prompt-tokens gives every request its own text of about that many tokens to continue, different in every request of
+# every level (and for every --seed), so that no server can reuse a cached prompt; it takes a number or a range such as
+# 64-2048: with a range, the lengths of a level are spread evenly over it, so that levels compare the same mix and every
+# server gets the same requests. Every request generates up to the output limit of the server. --json writes the numbers
+# of every level, for scripts/bench-suite.py
 
 import argparse
 import json
@@ -52,17 +48,16 @@ def long_document(n_tokens: int, seed: int) -> str:
     return "\n".join(lines)
 
 
-def run_request(url: str, prompt: str, max_tokens: int, out: dict) -> None:
+def run_request(url: str, prompt: str, out: dict) -> None:
     try:
-        run_request_impl(url, prompt, max_tokens, out)
+        run_request_impl(url, prompt, out)
     except Exception as e:  # noqa: BLE001
         out["error"] = str(e)
 
 
-def run_request_impl(url: str, prompt: str, max_tokens: int, out: dict) -> None:
+def run_request_impl(url: str, prompt: str, out: dict) -> None:
     body = {
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
         "temperature": 0.0,
         "stream": True,
         "stream_options": {"include_usage": True},
@@ -73,7 +68,6 @@ def run_request_impl(url: str, prompt: str, max_tokens: int, out: dict) -> None:
                                  headers={"Content-Type": "application/json"})
     t0 = time.time()
     arrivals = []
-    pieces = []
     timings = {}
     with urllib.request.urlopen(req, timeout=3600) as resp:
         for raw in resp:
@@ -83,14 +77,14 @@ def run_request_impl(url: str, prompt: str, max_tokens: int, out: dict) -> None:
             chunk = json.loads(line[len("data: "):])
             if chunk.get("choices") and chunk["choices"][0]["delta"].get("content"):
                 arrivals.append(time.time())
-                pieces.append(chunk["choices"][0]["delta"]["content"])
             timings = chunk.get("timings", timings)
-    out["ttft"] = arrivals[0] - t0 if arrivals else float("nan")
+    first = arrivals[0] - t0 if arrivals else float("nan")
+    out["ttft"] = timings.get("prompt_ms", float("nan"))/1000
+    out["wait"] = first - out["ttft"]
     # tokens of one decoding step (e.g. accepted drafts) arrive as separate events within a moment: count one gap per step
     steps = [t for i, t in enumerate(arrivals) if i == 0 or t - arrivals[i - 1] > 0.002]
     out["gaps"] = [b - a for a, b in zip(steps, steps[1:])]
     out["timings"] = timings
-    out["text"] = "".join(pieces)
 
 
 def percentile(values: list, p: float) -> float:
@@ -100,66 +94,48 @@ def percentile(values: list, p: float) -> float:
     return values[min(len(values) - 1, int(p * len(values)))]
 
 
+# a number of tokens, or a range such as 64-2048
+def token_range(value: str) -> tuple:
+    low, _, high = value.partition("-")
+    return int(low), int(high or low)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://localhost:8100")
     parser.add_argument("--levels", type=int, nargs="+", default=[1, 2, 4, 8])
-    parser.add_argument("--max-tokens", type=int, default=512)
-    parser.add_argument("--max-tokens-max", type=int, default=0,
-                        help="if larger than --max-tokens, each request draws its output length from the range")
-    parser.add_argument("--long", type=int, default=0, help="requests per level with a long document")
-    parser.add_argument("--long-tokens", type=int, default=16000, help="approximate tokens of a long document")
-    parser.add_argument("--prompt-tokens", type=int, default=0,
-                        help="approximate tokens of a unique text for every short request, 0 = a short essay prompt")
-    parser.add_argument("--prompt-tokens-max", type=int, default=0,
-                        help="if larger than --prompt-tokens, each request draws its prompt length from the range")
+    parser.add_argument("--prompt-tokens", type=token_range, default=(0, 0),
+                        help="tokens of a unique text for every request, a number or a range; 0 = a short essay prompt")
     parser.add_argument("--json", default="", help="JSON file for the numbers of every level")
-    parser.add_argument("--per-client", type=int, default=1, help="requests each client sends one after another")
-    parser.add_argument("--save", default="", help="JSON file for the text of every response, to compare servers")
     parser.add_argument("--seed", type=int, default=0,
-                        help="varies the long documents; runs with the same seed send the same documents, which the "
-                             "server may then reuse from its cache")
+                        help="varies the requests; runs with the same seed send the same requests")
     args = parser.parse_args()
 
-    saved = {}
     results = []
 
-    print(f"{'conc':>4} {'wall s':>7} {'agg tok/s':>9} {'req tok/s':>9} {'ttft s':>7} {'ttft long':>9} {'itl p50':>8} "
+    print(f"{'conc':>4} {'wall s':>7} {'agg tok/s':>9} {'req tok/s':>9} {'ttft s':>7} {'wait s':>7} {'itl p50':>8} "
           f"{'itl p99':>8} {'itl max':>8} {'accept':>7} {'failed':>6}")
     for level in args.levels:
-        n_long = min(args.long, level)
-        n_req  = level*args.per_client
-
-        # request r is the (r // level)-th of client r % level; the clients below n_long send long documents
-        def is_long(r):
-            return r % level < n_long
+        # the lengths are spread evenly over the range at every level, so that levels compare the same mix of requests;
+        # shuffled, so that the short ones do not arrive first
+        low, high = args.prompt_tokens
+        lengths = [low + (high - low)*(2*r + 1)//(2*level) for r in range(level)]
+        random.Random(f"size-{args.seed}-{level}").shuffle(lengths)
 
         prompts = []
-        max_tokens = []
-        for r in range(n_req):
-            rng_size = random.Random(f"size-{args.seed}-{level}-{r}")
-            max_tokens.append(rng_size.randint(args.max_tokens, args.max_tokens_max)
-                              if args.max_tokens_max > args.max_tokens else args.max_tokens)
-            prompt_tokens = (rng_size.randint(args.prompt_tokens, args.prompt_tokens_max)
-                             if args.prompt_tokens_max > args.prompt_tokens else args.prompt_tokens)
-            i = r % level
-            if is_long(r):
-                prompts.append("Summarize the following document in detail.\n\n" +
-                               long_document(args.long_tokens, 1000000*args.seed + 1000*level + i + 1000000000*(r // level)))
-            elif prompt_tokens > 0:
+        for r in range(level):
+            prompt_tokens = lengths[r]
+            if prompt_tokens > 0:
                 rng = random.Random(f"{args.seed}-{level}-{r}")
                 prompts.append(f"Continue this text about {rng.choice(TOPICS)} with a detailed essay.\n\n" +
                                long_document(prompt_tokens, rng.randrange(1 << 62)))
             else:
-                prompts.append(f"Write a detailed essay about {TOPICS[i % len(TOPICS)]}.")
+                prompts.append(f"Write a detailed essay about {TOPICS[r % len(TOPICS)]}.")
 
-        outs = [dict() for _ in range(n_req)]
+        outs = [dict() for _ in range(level)]
 
-        def client(i):
-            for r in range(i, n_req, level):
-                run_request(args.url, prompts[r], max_tokens[r], outs[r])
-
-        threads = [threading.Thread(target=client, args=(i,)) for i in range(level)]
+        threads = [threading.Thread(target=run_request, args=(args.url, prompts[r], outs[r]))
+                   for r in range(level)]
         t0 = time.time()
         for t in threads:
             t.start()
@@ -168,10 +144,10 @@ def main() -> int:
         wall = time.time() - t0
 
         good  = [o for o in outs if "error" not in o and o.get("timings")]
-        n_bad = n_req - len(good)
+        n_bad = level - len(good)
         for r, o in enumerate(outs):
             if "error" in o:
-                print(f"     request {r} ({'long' if is_long(r) else 'short'}) failed: {o['error'][:120]}")
+                print(f"     request {r} failed: {o['error'][:120]}")
 
         def mean(values):
             values = [v for v in values if v == v]
@@ -179,29 +155,24 @@ def main() -> int:
 
         n_gen = sum(o["timings"].get("predicted_n", 0) for o in good)
         req_tps = mean([o["timings"].get("predicted_per_second", 0.0) for o in good])
-        ttft = mean([outs[r]["ttft"] for r in range(n_req) if not is_long(r) and outs[r] in good])
-        ttft_long = mean([outs[r]["ttft"] for r in range(n_req) if is_long(r) and outs[r] in good])
+        ttft = mean([o["ttft"] for o in good])
+        wait = mean([o["wait"] for o in good])
         gaps = [g for o in good for g in o["gaps"]]
         n_draft = sum(o["timings"].get("draft_n", 0) for o in good)
         n_acc = sum(o["timings"].get("draft_n_accepted", 0) for o in good)
         accept = f"{n_acc / n_draft:.2f}" if n_draft else "-"
-        print(f"{level:>4} {wall:>7.1f} {n_gen / wall:>9.1f} {req_tps:>9.1f} {ttft:>7.2f} {ttft_long:>9.2f} "
+        print(f"{level:>4} {wall:>7.1f} {n_gen / wall:>9.1f} {req_tps:>9.1f} {ttft:>7.2f} {wait:>7.2f} "
               f"{percentile(gaps, 0.5) * 1e3:>6.0f}ms {percentile(gaps, 0.99) * 1e3:>6.0f}ms "
               f"{max(gaps, default=float('nan')) * 1e3:>6.0f}ms {accept:>7} {n_bad:>6}")
 
-        saved[str(level)] = [o.get("text") for o in outs]
-
         results.append({
             "level": level, "wall_s": wall, "agg_tps": n_gen / wall, "req_tps": req_tps,
-            "ttft_s": ttft, "ttft_long_s": ttft_long,
+            "ttft_s": ttft, "wait_s": wait,
             "itl_p50_ms": percentile(gaps, 0.5) * 1e3, "itl_p99_ms": percentile(gaps, 0.99) * 1e3,
             "accept": n_acc / n_draft if n_draft else None, "failed": n_bad, "n_gen": n_gen,
             "n_prompt": sum(o["timings"].get("prompt_n", 0) for o in good),
         })
 
-    if args.save:
-        with open(args.save, "w") as f:
-            json.dump(saved, f)
     if args.json:
         with open(args.json, "w") as f:
             json.dump(results, f, indent=1)

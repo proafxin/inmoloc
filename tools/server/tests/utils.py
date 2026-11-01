@@ -11,7 +11,9 @@ import re
 import json
 from json import JSONDecodeError
 import sys
+import http.server
 import requests
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import (
@@ -74,6 +76,7 @@ class ServerProcess:
     n_ga: int | None = None
     n_ga_w: int | None = None
     n_predict: int | None = None
+    vram_budget: str = "2G"
     n_prompts: int | None = 0
     slot_save_path: str | None = None
     id_slot: int | None = None
@@ -232,10 +235,13 @@ class ServerProcess:
             server_args.extend(["-ctkd", self.ctkd])
         if self.fa is not None:
             server_args.extend(["-fa", self.fa])
-        if self.n_predict:
-            server_args.extend(["--n-predict", self.n_predict])
         # required with the elastic memory
-        server_args.extend(["--max-output-tokens", self.n_ctx//2 if self.n_ctx else 1024])
+        if self.n_predict and self.n_predict > 0:
+            server_args.extend(["--max-output-tokens", self.n_predict])
+        else:
+            server_args.extend(["--max-output-tokens", self.n_ctx//2 if self.n_ctx else 1024])
+        # the test models are tiny: without a budget their elastic memory takes all the device memory
+        server_args.extend(["--vram-budget", self.vram_budget])
         if self.slot_save_path:
             server_args.extend(["--slot-save-path", self.slot_save_path])
         if self.n_ga:
@@ -533,25 +539,60 @@ class ServerProcess:
 server_instances: Set[ServerProcess] = set()
 
 
+IMG_URL_TRUCK = "https://huggingface.co/ggml-org/tinygemma3-GGUF/resolve/main/test/11_truck.png"
+IMG_URL_CAT = "https://huggingface.co/ggml-org/tinygemma3-GGUF/resolve/main/test/91_cat.png"
+LORA_FILE_URL = "https://huggingface.co/ggml-org/stories15M_MOE/resolve/main/moe_shakespeare15M.gguf"
+MODEL_DRAFT_FILE_URL = "https://huggingface.co/ggml-org/tiny-llamas/resolve/main/stories15M-q4_0.gguf"
+
+TEST_FILE_URLS = [IMG_URL_TRUCK, IMG_URL_CAT, LORA_FILE_URL, MODEL_DRAFT_FILE_URL]
+
+
 class ServerPreset:
     @staticmethod
     def load_all() -> None:
-        """ Load all server presets to ensure model files are cached. """
+        """ Downloads the models and files of the tests, once: a stamp in the cache lists what is already there. """
         servers: List[ServerProcess] = [
             method()
             for name, method in ServerPreset.__dict__.items()
             if callable(method) and name != "load_all"
         ]
-        for server in servers:
-            # a cached model needs no network: this runs once per pytest worker, and a stalled lookup would fail the session
-            server.offline = True
-            try:
-                server.start()
-            except (RuntimeError, TimeoutError):
+        servers = [server for server in servers if server.model_hf_repo]
+
+        wanted = sorted({f"{server.model_hf_repo}/{server.model_hf_file}" for server in servers}) + TEST_FILE_URLS
+
+        cache = os.environ.get("LOCAL_INFERENCE_CACHE", "tmp")
+        stamp = os.path.join(cache, "test_files.json")
+        try:
+            with open(stamp) as f:
+                if json.load(f) == wanted:
+                    return
+        except (OSError, JSONDecodeError):
+            pass
+
+        os.makedirs(cache, exist_ok=True)
+
+        # no network is no reason to stop the session: only the tests of what is missing fail, and the next session retries
+        try:
+            for url in TEST_FILE_URLS:
+                download_file(url)
+
+            for server in servers:
+                server.offline = True
+                try:
+                    server.start()
+                except (RuntimeError, TimeoutError):
+                    server.stop()
+                    server.offline = False
+                    server.start()
                 server.stop()
-                server.offline = False
-                server.start()
-            server.stop()
+        except (OSError, RuntimeError) as e:
+            print(f"Not all test files are available: {e}")
+            for server in servers:
+                server.stop()
+            return
+
+        with open(stamp, "w") as f:
+            json.dump(wanted, f)
 
     @staticmethod
     def tinyllama2() -> ServerProcess:
@@ -596,6 +637,14 @@ class ServerPreset:
         server.fa = "on"
         server.seed = 42
         server.server_embeddings = True
+        return server
+
+    @staticmethod
+    def tinyllama_split() -> ServerProcess:
+        server = ServerPreset.tinyllama2()
+        server.model_hf_repo = "ggml-org/models"
+        server.model_hf_file = "tinyllamas/split/stories15M-q8_0-00001-of-00003.gguf"
+        server.model_alias = "tinyllama-split"
         return server
 
     @staticmethod
@@ -740,11 +789,37 @@ def download_file(url: str, output_file_path: str | None = None) -> str:
     output_file = f'./tmp/{file_name}' if output_file_path is None else output_file_path
     if not os.path.exists(output_file):
         print(f"Downloading {url} to {output_file}")
-        wget.download(url, out=output_file)
+        # a partial file never takes the final name: the workers of a run share the directory
+        partial_file = f"{output_file}.{os.getpid()}.part"
+        wget.download(url, out=partial_file)
+        os.replace(partial_file, output_file)
         print(f"Done downloading to {output_file}")
     else:
         print(f"File already exists at {output_file}")
     return output_file
+
+
+def cached_file_bytes(url: str) -> bytes:
+    """ The content of a file of TEST_FILE_URLS, from the cache. """
+    with open(download_file(url), "rb") as f:
+        return f.read()
+
+
+local_files_port: int | None = None
+
+
+def local_file_url(path: str) -> str:
+    """ A URL on this machine for a path below the tests directory, for what a test sends the server to fetch. """
+    global local_files_port
+    if local_files_port is None:
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        local_files_port = httpd.server_address[1]
+    return f"http://127.0.0.1:{local_files_port}/{path}"
 
 
 def is_slow_test_allowed():

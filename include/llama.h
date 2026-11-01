@@ -69,6 +69,9 @@ extern "C" {
     typedef int32_t llama_token;
     typedef int32_t llama_seq_id;
 
+    // for llama_set_sampler: the sampler serves the output rows of every sequence
+    #define LLAMA_SEQ_ID_ALL (-1)
+
     enum llama_vocab_type {
         LLAMA_VOCAB_TYPE_NONE   = 0, // For models without vocab
         LLAMA_VOCAB_TYPE_SPM    = 1, // LLaMA tokenizer based on byte-level BPE with byte fallback
@@ -437,6 +440,10 @@ extern "C" {
         // the elastic memory takes box_bytes bytes (0 = the size of n_ctx cells and n_rs_cells states)
         size_t box_bytes;
 
+        // box_bytes is the most the elastic memory can take, and none of it is allocated: once the real context shows
+        // what is left, llama_context_box_finalize() sets the size and allocates it
+        bool box_deferred;
+
         // keep the tokens of an MTP draft on this model in the blocks of the elastic memory, with these KV types; the
         // draft context is created with ctx_other set to this context
         bool box_draft;
@@ -579,7 +586,6 @@ extern "C" {
     LLAMA_API int64_t llama_time_us(void);
 
     LLAMA_API size_t llama_max_devices(void);
-    LLAMA_API size_t llama_max_parallel_sequences(void);
     LLAMA_API size_t llama_max_tensor_buft_overrides(void);
 
     LLAMA_API bool llama_supports_mmap       (void);
@@ -861,6 +867,9 @@ extern "C" {
 
     // false when the memory is not elastic
     LLAMA_API bool llama_memory_box_get_info(llama_memory_t mem, struct llama_memory_box_info * info);
+
+    // allocates an elastic memory created with box_deferred, of at most bytes bytes (whole blocks)
+    LLAMA_API bool llama_context_box_finalize(struct llama_context * ctx, size_t bytes);
 
     // admits a request of seq_id: takes its state (if it has none) and the blocks of its n_input input tokens (minus
     // those the seq holds), and charges the blocks of up to n_output generated tokens, so that a running request never

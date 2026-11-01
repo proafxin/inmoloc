@@ -49,6 +49,7 @@ public:
                      bool   use_box = false,
         // the bytes of the box, 0 for kv_size cells and rs_size states, and the layer of an MTP draft kept in its blocks
                    size_t   box_bytes = 0,
+                     bool   box_deferred = false,
                      bool   box_draft = false,
                 ggml_type   box_draft_type_k = GGML_TYPE_F16,
                 ggml_type   box_draft_type_v = GGML_TYPE_F16);
@@ -108,6 +109,7 @@ public:
     // admission of a request: its state and its prompt pages, and the pages it may generate into, see llama_box::reserve()
     bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override;
     void box_reserve_drop(llama_seq_id seq_id) override;
+    void box_finalized() override { mem_attn->box_finalized(); }
 
 private:
     const llama_hparams & hparams;

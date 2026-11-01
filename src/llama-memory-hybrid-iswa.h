@@ -40,7 +40,9 @@ public:
                      bool   unified,
                             /* layer filters */
     const layer_filter_cb & filter_attn = nullptr,
-    const layer_filter_cb & filter_recr = nullptr);
+    const layer_filter_cb & filter_recr = nullptr,
+        // the elastic memory, which holds the cells of the caches and the states
+    const std::shared_ptr<llama_box> & box = nullptr);
 
     ~llama_memory_hybrid_iswa() = default;
 
@@ -71,6 +73,12 @@ public:
     llama_pos seq_pos_max(llama_seq_id seq_id) const override;
 
     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override;
+
+    std::shared_ptr<llama_box> get_box_shared() const override { return mem_attn->get_box_shared(); }
+
+    bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override;
+    void box_reserve_drop(llama_seq_id seq_id) override { mem_attn->box_reserve_drop(seq_id); }
+    void box_finalized() override { mem_attn->box_finalized(); }
 
     // state write/load
 

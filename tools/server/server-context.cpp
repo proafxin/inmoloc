@@ -1168,7 +1168,9 @@ private:
     int32_t n_swa;
 
     // slots / clients
-    std::vector<server_slot> slots;
+    // the state of the requests: created when no idle one is left, as many as the memory holds; a deque, since what runs
+    // keeps pointers to it
+    std::deque<server_slot> slots;
 
     int trace = 0;        // env: LOCAL_INFERENCE_TRACE
     int slots_debug = 0;  // env: LOCAL_INFERENCE_SERVER_SLOTS_DEBUG
@@ -1577,11 +1579,6 @@ private:
         SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d, kv_unified = '%s'\n",
                 params_base.n_parallel, n_ctx_slot(), params_base.kv_unified ? "true" : "false");
 
-        // initialize slots
-        for (int i = 0; i < params_base.n_parallel; i++) {
-            slots.emplace_back();
-        }
-
         // try speculative decoding
         if (ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
             try {
@@ -1611,36 +1608,9 @@ private:
             return false;
         }
 
-        for (int i = 0; i < params_base.n_parallel; i++) {
-            server_slot & slot = slots[i];
-
-            slot.id      = i;
-            slot.ctx_tgt = ctx_tgt;
-            slot.ctx_dft = ctx_dft;
-            slot.mem.init(ctx_tgt, ctx_dft);
-            slot.spec    = spec.get();
-            slot.n_ctx   = n_ctx_slot();
-
-            slot.mctx                   = mctx;
-            slot.prompt.tokens.has_mtmd = mctx != nullptr;
-
-            SLT_TRC(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
-
-            slot.callback_on_release = [this](int id_slot) {
-                queue_tasks.pop_deferred_task(id_slot);
-            };
-
-            slot.callback_on_reset = [this](const server_slot & slot) {
-                // flush the generated token stats before reset()
-                if (slot.stats.n_gen > 0) {
-                    metrics_on_prediction(slot);
-
-                    n_gen_seen++;
-                    gen_mean += (slot.stats.n_gen - gen_mean)/std::min<uint64_t>(n_gen_seen, 64);
-                }
-            };
-
-            slot.reset();
+        // the elastic memory creates the state of a request when it is needed
+        for (int i = 0; i < (box ? 1 : params_base.n_parallel); i++) {
+            slot_add();
         }
 
         {
@@ -1858,7 +1828,51 @@ private:
         return true;
     }
 
+    server_slot & slot_add() {
+        server_slot & slot = slots.emplace_back();
+
+        slot.id      = (int) slots.size() - 1;
+        slot.ctx_tgt = ctx_tgt;
+        slot.ctx_dft = ctx_dft;
+        slot.mem.init(ctx_tgt, ctx_dft);
+        slot.spec    = spec.get();
+        slot.n_ctx   = n_ctx_slot();
+
+        slot.mctx                   = mctx;
+        slot.prompt.tokens.has_mtmd = mctx != nullptr;
+
+        SLT_TRC(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
+
+        slot.callback_on_release = [this](int id_slot) {
+            queue_tasks.pop_deferred_task(id_slot);
+        };
+
+        slot.callback_on_reset = [this](const server_slot & slot) {
+            // flush the generated token stats before reset()
+            if (slot.stats.n_gen > 0) {
+                metrics_on_prediction(slot);
+
+                n_gen_seen++;
+                gen_mean += (slot.stats.n_gen - gen_mean)/std::min<uint64_t>(n_gen_seen, 64);
+            }
+        };
+
+        slot.reset();
+
+        return slot;
+    }
+
+    // with the elastic memory a new request gets its own state, so that no prompt in memory is given up for it; a request
+    // holds at least a block, so that memory runs out first
+    bool slot_can_add() const {
+        return box && (int) slots.size() < params_base.n_parallel;
+    }
+
     server_slot * get_slot_by_id(int id_slot) {
+        while (slot_can_add() && (int) slots.size() <= id_slot) {
+            slot_add();
+        }
+
         // note: allow id_slot to be out of bounds (wrap around)
         id_slot = id_slot % slots.size();
 
@@ -1977,7 +1991,9 @@ private:
                 }
             }
 
-            if (ret != nullptr) {
+            if ((ret == nullptr || !empty) && slot_can_add()) {
+                ret = &slot_add();
+            } else if (ret != nullptr) {
                 SLT_INF(*ret, "selected slot by LRU, t_last = %" PRId64 "\n", t_last);
 
                 update_cache = true;
@@ -3030,8 +3046,10 @@ private:
             slot.smpl.reset();
         }
 
-        // the per-request limit takes priority over the global one
-        slot.n_predict_max = task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict;
+        // the limit of the request, at most --max-output-tokens
+        const int32_t n_output_max = params_base.max_output_tokens;
+        const int32_t n_predict    = task.params.n_predict;
+        slot.n_predict_max = n_output_max > 0 && (n_predict < 0 || n_predict > n_output_max) ? n_output_max : n_predict;
 
         slot.task = std::make_unique<const server_task>(std::move(task));
 
@@ -3195,6 +3213,12 @@ private:
             const auto * cur_p = common_sampler_get_candidates(slot.smpl.get(), true);
             const size_t max_probs = cur_p->size;
             const size_t n_probs = std::min(max_probs, n_probs_request);
+
+            if (max_probs > 0 && cur_p->data[0].p > 1.0f) {
+                SLT_WRN(slot, "probability above 1: backend sampling = %d, %zu candidates, first id %d logit %f p %f, second p %f\n",
+                        slot.task->params.sampling.backend_sampling ? 1 : 0, max_probs, cur_p->data[0].id, cur_p->data[0].logit,
+                        cur_p->data[0].p, max_probs > 1 ? cur_p->data[1].p : 0.0f);
+            }
 
             // set probability for sampled token
             for (size_t i = 0; i < max_probs; i++) {
@@ -3502,6 +3526,9 @@ private:
             if (free_slots.size() >= n_slots_needed) {
                 break;
             }
+        }
+        while (free_slots.size() < n_slots_needed && slot_can_add()) {
+            free_slots.push_back(&slot_add());
         }
         return free_slots;
     }
@@ -3946,8 +3973,9 @@ private:
 
                         if (n_input >= llama_model_n_ctx_train(model_tgt)) {
                             SRV_WRN("request of %d tokens exceeds the context window of the model, id_task = %d\n", n_input, id_task);
-                            send_error(task, string_format("request (%d tokens) exceeds the context window of the model (%d tokens)",
-                                        n_input, llama_model_n_ctx_train(model_tgt)), ERROR_TYPE_EXCEED_CONTEXT_SIZE);
+                            send_error(task.id, string_format("request (%d tokens) exceeds the context window of the model (%d tokens)",
+                                        n_input, llama_model_n_ctx_train(model_tgt)), ERROR_TYPE_EXCEED_CONTEXT_SIZE,
+                                        n_input, llama_model_n_ctx_train(model_tgt));
                             break;
                         }
 
@@ -3957,8 +3985,9 @@ private:
                         if (n_most > (int64_t) info.n_blocks) {
                             SRV_WRN("request of %d input and %d output tokens never fits in the memory (%lld of %u blocks), id_task = %d\n",
                                     n_input, n_box_out, (long long) n_most, info.n_blocks, id_task);
-                            send_error(task, string_format("request (%d input tokens, up to %d output tokens) does not fit in the memory, "
-                                        "lower max_tokens or the input", n_input, n_box_out), ERROR_TYPE_EXCEED_CONTEXT_SIZE);
+                            send_error(task.id, string_format("request (%d input tokens, up to %d output tokens) does not fit in the memory, "
+                                        "lower max_tokens or the input", n_input, n_box_out), ERROR_TYPE_EXCEED_CONTEXT_SIZE,
+                                        n_input, (int32_t) (info.n_blocks*info.block_tokens));
                             break;
                         }
 
@@ -4407,7 +4436,7 @@ private:
         return true;
     }
 
-    void iterate(std::vector<server_slot> & slots, std::function<void(server_slot &)> callback) {
+    void iterate(std::deque<server_slot> & slots, std::function<void(server_slot &)> callback) {
         for (auto & slot : slots) {
             try {
                 callback(slot);

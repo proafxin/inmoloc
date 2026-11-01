@@ -45,7 +45,7 @@ static size_t llama_box_block_bytes(const std::vector<llama_box::attn_layer> & a
     return (size + mult - 1)/mult*mult;
 }
 
-llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> recr_in, const attn_layer * draft, size_t bytes, uint32_t n_tokens, uint32_t n_states_in, uint32_t n_seq_max) :
+llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> recr_in, const attn_layer * draft, size_t bytes, uint32_t n_tokens, uint32_t n_states_in) :
     attn(std::move(attn_in)), recr(std::move(recr_in)) {
     row_bytes      = llama_box_row_stride(attn.data(), attn.size());
     block_bytes    = llama_box_block_bytes(attn, draft);
@@ -106,7 +106,9 @@ llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> re
     n_blocks = bytes > 0 ? (uint32_t) (bytes/block_bytes) : (n_tokens + n_block_tokens - 1)/n_block_tokens + states_blocks(n_states_in);
     n_blocks = std::max(n_blocks, states_blocks(1) + 1);
 
-    seqs.resize(n_seq_max);
+    n_blocks_max = n_blocks;
+
+    seqs.resize(n_blocks);
 
     clear();
 
@@ -141,7 +143,48 @@ ggml_tensor * llama_box::view(ggml_type type, int64_t ne0, size_t nb1, size_t of
     return t;
 }
 
-void llama_box::alloc(ggml_backend_buffer_type_t buft, bool no_alloc) {
+void llama_box::finalize(size_t bytes) {
+    GGML_ASSERT(buft != nullptr);
+
+    n_blocks = std::max(std::min(n_blocks_max, (uint32_t) (bytes/block_bytes)), states_blocks(1) + 1);
+
+    const size_t total = get_total_bytes();
+
+    // the size of the views follows the box, the tensors stay: the caches hold them
+    for (ggml_tensor * t = ggml_get_first_tensor(ctx.get()); t != nullptr; t = ggml_get_next_tensor(ctx.get(), t)) {
+        t->buffer = nullptr;
+        t->data   = nullptr;
+
+        if (t == pool) {
+            t->ne[0] = (int64_t) total;
+            t->nb[1] = t->nb[0]*total;
+            t->nb[2] = t->nb[1];
+            t->nb[3] = t->nb[2];
+            continue;
+        }
+
+        const size_t nb1 = t->nb[1];
+
+        t->ne[1] = (int64_t) ((total - t->view_offs - ggml_row_size(t->type, t->ne[0]))/nb1) + 1;
+        t->nb[2] = nb1*t->ne[1];
+        t->nb[3] = nb1*t->ne[1];
+    }
+
+    buf.reset();
+    buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(ctx.get(), buft));
+    if (!buf) {
+        throw std::runtime_error("failed to allocate the box");
+    }
+
+    clear();
+
+    LLAMA_LOG_INFO("%s: %u blocks of %.2f MiB (%u tokens), %.2f MiB; a state takes %.2f MiB\n", __func__,
+            n_blocks, block_bytes/1024.0/1024.0, n_block_tokens, total/1024.0/1024.0, state_bytes/1024.0/1024.0);
+}
+
+void llama_box::alloc(ggml_backend_buffer_type_t buft_in, bool no_alloc) {
+    buft = buft_in;
+
     ggml_init_params params = {
         /*.mem_size   =*/ (4 + 2*attn.size())*ggml_tensor_overhead(),
         /*.mem_buffer =*/ NULL,
@@ -426,9 +469,10 @@ void llama_box::reserve_drop(llama_seq_id seq_id) {
     seq.reserve        = 0;
 }
 
-// whether the device reads the rows of a prompt through one list, each query seeing a prefix of it, which the tensor core
-// kernels do; the context only describes the op, nothing is allocated
-static bool llama_box_row_lists(const llama_hparams & hparams, ggml_backend_buffer_type_t buft, const llama_box::attn_layer & attn) {
+// whether the device reads the rows of a layer in place, through ranges of the cells of each token; row_lists tells
+// whether it also reads the rows of a prompt through one list, each query seeing a prefix of it, which the tensor core
+// kernels do; the context only describes the ops, nothing is allocated
+static bool llama_box_reads_rows(const llama_hparams & hparams, ggml_backend_buffer_type_t buft, const llama_box::attn_layer & attn, bool * row_lists) {
     ggml_init_params params = {
         /*.mem_size   =*/ 32*ggml_tensor_overhead(),
         /*.mem_buffer =*/ NULL,
@@ -466,11 +510,19 @@ static bool llama_box_row_lists(const llama_hparams & hparams, ggml_backend_buff
     ggml_flash_attn_ext_set_kv_rows_hi(fa_rows,
             ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, n_idx), ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, nb));
 
-    if (const char * env = getenv("LOCAL_INFERENCE_BOX_ROW_LISTS"); env && atoi(env) == 0) {
-        return false;
+    ggml_tensor * fa_idx = attention();
+    ggml_flash_attn_ext_set_kv_idx(fa_idx,
+            ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, n_idx, 1), ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, 3, nb));
+
+    if (row_lists) {
+        *row_lists = ggml_backend_dev_supports_op(dev, fa_rows);
+
+        if (const char * env = getenv("LOCAL_INFERENCE_BOX_ROW_LISTS"); env && atoi(env) == 0) {
+            *row_lists = false;
+        }
     }
 
-    return ggml_backend_dev_supports_op(dev, fa_rows);
+    return ggml_backend_dev_supports_op(dev, fa_idx);
 }
 
 std::unique_ptr<llama_box> llama_box_make(
@@ -486,6 +538,7 @@ std::unique_ptr<llama_box> llama_box_make(
                      bool   rs_replay_req,
                      bool   offload,
                    size_t   box_bytes,
+                     bool   box_deferred,
                      bool   box_draft,
                 ggml_type   box_draft_type_k,
                 ggml_type   box_draft_type_v,
@@ -536,12 +589,20 @@ std::unique_ptr<llama_box> llama_box_make(
         has_draft = true;
     }
 
-    row_lists = !attn.empty() && llama_box_row_lists(hparams, buft, attn[0]);
+    // every layer has to be read in place, or attention copies the rows of all of them
+    bool row_copies = false;
+    for (size_t i = 0; i < attn.size(); ++i) {
+        bool lists = false;
+        row_copies = row_copies || !llama_box_reads_rows(hparams, buft, attn[i], &lists);
+        row_lists  = (i == 0 || row_lists) && lists;
+    }
+    row_lists = row_lists && !row_copies;
 
     // the memory of box_bytes bytes, or of kv_size cells and rs_size states, elastic
-    auto box = std::make_unique<llama_box>(std::move(attn), std::move(recr), has_draft ? &draft : nullptr, box_bytes, kv_size, rs_size, n_seq_max);
+    auto box = std::make_unique<llama_box>(std::move(attn), std::move(recr), has_draft ? &draft : nullptr, box_bytes, kv_size, rs_size);
     box->set_row_lists(row_lists);
-    box->alloc(buft, hparams.no_alloc);
+    box->set_row_copies(row_copies);
+    box->alloc(buft, hparams.no_alloc || box_deferred);
 
     return box;
 }

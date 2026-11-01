@@ -414,8 +414,9 @@ public:
 
     // indexed attention (see llama_kv_cache::set_input_kv_idx), nullptr when the mask is used
     // the mask tensor still exists for graphs that need it; tensors that no node reads are not allocated
-    ggml_tensor * self_kv_idx = nullptr; // I32 [n_idx, n_group]
-    ggml_tensor * self_q_rng  = nullptr; // I32 [3, n_batch]
+    ggml_tensor * self_kv_idx  = nullptr; // I32 [n_idx, n_group]
+    ggml_tensor * self_q_rng   = nullptr; // I32 [3, n_batch]
+    ggml_tensor * self_kv_mask = nullptr; // F32 [n_idx, n_batch], over rows copied from the list, see llama_cparams::box_gather
 
     // attention runs, empty when the whole ubatch attends the full view, see llama_kv_attn_run
     // per run: the cell indices (I32 [n_idx]) and the mask (F16 [n_idx, t1 - t0, 1, 1]) of a copied gather run,
@@ -469,6 +470,11 @@ public:
 
     ggml_tensor * self_kq_mask     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
     ggml_tensor * self_kq_mask_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
+
+    // the elastic memory: each token reads a range of the cells of its sequence
+    ggml_tensor * self_kv_idx  = nullptr; // I32 [n_idx, n_group]
+    ggml_tensor * self_q_rng   = nullptr; // I32 [3, n_batch]
+    ggml_tensor * self_kv_mask = nullptr; // F32 [n_idx, n_batch], over rows copied from the list, see llama_cparams::box_gather
 
     const llama_hparams hparams;
     const llama_cparams cparams;
@@ -603,6 +609,10 @@ public:
     ggml_tensor * self_kv_idx_swa = nullptr; // I32 [n_idx, n_group]
     ggml_tensor * self_q_rng_swa  = nullptr; // I32 [3, n_batch]
 
+    // over rows copied from the lists, see llama_cparams::box_gather
+    ggml_tensor * self_kv_mask     = nullptr; // F32 [n_idx, n_batch]
+    ggml_tensor * self_kv_mask_swa = nullptr; // F32 [n_idx, n_batch]
+
     ggml_tensor * self_k_rot = nullptr;
     ggml_tensor * self_v_rot = nullptr;
 
@@ -644,6 +654,16 @@ public:
     ggml_tensor * self_kq_mask_cnv     = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
     ggml_tensor * self_kq_mask_swa     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
     ggml_tensor * self_kq_mask_swa_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
+
+    // the elastic memory: each token reads a range of the cells of its sequence
+    ggml_tensor * self_kv_idx     = nullptr; // I32 [n_idx, n_group]
+    ggml_tensor * self_q_rng      = nullptr; // I32 [3, n_batch]
+    ggml_tensor * self_kv_idx_swa = nullptr; // I32 [n_idx, n_group]
+    ggml_tensor * self_q_rng_swa  = nullptr; // I32 [3, n_batch]
+
+    // over rows copied from the lists, see llama_cparams::box_gather
+    ggml_tensor * self_kv_mask     = nullptr; // F32 [n_idx, n_batch]
+    ggml_tensor * self_kv_mask_swa = nullptr; // F32 [n_idx, n_batch]
 
     ggml_tensor * self_k_rot = nullptr;
     ggml_tensor * self_k_rot_swa = nullptr;
@@ -1279,7 +1299,8 @@ struct llm_graph_context {
             ggml_tensor * kv_idx = nullptr,  // I32 [n_idx, n_group], see ggml_flash_attn_ext_set_kv_idx(); without q_rng
                                              // I32 [n_rows], see ggml_flash_attn_ext_set_kv_rows()
             ggml_tensor * q_rng  = nullptr,  // I32 [3, n_tokens]
-            ggml_tensor * kv_hi  = nullptr) const; // I32 [n_tokens] with a list of rows, see ggml_flash_attn_ext_set_kv_rows_hi()
+            ggml_tensor * kv_hi  = nullptr,  // I32 [n_tokens] with a list of rows, see ggml_flash_attn_ext_set_kv_rows_hi()
+                   bool   no_flash = false) const; // attention through matrix products, for sizes with no flash attention kernel
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 
