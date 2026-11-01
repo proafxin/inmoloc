@@ -13,7 +13,8 @@
 # Every repeat runs all the targets one after another (A B C, A B C, ...), so that a slow period of the machine does not
 # land on one target only; the summary reports the median and the range over the repeats.
 #
-# The servers are the bench-* services of compose.yaml. Run from the repository root, with nothing else on the GPU:
+# Each target runs in the qwen or qwen-llamacpp service of compose.yaml, with the command line built here from the config.
+# Run from the repository root, with the compose services stopped and nothing else on the GPU:
 #   python3 scripts/bench-suite.py --out ~/Projects/bench-results/run1                  (default models, all targets)
 #   python3 scripts/bench-suite.py --models qwen3.8-mtp --tiers engine --targets base current
 #   python3 scripts/bench-suite.py --models qwen3.8-mtp --tiers server --workloads generate short long-in mixed
@@ -34,7 +35,9 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-PORT = {"llamacpp": 8130, "inmoloc": 8131}
+SERVICE = {"llamacpp": "qwen-llamacpp", "inmoloc": "qwen"}
+PORT = {"llamacpp": 8120, "inmoloc": 8100}
+ENGINE_BIN = {"llamacpp": "/app/llama", "inmoloc": "/app/local-inference"}
 
 WORDS = ("river stone market winter engine signal harbor letter garden copper season ledger bridge lantern "
          "orchard mirror valley thunder canvas anchor meadow compass silver timber beacon quarry").split()
@@ -44,23 +47,23 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def compose_env(target: dict, model: dict | None = None) -> dict:
+def compose_env(target: dict) -> dict:
     env = dict(os.environ)
     env["LLAMACPP_IMAGE" if target["kind"] == "llamacpp" else "INMOLOC_IMAGE"] = target["image"]
-    if model is not None:
-        env["BENCH_MODEL"]         = model["file"]
-        env["BENCH_COMMON_ARGS"]   = model.get("common_args", "")
-        env["BENCH_LLAMACPP_ARGS"] = model.get("llamacpp_args", "")
-        env["BENCH_INMOLOC_ARGS"]  = model.get("inmoloc_args", "")
-        # a target can add server arguments, e.g. to compare two settings of the same image in one run
-        if target.get("args"):
-            key = "BENCH_LLAMACPP_ARGS" if target["kind"] == "llamacpp" else "BENCH_INMOLOC_ARGS"
-            env[key] = (env[key] + " " + target["args"]).strip()
     return env
 
 
+def server_args(model: dict, target: dict) -> list:
+    kind = target["kind"]
+    args = ["--model", f"/models/{model['file']}", "--host", "0.0.0.0", "--port", str(PORT[kind]), "-ngl", "999", "--metrics"]
+    # a target can add server arguments, e.g. to compare two settings of the same image in one run
+    for text in (model.get("common_args", ""), model.get(f"{kind}_args", ""), target.get("args", "")):
+        args += text.split()
+    return args
+
+
 def compose(args: list, env: dict, **kw) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", "compose", "--profile", "bench", *args], cwd=ROOT, env=env, **kw)
+    return subprocess.run(["docker", "compose", *args], cwd=ROOT, env=env, **kw)
 
 
 def jsonl(text: str) -> list:
@@ -81,13 +84,13 @@ def jsonl(text: str) -> list:
 
 def run_engine(model: dict, target: dict, raw: str, ecfg: dict) -> dict:
     env = compose_env(target)
-    service = f"bench-engine-{target['kind']}"
+    service = ["--entrypoint", ENGINE_BIN[target["kind"]], SERVICE[target["kind"]]]
     path = f"/models/{model['file']}"
     extra = model.get("engine_args", "").split()
     res = {}
 
     b = ecfg.get("bench", {})
-    cmd = ["run", "--rm", service, "bench", "-m", path, "-ngl", "999", "-r", str(b.get("repetitions", 3)),
+    cmd = ["run", "--rm", *service, "bench", "-m", path, "-ngl", "999", "-r", str(b.get("repetitions", 3)),
            "-p", b.get("n_prompt", "512"), "-n", b.get("n_gen", "128"), "-o", "jsonl", *extra]
     out = compose(cmd, env, capture_output=True, text=True)
     open(raw + "-bench.log", "w").write(out.stdout + "\n--- stderr ---\n" + out.stderr)
@@ -96,7 +99,7 @@ def run_engine(model: dict, target: dict, raw: str, ecfg: dict) -> dict:
         res[f"bench/{test}/tok_s"] = row["avg_ts"]
 
     bb = ecfg.get("batched", {})
-    cmd = ["run", "--rm", service, "batched-bench", "-m", path, "-ngl", "999", "-c", str(model.get("engine_ctx", 20480)),
+    cmd = ["run", "--rm", *service, "batched-bench", "-m", path, "-ngl", "999", "-c", str(model.get("engine_ctx", 20480)),
            "-npp", bb.get("npp", "512"), "-ntg", bb.get("ntg", "64"), "-npl", bb.get("npl", "1,8,32"),
            "--output-format", "jsonl", *extra]
     out = compose(cmd, env, capture_output=True, text=True)
@@ -116,10 +119,10 @@ def run_engine(model: dict, target: dict, raw: str, ecfg: dict) -> dict:
 #
 
 def start_server(model: dict, target: dict, raw: str) -> str | None:
-    env = compose_env(target, model)
     service = f"bench-{target['kind']}"
-    compose(["rm", "-sf", service], env, capture_output=True)
-    if compose(["up", "-d", service], env).returncode != 0:
+    subprocess.run(["docker", "rm", "-f", service], capture_output=True)
+    cmd = ["run", "-d", "--name", service, "--service-ports", SERVICE[target["kind"]], *server_args(model, target)]
+    if compose(cmd, compose_env(target)).returncode != 0:
         return None
     url = f"http://localhost:{PORT[target['kind']]}"
     t0 = time.time()
@@ -146,7 +149,7 @@ def stop_server(target: dict, raw: str) -> None:
     service = f"bench-{target['kind']}"
     logs = subprocess.run(["docker", "logs", service], capture_output=True, text=True)
     open(raw + "-server.log", "w").write(logs.stdout + logs.stderr)
-    compose(["rm", "-sf", service], compose_env(target), capture_output=True)
+    subprocess.run(["docker", "rm", "-f", service], capture_output=True)
 
 
 def run_server(model: dict, target: dict, raw: str, workloads: dict, seed: int) -> dict:

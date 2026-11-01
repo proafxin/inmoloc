@@ -69,6 +69,43 @@ static void spec_retune(
     smpls[seq_id].reset(common_sampler_init(model, sparams));
 }
 
+// the sampler of a sequence, the first time it drafts
+static void common_speculative_sampler_init(common_sampler_ptr & smpl, const llama_model * model) {
+    if (smpl) {
+        return;
+    }
+
+    common_params_sampling sparams;
+    sparams.no_perf  = false;
+    sparams.top_k    = 10;
+    sparams.samplers = { COMMON_SAMPLER_TYPE_TOP_K };
+
+    smpl.reset(common_sampler_init(model, sparams));
+}
+
+// offload draft sampling to the backend: one chain for the output rows of every sequence, it holds no state
+static void common_speculative_backend_chain_init(std::vector<llama_sampler *> & chains, llama_context * ctx_dft) {
+    llama_sampler * chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    llama_sampler_chain_add(chain, llama_sampler_init_top_k(10));
+
+    if (llama_set_sampler(ctx_dft, LLAMA_SEQ_ID_ALL, chain)) {
+        chains.push_back(chain);
+    } else {
+        SPC_WRN("%s", "backend offload failed; using CPU sampler\n");
+        llama_sampler_free(chain);
+    }
+}
+
+static void common_speculative_backend_chain_free(std::vector<llama_sampler *> & chains, llama_context * ctx_dft) {
+    for (auto * chain : chains) {
+        if (ctx_dft) {
+            llama_set_sampler(ctx_dft, LLAMA_SEQ_ID_ALL, nullptr);
+        }
+        llama_sampler_free(chain);
+    }
+    chains.clear();
+}
+
 const std::map<std::string, common_speculative_type> common_speculative_type_from_name_map = {
     {"none",          COMMON_SPECULATIVE_TYPE_NONE},
     {"draft-simple",  COMMON_SPECULATIVE_TYPE_DRAFT_SIMPLE},
@@ -264,17 +301,8 @@ struct common_speculative_impl_draft_simple : public common_speculative_impl {
         //     result->smpl = common_sampler_init(llama_get_model(ctx_dft), params);
         // }
 
+        // created when a sequence first drafts
         smpls.resize(n_seq);
-        for (auto & smpl : smpls) {
-            common_params_sampling params;
-            params.no_perf = false;
-            params.top_k = 10;
-            params.samplers = {
-                COMMON_SAMPLER_TYPE_TOP_K,
-            };
-
-            smpl.reset(common_sampler_init(llama_get_model(ctx_dft), params));
-        }
 
         const bool vocab_cmpt = common_speculative_are_compatible(llama_get_model(ctx_tgt), llama_get_model(ctx_dft));
         SPC_DBG("vocab_cmpt = %d\n", vocab_cmpt);
@@ -297,6 +325,8 @@ struct common_speculative_impl_draft_simple : public common_speculative_impl {
     }
 
     void begin(llama_seq_id seq_id, const llama_tokens & /*prompt*/) override {
+        common_speculative_sampler_init(smpls[seq_id], llama_get_model(this->params.ctx_dft));
+
         // reset here rather than per round, or two identical requests differ
         common_sampler_reset(smpls[seq_id].get());
     }
@@ -544,29 +574,11 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
         // TODO: fix, how to call without malloc
         batch.token = (llama_token *) malloc(sizeof(llama_token) * n_b);
 
+        // created when a sequence first drafts
         smpls.resize(n_seq);
-        for (auto & s : smpls) {
-            common_params_sampling sparams;
-            sparams.no_perf  = false;
-            sparams.top_k    = 10;
-            sparams.samplers = { COMMON_SAMPLER_TYPE_TOP_K };
-            s.reset(common_sampler_init(llama_get_model(ctx_dft), sparams));
-        }
 
-        // offload draft sampling to the backend
-        backend_chains.assign(n_seq, nullptr);
         if (this->params.backend_sampling) {
-            for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
-                llama_sampler * chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
-                llama_sampler_chain_add(chain, llama_sampler_init_top_k(10));
-
-                if (!llama_set_sampler(ctx_dft, seq_id, chain)) {
-                    SPC_WRN("backend offload failed for seq_id=%d; using CPU sampler\n", (int) seq_id);
-                    llama_sampler_free(chain);
-                    chain = nullptr;
-                }
-                backend_chains[seq_id] = chain;
-            }
+            common_speculative_backend_chain_init(backend_chains, ctx_dft);
         }
 
         // turn on extraction of the target layers' hidden states
@@ -584,7 +596,7 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
         // (used both for the encoder output g_embd and the decoder pre-norm output).
         llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
 
-        pending_g_last.assign(n_seq, std::vector<float>(n_embd_dec, 0.0f));
+        pending_g_last.assign(n_seq, {});
         pending_pos_last.assign(n_seq, -1);
 
         verify_g.assign(n_seq, std::vector<float>());
@@ -593,17 +605,7 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
     }
 
     ~common_speculative_impl_draft_eagle3() override {
-        auto * ctx_dft = this->params.ctx_dft;
-        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) backend_chains.size(); ++seq_id) {
-            if (backend_chains[seq_id] == nullptr) {
-                continue;
-            }
-            if (ctx_dft) {
-                llama_set_sampler(ctx_dft, seq_id, nullptr);
-            }
-            llama_sampler_free(backend_chains[seq_id]);
-        }
-        backend_chains.clear();
+        common_speculative_backend_chain_free(backend_chains, this->params.ctx_dft);
 
         if (batch.token != nullptr) {
             free(batch.token);
@@ -761,6 +763,7 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
             pending_pos_last[seq_id] = batch_in.pos[end];
             verify_g_rows[seq_id]    = n_rows;
             verify_g[seq_id].resize((size_t) n_rows * n_embd_dec, 0.0f);
+            pending_g_last[seq_id].resize(n_embd_dec, 0.0f);
             std::memcpy(verify_g[seq_id].data(),       g_embd + (size_t) beg * n_embd_dec, row_bytes * n_rows);
             std::memcpy(pending_g_last[seq_id].data(), g_embd + (size_t) end * n_embd_dec, row_bytes);
         }
@@ -804,6 +807,7 @@ struct common_speculative_impl_draft_eagle3 : public common_speculative_impl {
 
             n_drafting++;
             drafting[seq_id] = true;
+            common_speculative_sampler_init(smpls[seq_id], llama_get_model(ctx_dft));
             common_sampler_reset(smpls[seq_id].get());
 
             llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, pending_pos_last[seq_id], -1);
@@ -1076,29 +1080,11 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
             batch_inject.pos = (llama_pos *) malloc(sizeof(llama_pos) * 4 * llama_n_batch(ctx_dft));
         }
 
+        // created when a sequence first drafts
         smpls.resize(n_seq);
-        for (auto & s : smpls) {
-            common_params_sampling sparams;
-            sparams.no_perf  = false;
-            sparams.top_k    = 10;
-            sparams.samplers = { COMMON_SAMPLER_TYPE_TOP_K };
-            s.reset(common_sampler_init(model_dft, sparams));
-        }
 
-        // offload draft sampling to the backend
-        backend_chains.assign(n_seq, nullptr);
         if (this->params.backend_sampling && !is_dflash2) {
-            for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) n_seq; ++seq_id) {
-                llama_sampler * chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
-                llama_sampler_chain_add(chain, llama_sampler_init_top_k(10));
-
-                if (!llama_set_sampler(ctx_dft, seq_id, chain)) {
-                    SPC_WRN("backend offload failed for seq_id=%d; using CPU sampler\n", (int) seq_id);
-                    llama_sampler_free(chain);
-                    chain = nullptr;
-                }
-                backend_chains[seq_id] = chain;
-            }
+            common_speculative_backend_chain_init(backend_chains, ctx_dft);
         }
 
         // turn on extraction of the target layers' input embeddings
@@ -1112,17 +1098,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
     }
 
     ~common_speculative_impl_draft_dflash() override {
-        auto * ctx_dft = this->params.ctx_dft;
-        for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) backend_chains.size(); ++seq_id) {
-            if (backend_chains[seq_id] == nullptr) {
-                continue;
-            }
-            if (ctx_dft) {
-                llama_set_sampler(ctx_dft, seq_id, nullptr);
-            }
-            llama_sampler_free(backend_chains[seq_id]);
-        }
-        backend_chains.clear();
+        common_speculative_backend_chain_free(backend_chains, this->params.ctx_dft);
 
         llama_batch_free(batch);
         llama_batch_free(batch_inject);
@@ -1254,6 +1230,7 @@ struct common_speculative_impl_draft_dflash : public common_speculative_impl {
                 continue;
             }
 
+            common_speculative_sampler_init(smpls[seq_id], llama_get_model(params.ctx_dft));
             common_sampler_reset(smpls[seq_id].get());
 
             const int32_t n = (int32_t) dp.pos0;
@@ -2134,12 +2111,14 @@ struct common_speculative_impl_ngram_cache : public common_speculative_impl {
     bool save_dynamic;
     bool save_static;
 
+    // loaded once at startup, shared read-only across all sequences
+    common_ngram_cache ngram_cache_static_shared;
+    common_ngram_cache ngram_cache_dynamic_shared;
+
     struct seq_info {
         size_t cache_size = 0; // number of tokens in n-gram cache
 
         common_ngram_cache ngram_cache_context;
-        common_ngram_cache ngram_cache_dynamic;
-        common_ngram_cache ngram_cache_static;
     };
 
     std::vector<seq_info> sinfos;
@@ -2168,11 +2147,7 @@ struct common_speculative_impl_ngram_cache : public common_speculative_impl {
 
         if (!path_static.empty()) {
             try {
-                auto ngram_cache_static = common_ngram_cache_load(path_static);
-
-                for (auto & sinfo : sinfos) {
-                    sinfo.ngram_cache_static = ngram_cache_static;
-                }
+                ngram_cache_static_shared = common_ngram_cache_load(path_static);
             } catch (...) {
                 SPC_ERR("failed to open static lookup cache: %s", path_static.c_str());
                 GGML_ABORT("Couldn't read static lookup cache");
@@ -2181,11 +2156,7 @@ struct common_speculative_impl_ngram_cache : public common_speculative_impl {
 
         if (!path_dynamic.empty()) {
             try {
-                auto ngram_cache_dynamic = common_ngram_cache_load(path_dynamic);
-
-                for (auto & sinfo : sinfos) {
-                    sinfo.ngram_cache_dynamic = ngram_cache_dynamic;
-                }
+                ngram_cache_dynamic_shared = common_ngram_cache_load(path_dynamic);
             } catch (...) {
                 SPC_ERR("failed to open dynamic lookup cache: %s", path_dynamic.c_str());
                 GGML_ABORT("Couldn't read dynamic lookup cache");
@@ -2233,8 +2204,8 @@ struct common_speculative_impl_ngram_cache : public common_speculative_impl {
         common_ngram_cache_draft(
                 inp, result, n_draft, LLAMA_NGRAM_MIN, LLAMA_NGRAM_MAX,
                 sinfo.ngram_cache_context,
-                sinfo.ngram_cache_dynamic,
-                sinfo.ngram_cache_static);
+                ngram_cache_dynamic_shared,
+                ngram_cache_static_shared);
 
         if (result.size() > 0) {
             // delete first token in result (which is the id_last token)

@@ -1566,7 +1566,7 @@ private:
             box = llama_memory_box_get_info(llama_get_memory(ctx_tgt), &info);
             if (box) {
                 // every request is admitted with its most output, so the most has to be given
-                if (params_base.max_output_tokens <= 0) {
+                if (params_base.max_output_tokens <= 0 && !params_base.embedding) {
                     SRV_ERR("%s", "the elastic memory needs --max-output-tokens, the most tokens a request generates\n");
                     return false;
                 }
