@@ -2588,8 +2588,14 @@ struct common_speculative_init_result::impl {
 common_speculative_init_result::common_speculative_init_result(
     common_params & params,
       llama_model * model_tgt,
-    llama_context * ctx_tgt) :
+    llama_context * ctx_tgt,
+    llama_context * ctx_dft_ready) :
     pimpl(new impl{}) {
+    if (ctx_dft_ready) {
+        pimpl->context.reset(ctx_dft_ready);
+        return;
+    }
+
     const bool has_draft = params.speculative.has_dft();
     const bool spec_mtp = std::find(params.speculative.types.begin(),
                                     params.speculative.types.end(),
@@ -2655,8 +2661,8 @@ llama_context * common_speculative_init_result::context() {
     return pimpl->context.get();
 }
 
-common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt) {
-    return std::make_unique<common_speculative_init_result>(params, model_tgt, ctx_tgt);
+common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt, llama_context * ctx_dft_ready) {
+    return std::make_unique<common_speculative_init_result>(params, model_tgt, ctx_tgt, ctx_dft_ready);
 }
 
 common_speculative_output_limits common_speculative_get_output_limits(

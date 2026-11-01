@@ -119,7 +119,7 @@ def run_engine(model: dict, target: dict, raw: str, ecfg: dict) -> dict:
 #
 
 def start_server(model: dict, target: dict, raw: str) -> str | None:
-    service = f"bench-{target['kind']}"
+    service = SERVICE[target["kind"]]
     subprocess.run(["docker", "rm", "-f", service], capture_output=True)
     cmd = ["run", "-d", "--name", service, "--service-ports", SERVICE[target["kind"]], *server_args(model, target)]
     if compose(cmd, compose_env(target)).returncode != 0:
@@ -146,7 +146,7 @@ def start_server(model: dict, target: dict, raw: str) -> str | None:
 
 
 def stop_server(target: dict, raw: str) -> None:
-    service = f"bench-{target['kind']}"
+    service = SERVICE[target["kind"]]
     logs = subprocess.run(["docker", "logs", service], capture_output=True, text=True)
     open(raw + "-server.log", "w").write(logs.stdout + logs.stderr)
     subprocess.run(["docker", "rm", "-f", service], capture_output=True)

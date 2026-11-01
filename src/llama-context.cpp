@@ -4533,6 +4533,25 @@ bool llama_context_box_finalize(llama_context * ctx, size_t bytes) {
     return ctx->box_finalize(bytes);
 }
 
+bool llama_context_box_follow(llama_context * ctx) {
+    return ctx->box_follow();
+}
+
+bool llama_context::box_follow() {
+    const auto * mem_kv = dynamic_cast<const llama_kv_cache *>(memory.get());
+    const llama_box * box = mem_kv ? mem_kv->get_box() : nullptr;
+    if (!box) {
+        return false;
+    }
+
+    memory->box_finalized();
+
+    cparams.n_ctx     = box->get_n_cells();
+    cparams.n_ctx_seq = box->get_n_cells();
+
+    return true;
+}
+
 void llama_context_reserve(llama_context * ctx) {
     ctx->sched_reserve_now();
 }

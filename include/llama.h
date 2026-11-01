@@ -871,6 +871,9 @@ extern "C" {
     // allocates an elastic memory created with box_deferred, of at most bytes bytes (whole blocks)
     LLAMA_API bool llama_context_box_finalize(struct llama_context * ctx, size_t bytes);
 
+    // for a context that keeps its tokens in the elastic memory of another (ctx_other), after that was finalized
+    LLAMA_API bool llama_context_box_follow(struct llama_context * ctx);
+
     // admits a request of seq_id: takes its state (if it has none) and the blocks of its n_input input tokens (minus
     // those the seq holds), and charges the blocks of up to n_output generated tokens, so that a running request never
     // waits for memory; false, with nothing taken, when it does not fit next to the charges of the admitted requests

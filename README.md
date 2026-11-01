@@ -89,18 +89,53 @@ On one RTX 5090 laptop GPU (24 GiB) with Qwen3.8-27B, MTP drafting of 2 tokens, 
 
 | Requests | Tokens/s | Tokens/s per request | Time to first token | Wait | Median between tokens | Longest gap | Failed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 43.2 | 44.2 | 0.26 s | 0.01 s | 50 ms | 59 ms | 0 |
-| 2 | 60.0 | 32.1 | 0.37 s | 0.00 s | 68 ms | 78 ms | 0 |
-| 4 | 169.9 | 46.3 | 0.67 s | 0.01 s | 49 ms | 72 ms | 0 |
-| 8 | 262.5 | 37.9 | 1.28 s | 0.12 s | 60 ms | 716 ms | 0 |
-| 16 | 339.3 | 25.7 | 2.73 s | 0.12 s | 88 ms | 1389 ms | 0 |
-| 32 | 333.2 | 21.7 | 2.63 s | 9.01 s | 118 ms | 1779 ms | 0 |
-| 64 | 379.6 | 19.0 | 1.77 s | 28.87 s | 117 ms | 2063 ms | 0 |
+| 1 | 44.9 | 45.9 | 0.25 s | 0.01 s | 47 ms | 56 ms | 0 |
+| 2 | 65.9 | 35.2 | 0.40 s | 0.00 s | 66 ms | 131 ms | 0 |
+| 4 | 166.8 | 47.3 | 0.61 s | 0.12 s | 47 ms | 333 ms | 0 |
+| 8 | 260.7 | 37.8 | 0.88 s | 0.28 s | 58 ms | 406 ms | 0 |
+| 16 | 359.6 | 26.7 | 2.29 s | 0.26 s | 85 ms | 1219 ms | 0 |
+| 32 | 347.9 | 22.3 | 2.57 s | 8.59 s | 114 ms | 1889 ms | 0 |
+| 64 | 371.7 | 18.5 | 1.62 s | 29.05 s | 119 ms | 598 ms | 0 |
 
-- **Scaling**: throughput rises to 16 requests and holds from there, with more requests waiting for memory.
-- **Memory**: 1033 blocks of 128 tokens, about 4.8 GiB, and a state takes 37 blocks, so at most 27 requests of this size run at once. At `--ubatch-size 512`, compute takes 528 MiB and the draft 1011 MiB.
-- **Startup**: ready in 15 seconds.
-- **Open**: two requests run slower per request than one or four, and a burst of new requests stalls the running ones for up to 2 seconds. The cause of the first is not known yet.
+### llama.cpp, 8 slots
+
+The same requests on the same GPU, model, cache type and MTP drafting, with the `server-cuda` image of 2026-11-01 and `-c 65536 --parallel 8 --n-predict 512`:
+
+| Requests | Tokens/s | Tokens/s per request | Time to first token | Wait | Median between tokens | Longest gap | Failed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 34.5 | 45.5 | 3.60 s | 0.03 s | 47 ms | 304 ms | 0 |
+| 2 | 64.6 | 35.1 | 0.44 s | 0.00 s | 67 ms | 133 ms | 0 |
+| 4 | 150.5 | 43.1 | 0.73 s | 0.13 s | 51 ms | 461 ms | 0 |
+| 8 | 216.6 | 31.2 | 1.39 s | 0.23 s | 67 ms | 943 ms | 0 |
+| 16 | 211.9 | 29.4 | 0.89 s | 9.78 s | 69 ms | 864 ms | 0 |
+| 32 | 213.4 | 28.6 | 0.75 s | 28.68 s | 69 ms | 880 ms | 0 |
+| 64 | 206.0 | 27.5 | 0.61 s | 68.01 s | 70 ms | 852 ms | 0 |
+
+### llama.cpp, 12 slots
+
+The same, with `-c 12288 --parallel 12 --n-predict 512`, the most slots that fit in `--vram-budget 22826M`:
+
+| Requests | Tokens/s | Tokens/s per request | Time to first token | Wait | Median between tokens | Longest gap | Failed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 36.1 | 46.8 | 3.24 s | 0.01 s | 46 ms | 299 ms | 0 |
+| 2 | 67.3 | 34.9 | 0.29 s | 0.07 s | 65 ms | 206 ms | 0 |
+| 4 | 153.0 | 44.0 | 0.71 s | 0.09 s | 49 ms | 456 ms | 0 |
+| 8 | 204.4 | 33.8 | 2.81 s | 1.47 s | 64 ms | 220 ms | 0 |
+| 16 | 135.8 | 21.4 | 1.81 s | 5.43 s | 86 ms | 1201 ms | 0 |
+| 32 | 197.5 | 20.9 | 1.17 s | 21.04 s | 87 ms | 1220 ms | 0 |
+| 64 | 206.0 | 20.3 | 0.85 s | 56.35 s | 90 ms | 1148 ms | 0 |
+
+### Comparison
+
+| Requests | llama.cpp 8 slots tokens/s | llama.cpp 12 slots tokens/s | inmoloc tokens/s | llama.cpp 8 slots time | llama.cpp 12 slots time | inmoloc time |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 34.5 | 36.1 | 44.9 | 14.8 s | 14.2 s | 11.4 s |
+| 2 | 64.6 | 67.3 | 65.9 | 15.8 s | 15.2 s | 15.5 s |
+| 4 | 150.5 | 153.0 | 166.8 | 13.6 s | 13.4 s | 12.3 s |
+| 8 | 216.6 | 204.4 | 260.7 | 18.9 s | 20.0 s | 15.7 s |
+| 16 | 211.9 | 135.8 | 359.6 | 38.7 s | 60.3 s | 22.8 s |
+| 32 | 213.4 | 197.5 | 347.9 | 76.8 s | 83.0 s | 47.1 s |
+| 64 | 206.0 | 206.0 | 371.7 | 159.1 s | 159.0 s | 88.2 s |
 
 ### Mixed requests
 
@@ -115,12 +150,6 @@ On an earlier build, on the same GPU and settings, N requests of 64 to 2048 inpu
 | 16 | 129.8 | 2.15 | 83 ms | 0 |
 | 32 | 178.9 | 1.79 | 125 ms | 0 |
 | 64 | 155.7 | 1.75 | 126 ms | 0 |
-
-Each level drew its own request sizes and tokens/s counts output only. At 64 requests the output rate falls below that of 32, while those requests asked for 15% less output and 11% more input and the rate of input and output tokens together rose from 878 to 945 per second. Why output falls under a mix is still open.
-
-- **Memory**: 5675 MiB of elastic memory, with a state of 172 MiB and 4.8 MiB per block of 128 tokens. The draft took 278 MiB of fixed memory, and its tokens live in the blocks.
-- **Requests at once**: about 20 on average, set by what the requests take and not by a number chosen at startup.
-- **GPU limits**: during the run the GPU held 1700 to 2100 of 3090 MHz under its power cap, and reached 89°C. Results on this machine differ between sessions.
 
 ### Serving
 

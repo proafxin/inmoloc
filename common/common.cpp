@@ -1291,6 +1291,7 @@ struct common_init_result::impl {
 
     llama_model_ptr   model;
     llama_context_ptr context;
+    llama_context_ptr context_dft; // an MTP draft on the elastic memory of the context, until the caller takes it
 
     std::vector<llama_adapter_lora_ptr> lora;
 
@@ -1512,14 +1513,36 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
                 llama_context_reserve(lctx);
             }
 
+            // the draft is created once, here: what it takes is known before the elastic memory is allocated
+            llama_context * ctx_dft = nullptr;
+            if (spec_mtp) {
+                cparams_dft.n_ctx         = llama_n_ctx(lctx);
+                cparams_dft.n_seq_max     = llama_n_seq_max(lctx);
+                cparams_dft.n_outputs_max = cparams_dft.n_ubatch;
+                cparams_dft.ctx_other     = lctx;
+
+                ctx_dft = llama_init_from_model(model, cparams_dft);
+                if (ctx_dft == nullptr) {
+                    COM_ERR("%s", "failed to create the MTP draft context\n");
+                    llama_free(lctx);
+                    return;
+                }
+            }
+
             size_t box_bytes = 0;
-            if (!common_budget_box(model, lctx, spec_mtp ? &cparams_dft : nullptr, params.speculative.draft.backend_sampling,
+            if (!common_budget_box(model, lctx, ctx_dft, params.speculative.draft.backend_sampling,
                         params.vram_budget, params.vram_budget_used, &box_bytes, &params.vram_predicted, &params.vram_free_at_start)) {
+                llama_free(ctx_dft);
                 llama_free(lctx);
                 return;
             }
 
             llama_context_box_finalize(lctx, box_bytes);
+
+            if (ctx_dft) {
+                llama_context_box_follow(ctx_dft);
+                pimpl->context_dft.reset(ctx_dft);
+            }
 
             params.box_bytes = box_bytes;
         } else {
@@ -1567,6 +1590,10 @@ llama_model * common_init_result::model() {
 
 llama_context * common_init_result::context() {
     return pimpl->context.get();
+}
+
+llama_context * common_init_result::release_context_dft() {
+    return pimpl->context_dft.release();
 }
 
 common_sampler * common_init_result::sampler(llama_seq_id seq_id) {

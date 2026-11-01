@@ -73,7 +73,7 @@ bool common_budget_params(
 bool common_budget_box(
                   llama_model * model,
                 llama_context * ctx,
-   const llama_context_params * cparams_dft,
+                llama_context * ctx_dft,
                            bool   dft_backend_sampling,
                          size_t   budget,
                          size_t   budget_used,

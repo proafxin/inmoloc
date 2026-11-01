@@ -3,6 +3,7 @@
 
   "targets": [
     { "name": "llamacpp", "kind": "llamacpp", "image": "ghcr.io/ggml-org/llama.cpp:server-cuda" },
+    { "name": "llamacpp-12", "kind": "llamacpp", "image": "ghcr.io/ggml-org/llama.cpp:server-cuda", "args": "-c 12288 --parallel 12" },
     { "name": "base",     "kind": "inmoloc",  "image": "inmoloc:base", "args": "--ctx-typical 2048" },
     { "name": "port8",    "kind": "inmoloc",  "image": "inmoloc:port8", "args": "--ctx-typical 2048" },
     { "name": "port9",    "kind": "inmoloc",  "image": "inmoloc:port9", "args": "--ctx-typical 2048" },
@@ -27,7 +28,7 @@
     { "name": "elastic3-bs", "kind": "inmoloc", "image": "inmoloc:elastic3", "args": "--rs-rollback replay --max-output-tokens 512 --backend-sampling" },
     { "name": "elastic4", "kind": "inmoloc", "image": "inmoloc:elastic4", "args": "--rs-rollback replay --max-output-tokens 512" },
     { "name": "elastic5", "kind": "inmoloc", "image": "inmoloc:elastic5", "args": "--rs-rollback replay --max-output-tokens 512" },
-    { "name": "elastic18", "kind": "inmoloc", "image": "inmoloc:elastic18", "args": "--rs-rollback replay --max-output-tokens 512" }
+    { "name": "elastic19", "kind": "inmoloc", "image": "inmoloc:elastic19", "args": "--rs-rollback replay --max-output-tokens 512" }
   ],
 
   "compare": [["current", "llamacpp"], ["current", "base"], ["current", "port8"], ["current", "port9"], ["current", "port10"], ["current", "port12"], ["replay", "current"], ["replay", "port21-replay"], ["current", "port21"], ["elastic2", "replay"], ["elastic2-bs", "elastic2"], ["elastic3-bs", "elastic3"], ["elastic4", "elastic3"]],
@@ -52,7 +53,7 @@
       "engine_args": "-fa on -ctk q8_0 -ctv q8_0",
       "engine_ctx": 20480,
       "common_args": "-fa on --cache-type-k q8_0 --cache-type-v q8_0 --spec-type draft-mtp --spec-draft-n-max 2 --cache-ram 0",
-      "llamacpp_args": "-c 65536 --parallel 8",
+      "llamacpp_args": "-c 65536 --parallel 8 --n-predict 512",
       "inmoloc_args": "--vram-budget 22826M",
       "workloads": ["mixed"],
       "levels": [1, 2, 4, 8, 16, 32, 64]

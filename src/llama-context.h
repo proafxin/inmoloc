@@ -84,6 +84,9 @@ struct llama_context {
     // allocates an elastic memory created with box_deferred: the cells and the context size follow it
     bool box_finalize(size_t bytes);
 
+    // the cells of a context on the elastic memory of another follow, once that is allocated
+    bool box_follow();
+
     // return true if the memory was updated
     bool memory_update(bool optimize);
 
