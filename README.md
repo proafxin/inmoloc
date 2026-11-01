@@ -2,29 +2,33 @@
 
 <div align="center">
 
-<b>Concurrent LLM serving on your own GPU, with the startup time and memory footprint of a local runtime.</b>
+<b>Serve as many requests as your VRAM budget fits elastically</b>
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
 
-inmoloc (Inferencia de Modelos Locales) serves many requests at once from one GPU. It starts in seconds, fits the number of concurrent requests to the memory you give it, and keeps each request's cost tied to its own context. It runs GGUF models, including vision models, through an OpenAI-compatible HTTP API.
+inmoloc (Inferencia de Modelos Locales) serves many requests at once on GPUs. It starts in seconds, fits the number of concurrent requests to the memory you give it, and keeps each request's cost tied to its own context. It runs GGUF models, including vision models, through an OpenAI-compatible HTTP API.
 
 inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps its model support, quantization formats and backends. It is maintained as its own project; see [differences from llama.cpp](docs/differences-from-llama.cpp.md) and [NOTICE](NOTICE).
 
 ## Features
 
-- **Shared KV cache**: all requests share one cache, and each request takes cells only for the tokens it holds, up to the model's training context.
-- **Elastic memory**: all request memory is one region of device memory, with nothing set aside per request at startup and no fixed number of slots. A request's input, and its recurrent state if the model has one, are known when it arrives, so it takes them at admission; its output is charged up to `--max-output-tokens` and taken in blocks of 128 tokens as it generates. A block holds the rows of every attention layer. States sit at one end and KV blocks at the other, and the rows of an MTP draft live in the blocks of the tokens they belong to, so any mix of short and long requests fits as long as its bytes do. See [Compatibility](#compatibility) for the models that use it.
-- **Memory budget**: at startup the server measures the weights, compute buffers, draft model, vision encoder, backend scratch memory, and what the process holds outside them (CUDA context, loaded kernels, libraries; measured for the process through NVML on NVIDIA GPUs). What those fixed costs leave of `--vram-budget` is request memory: the elastic memory where the model supports it, otherwise a KV cache and per-request state sized at startup. Memory does not grow while serving.
-- **Admission**: with elastic memory, a request is admitted when its state, input and output charge fit, and idle slots give up their cached prompts to make room. A request that does not fit waits with its cost in blocks, in a queue partitioned by that cost: free memory is compared with the queue on every server step, and the earliest request that fits starts, so a smaller request can start before a larger one that arrived first. Slot and prefix searches run only for a request that fits. A request longer than the model's context window, or too large for empty elastic memory, is rejected on arrival with an error. A running request has all the memory it can need, so nothing is preempted.
-- **Preemption on other models**: a request is admitted when its prompt and the output it is expected to generate (the mean of recent requests, at most its limit) fit in free memory. When running requests still outgrow the cache, the newest request is paused and the others continue. A paused request's state goes to the prompt cache in host memory (`--cache-ram`) and is restored when it resumes; without room there, it is recomputed.
-- **Per-request attention** (CUDA): each request reads only its own KV cells, so its cost grows with its own context, not with other requests. Quantized q8_0 and q4_0 caches are read directly.
-- **Prefix sharing**: a new request starts from the cached cells of another request with the same prefix, without copying them.
-- **Asynchronous vision encoder**: images are encoded on their own thread while other requests generate.
-- **Replay rollback for speculative decoding**: on hybrid gated delta-net models such as Qwen3.5, memory per request stays nearly the same at any draft depth.
-- **Low CPU load while waiting for the GPU** (CUDA): with `--gpu-wait block` the server thread sleeps instead of spinning a CPU core.
-- **Observability**: the startup log shows the memory projection and what fills it; Prometheus metrics cover KV cells, why requests wait before they get a slot, preemptions and the tokens restored after them, prefix sharing, attention cost and free device memory; `--slow-loop-ms` logs slow server iterations.
+llama.cpp and vLLM are as of the versions in [the comparison](#compared-with-llamacpp-and-vllm). The models that use elastic memory are listed under [Compatibility](#compatibility).
+
+- **No slot count or context size to guess.** llama.cpp needs `--parallel` and `--ctx-size` chosen by hand, and vLLM a fraction of GPU memory, and a wrong choice wastes memory or fails requests. inmoloc needs a memory budget and an output limit.
+- **Long and short requests share all the memory.** llama.cpp splits its cache into fixed parts by default, so a long request cannot use what another part leaves idle. With elastic memory, any mix of requests fits as long as its total size does.
+- **A full memory does not fail or undo running requests.** When llama.cpp's cache fills, every active request fails, and vLLM preempts requests that then have to recompute. With elastic memory, running requests never run out of memory, and new ones wait.
+- **Large requests do not hold up small ones.** In an arrival-order queue like vLLM's, smaller requests wait behind a large one. inmoloc starts the earliest request that fits.
+- **Fast startup.** vLLM profiles memory, captures graphs and compiles the model before it serves. inmoloc starts in seconds.
+- **Memory stays within the budget.** Everything the server needs is counted against `--vram-budget`, with no margin to tune, and memory does not grow while serving.
+- **Requests do not slow each other down through attention** (CUDA). In llama.cpp each request pays for the cells of all the others. In inmoloc a request's cost follows its own context.
+- **A shared prefix is computed once.** llama.cpp reuses a prefix only within a slot. inmoloc reuses it across requests.
+- **Images do not stop generation.** Other requests keep generating while images are encoded.
+- **Speculative decoding does not multiply recurrent state.** On hybrid gated delta-net models such as Qwen3.5, memory per request stays nearly the same at any draft depth.
+- **Waiting for the GPU does not cost a CPU core** (CUDA), with `--gpu-wait block`.
+- **Models without elastic memory keep running when the cache fills.** The newest request pauses, the others continue, and it resumes where it stopped.
+- **You can see where memory and time go.** The startup log shows what fills the budget, and Prometheus metrics and `--slow-loop-ms` show why requests wait and what is slow.
 
 ## Quick start
 
@@ -32,7 +36,7 @@ Run the published CUDA image (built with CUDA 12.8, so it needs NVIDIA driver 57
 
 ```sh
 docker run --gpus all -p 8080:8080 -v /path/to/models:/models ghcr.io/proafxin/inmoloc:latest \
-    -m /models/model.gguf -ngl 999 --flash-attn on --max-output-tokens 512 --vram-budget 22G
+    -m /models/model.gguf -ngl 999 --max-output-tokens 512 --vram-budget 22G
 ```
 
 Or build it yourself, for any hardware llama.cpp supports (see [the build guide](docs/build.md) for other backends and older CUDA versions):
@@ -45,39 +49,35 @@ cmake --build build --config Release -j --target local-inference-server
 Serve a model with a q8_0 KV cache and a 22 GiB memory budget. Elastic memory needs the most tokens a request may generate, and neither a context size nor a number of requests:
 
 ```sh
-build/bin/local-inference-server -m model.gguf --mmproj mmproj.gguf -ngl 999 --flash-attn on \
+build/bin/local-inference-server -m model.gguf --mmproj mmproj.gguf -ngl 999 \
     --cache-type-k q8_0 --cache-type-v q8_0 --max-output-tokens 512 \
     --vram-budget 22G --gpu-wait block --metrics --port 8100
 ```
 
-With MTP drafting on a gated delta-net model, use replay rollback. The log states what the budget holds:
+With MTP drafting on a gated delta-net model, use replay rollback. The startup log states what the elastic memory takes and which fixed costs the budget holds:
 
 ```sh
-build/bin/local-inference-server -m qwen3.8.gguf -ngl 999 --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 \
+build/bin/local-inference-server -m qwen3.8.gguf -ngl 999 --cache-type-k q8_0 --cache-type-v q8_0 \
     --spec-type draft-mtp --spec-draft-n-max 2 --rs-rollback replay --max-output-tokens 512 --vram-budget 22826M --port 8100
-```
-
-```text
-the elastic memory takes 5675 MiB: model 16053 + compute 529 + draft 278 + other 0 + runtime 290 are the fixed costs of the budget of 22826 MiB
 ```
 
 ## Server options
 
-The options below are specific to inmoloc; all other options are as in llama.cpp, see [the server documentation](tools/server/README.md).
+The options below are specific to inmoloc. `--n-predict`, `--fit`, `--fit-target` and `--fit-ctx` are removed from the server, and the other options are as in llama.cpp; see [the server documentation](tools/server/README.md).
 
 | Option | Default | Description |
 | --- | --- | --- |
 | `--vram-budget SIZE` | free device memory | Device memory the server may use, summed over the devices the model runs on (e.g. `22G`). |
-| `--max-output-tokens N` | required with elastic memory | The most tokens a request generates; its `max_tokens` is capped at it. A request is charged its `max_tokens` when it is admitted, at most this and what the context window leaves after its input. |
+| `--max-output-tokens N` | required with elastic memory | The most tokens a request generates. A request's `max_tokens` is capped at it, and a request without `max_tokens` uses it. |
 | `--ctx-size N` | automatic | Without elastic memory, the most tokens the KV cache holds; without it the cache is sized from the budget. Not used with elastic memory. |
 | `--parallel N` | auto | Upper limit on requests at once; the budget may lower it. No effect with elastic memory, where what runs is what fits. |
 | `--prefix-share`, `--no-prefix-share` | enabled | Let a new request start from another request's cached prefix. |
 | `--prefix-share-min N` | `256` | Least number of tokens a shared prefix must save. |
-| `--rs-rollback {snapshot,replay}` | `snapshot` | How recurrent state rolls back rejected speculative tokens. `replay` applies to gated delta-net models, and elastic memory with speculative drafting needs it. |
+| `--rs-rollback {snapshot,replay}` | `snapshot` | How recurrent state rolls back rejected speculative tokens. `replay` applies to gated delta-net models and takes less memory per request. |
 | `--gpu-wait {spin,yield,block}` | driver | How a thread waits for the GPU (CUDA). `block` sleeps and frees the CPU core. |
 | `--slow-loop-ms N` | `1000` | Log a time breakdown of server iterations slower than N ms. `0`: off. |
 
-When `--gpu-layers` is not given and the model does not fit, `--fit` chooses it against the budget, with no margin.
+Unless `--gpu-layers` says otherwise, all layers go on the device, and a model that does not fit there fails at load instead of running partly on the CPU. `--flash-attn` does not apply to elastic memory.
 
 ## Measured
 
@@ -153,7 +153,7 @@ llama.cpp at commit 56381e407 (2026-09-12); vLLM as of 2026-10-15.
 
 | | llama.cpp | vLLM | inmoloc |
 | --- | --- | --- | --- |
-| Startup | Loads the model | Profiles memory, captures CUDA graphs, compiles the model | Loads the model after short memory dry runs |
+| Startup | Loads the model | Profiles memory, captures CUDA graphs, compiles the model | Loads the model; with elastic memory, no dry runs |
 | GPU memory taken | What the model and context need | A fixed fraction (`--gpu-memory-utilization`) | What the model and context need, within `--vram-budget` |
 | KV cache | `--parallel` fixed parts by default, shared with `--kv-unified` | Shared pool of blocks | Shared, per token |
 | Memory per request | Fixed at startup | Fixed at startup | Taken at admission with elastic memory, else fixed at startup |
@@ -169,8 +169,8 @@ llama.cpp at commit 56381e407 (2026-09-12); vLLM as of 2026-10-15.
 
 - **Models**: GGUF models supported by llama.cpp at the base commit, see [docs/models.md](docs/models.md).
 - **API**: OpenAI-compatible chat completions, completions and embeddings, see [the server documentation](tools/server/README.md).
-- **Hardware and backends**: the same as llama.cpp: all its backends build and run, on the same GPUs and CPUs. Elastic memory needs CUDA, flash attention and all layers on one device; prompts are read faster on Turing or newer, whose tensor core kernels read them through one list. Other backends, and attention without flash attention, are being moved to it and do not run in this tree yet. Per-request attention and `--gpu-wait` are NVIDIA only (per-request attention for prompt chunks needs Turing or newer).
-- **Elastic memory by model**: attention models with one KV cache, sliding-window models, recurrent models and hybrid models use it. K-only MLA models do not run on it yet. Models with sparse attention caches (MSA, DSA, DSV4) and hybrid models with sliding-window or indexer caches use a KV cache and per-request state sized at startup.
+- **Hardware and backends**: the same as llama.cpp: all its backends build and run, on the same GPUs and CPUs. Elastic memory needs all layers on one device for now, and is tested on CUDA only; prompts are read faster on Turing or newer, whose tensor core kernels read them through one list. Per-request attention and `--gpu-wait` are NVIDIA only (per-request attention for prompt chunks needs Turing or newer).
+- **Elastic memory by model**: attention models with one KV cache, sliding-window models, recurrent models and hybrid models use it, including hybrid models with sliding-window caches. K-only MLA models are not tested on it yet. Models with sparse attention caches (MSA, DSA, DSV4) and hybrid models with indexer caches use a KV cache and per-request state sized at startup.
 - **Multiple GPUs**: llama.cpp's multi-GPU modes work (see [Multi-GPU](docs/multi-gpu.md)); the budget is summed over devices, and multi-GPU serving is not tested yet.
 
 ## Coming from llama.cpp
@@ -182,7 +182,7 @@ Most `llama-server` command lines run unchanged under the new name. To let inmol
 llama-server -m model.gguf -ngl 999 --flash-attn on --ctx-size 65536 --parallel 16 --kv-unified
 
 # inmoloc
-local-inference-server -m model.gguf -ngl 999 --flash-attn on --max-output-tokens 512 --vram-budget 22G
+local-inference-server -m model.gguf -ngl 999 --max-output-tokens 512 --vram-budget 22G
 ```
 
 | llama.cpp | inmoloc |
@@ -192,7 +192,10 @@ local-inference-server -m model.gguf -ngl 999 --flash-attn on --max-output-token
 | `--parallel N`: the number of slots | An upper limit, the budget runs as many requests at once as fit. No effect with elastic memory |
 | `--kv-unified-per-slot N` | `--vram-budget` sizes the cache, `--ctx-size` caps it |
 | `--kv-unified` | Always on; `--no-kv-unified` is refused |
-| `--fit-target` | Not used by the server: `--vram-budget` is the limit, with no margin |
+| `--n-predict N`: the default output of a request, which the request can override | Removed from the server: `--max-output-tokens` is the limit, and what a request without `max_tokens` uses |
+| `--gpu-layers` auto: `--fit` chooses how many layers fit | All layers go on the device, and a model that does not fit there fails at load |
+| `--flash-attn`, `--context-shift` | No effect with elastic memory |
+| `--fit`, `--fit-target`, `--fit-ctx` | Removed from the server: `--vram-budget` is the limit, with no margin |
 | `LLAMA_ARG_*` environment variables | `LOCAL_INFERENCE_ARG_*` |
 | `llamacpp:*` metrics | `local_inference:*` |
 | `ghcr.io/ggml-org/llama.cpp:server-cuda` | `ghcr.io/proafxin/inmoloc:latest` |

@@ -6,7 +6,7 @@ inmoloc started from llama.cpp at commit 56381e407 (2026-09-12) and is maintaine
 
 | | llama.cpp | inmoloc |
 | --- | --- | --- |
-| Target | Local inference on a very wide range of hardware | Serving many requests at once from one GPU, in production |
+| Target | Local inference on a very wide range of hardware | Serving many requests at once on GPUs, from one consumer GPU to multi-GPU production |
 | Design priority | Simplicity and uniform behavior across all backends | Serving behavior: concurrency, latency under load, predictable memory |
 | Serving paths | The same on every backend | CUDA first; other backends build and run, and fall back to the general paths |
 | Direction | Upstream project with its own contribution policy | Own direction; model support is ported from llama.cpp where needed |
@@ -18,7 +18,7 @@ inmoloc started from llama.cpp at commit 56381e407 (2026-09-12) and is maintaine
 | Number of requests at once | Fixed by `--parallel` | With elastic memory, whatever fits: this follows what the running requests take, and `--parallel` has no effect; on other models, the most that fit the memory budget (`--vram-budget`), up to `--parallel` |
 | KV cache per request | With `--parallel N`, by default the context is split into N fixed parts; with `--kv-unified`, one cache shared by all requests | Always one cache shared by all requests; a request takes cells for the tokens it holds |
 | Per-request state (recurrent and hybrid models) | Allocated at startup for every slot | With elastic memory, nothing at startup: one region of device memory holds the states of the running requests at one end and blocks of 128 tokens at the other, including the rows of an MTP draft; a request takes its state and input at admission, and its output as it generates, up to `--max-output-tokens` |
-| Memory projection | Fits the model and context to free memory with a margin (`--fit`) | Measures every part (weights, KV cache, per-request state, compute, draft, vision encoder, backend scratch, and the CUDA context, kernels and libraries the process holds, through NVML on NVIDIA GPUs) with no margin, and gives what the fixed costs leave to request memory: the elastic memory where the model supports it, otherwise a KV cache sized from the longest request the budget holds and, for a model with memory per request, the number of requests; a model without it runs `--parallel` requests that share the cache |
+| Memory projection | Fits the model and context to free memory with a margin (`--fit`) | Measures every part (weights, KV cache, per-request state, compute, draft, vision encoder, backend scratch, and the CUDA context, kernels and libraries the process holds, through NVML on NVIDIA GPUs) with no margin, and gives what the fixed costs leave to request memory: the elastic memory where the model supports it, sized from the real context with no dry run, all layers on the device, otherwise a KV cache sized from the longest request the budget holds and, for a model with memory per request, the number of requests; a model without it runs `--parallel` requests that share the cache |
 | Memory outside the buffers (CUDA pools, cuBLAS) | Grows while serving, when an operation first needs it | Sized from the worst-case graphs and reserved at startup |
 | KV cache full | Retries with smaller batches; when one token does not fit, every active request fails ("Context size has been exceeded.") and its cache is cleared | With elastic memory, a request is admitted with its state, input and output charge, idle slots give up their cached prompts for it, and otherwise it waits in a queue partitioned by its cost in blocks: the earliest request that fits starts, so a smaller request can start before a larger one that arrived first, and a running request never runs out of memory. Slot and prefix searches run only for a request that fits. A request longer than the model's context window, or too large for empty elastic memory, is rejected on arrival. On other models, admission keeps room for the output requests are expected to generate; when running requests still outgrow the cache, the newest requests give their cells back (preemption) and the others continue; a preempted request is restored from the prompt cache in host memory (`--cache-ram`) when it resumes, else recomputed |
 | Shared prefixes | A request reuses the prefix its own slot holds | A request can also start from the cells of another request with the same prefix (`--prefix-share`) |
@@ -51,7 +51,7 @@ Options of `local-inference-server` that are new, or that mean something else th
 | Option | Default | Description |
 | --- | --- | --- |
 | `--vram-budget SIZE` | free device memory | Device memory the server may use, summed over the devices the model runs on |
-| `--max-output-tokens N` | required with elastic memory | The most tokens a request generates; its `max_tokens` is capped at it. A request is charged its `max_tokens` when it is admitted, at most this and what the context window leaves after its input |
+| `--max-output-tokens N` | required with elastic memory | The most tokens a request generates. A request's `max_tokens` is capped at it, and a request without `max_tokens` uses it |
 | `--prefix-share`, `--no-prefix-share` | enabled | Let a new request start from another request's cached prefix |
 | `--prefix-share-min N` | `256` | Least number of tokens a shared prefix must save |
 | `--rs-rollback {snapshot,replay}` | `snapshot` | How recurrent state rolls back rejected speculative tokens |
@@ -64,7 +64,9 @@ Options of `local-inference-server` that are new, or that mean something else th
 | --- | --- | --- |
 | `-c`, `--ctx-size` | The KV cache size; `0` = the training context | The most the KV cache holds; not given, the cache is sized from `--vram-budget`; not used with elastic memory |
 | `-np`, `--parallel` | Number of slots; auto = 4 | Upper limit on requests at once, which the budget may lower; auto = as many as fit; no effect with elastic memory, where what runs is what fits |
-| `--fit`, `--fit-target` | Chooses the context size and GPU layers, leaving `--fit-target` (1 GiB) free per device | Chooses only the GPU layers, against `--vram-budget`, with no margin; `--fit-target` is not used by the server |
+| `-ngl`, `--gpu-layers` | Auto: `--fit` chooses how many layers fit | Auto: all layers go on the device, and a model that does not fit there fails at load |
+| `-fa`, `--flash-attn` | Chooses flash attention | No effect with elastic memory: the server chooses how attention reads it |
+| `--context-shift` | Shifts the context on long generation | No effect with elastic memory, where a request stays within the context window |
 | `-kvu`, `--kv-unified` | Off with an explicit `--parallel`, the context is split into fixed parts per slot | Always on; `--no-kv-unified` is refused |
 | `--cache-idle-slots` | Saves idle slots to the prompt cache when a new task starts | Saves an idle slot to the prompt cache when its memory is needed; until then it stays in the KV cache |
 | `--cache-ram` | The prompt cache in host memory; an entry keeps all the context checkpoints of its slot | Also holds the state of preempted requests until they resume; an entry keeps only the newest checkpoint |
@@ -74,6 +76,8 @@ Options of `local-inference-server` that are new, or that mean something else th
 | Option | Instead |
 | --- | --- |
 | `--kv-unified-per-slot N` | `--vram-budget` sizes the cache, `--ctx-size` caps it |
+| `-n`, `--n-predict` | `--max-output-tokens`: the limit, and what a request without `max_tokens` uses. In llama.cpp `--n-predict` is a default the request can override |
+| `--fit`, `--fit-target`, `--fit-ctx` | `--vram-budget` is the limit, with no margin |
 
 Environment variables start with `LOCAL_INFERENCE_` instead of `LLAMA_` (e.g. `LOCAL_INFERENCE_ARG_CTX_SIZE`).
 
