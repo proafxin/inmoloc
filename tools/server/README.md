@@ -47,7 +47,6 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--cpu-strict-batch <0\|1>` | use strict CPU placement (default: same as --cpu-strict) |
 | `--prio-batch N` | set process/thread priority : 0-normal, 1-medium, 2-high, 3-realtime (default: 0) |
 | `--poll-batch <0\|1>` | use polling to wait for work (default: same as --poll) |
-| `-c, --ctx-size N` | size of the prompt context (default: 0, 0 = loaded from model); in the server, the most the KV cache holds, 0 = sized from --vram-budget; not used with the elastic memory<br/>(env: LOCAL_INFERENCE_ARG_CTX_SIZE) |
 | `-b, --batch-size N` | logical maximum batch size (default: 2048)<br/>(env: LOCAL_INFERENCE_ARG_BATCH) |
 | `-ub, --ubatch-size N` | physical maximum batch size (default: 512)<br/>(env: LOCAL_INFERENCE_ARG_UBATCH) |
 | `--keep N` | number of tokens to keep from the initial prompt (default: 0, -1 = all) |
@@ -70,7 +69,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `-ctk, --cache-type-k TYPE` | KV cache data type for K<br/>allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1<br/>(default: f16)<br/>(env: LOCAL_INFERENCE_ARG_CACHE_TYPE_K) |
 | `-ctv, --cache-type-v TYPE` | KV cache data type for V<br/>allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1<br/>(default: f16)<br/>(env: LOCAL_INFERENCE_ARG_CACHE_TYPE_V) |
 | `-dt, --defrag-thold N` | KV cache defragmentation threshold (DEPRECATED)<br/>(env: LOCAL_INFERENCE_ARG_DEFRAG_THOLD) |
-| `--vram-budget SIZE` | device memory the server may use, summed over the devices the model runs on, e.g. 10G, 10240M or 10240 (MiB);<br/>the weights, the vision encoder, the draft model, the KV cache, the per-request state, the compute buffers and<br/>the memory the process holds outside them (e.g. the CUDA context) are measured; with the elastic memory, what the<br/>fixed costs leave is one region that holds the running requests, as many as fit; otherwise a<br/>model with memory per request (e.g. recurrent state, which depends on --rs-rollback) runs the most requests at<br/>once (at most --parallel) that fit in the KV cache, a model without it runs --parallel requests that share the<br/>KV cache, as many at once as their sizes allow, and the memory left goes to the cache (at most --ctx-size)<br/>(default: the free device memory; a larger budget is lowered to it) |
+| `--vram-budget SIZE` | device memory the server may use, summed over the devices the model runs on, e.g. 10G, 10240M or 10240 (MiB);<br/>the weights, the vision encoder, the draft model, the KV cache, the per-request state, the compute buffers and<br/>the memory the process holds outside them (e.g. the CUDA context) are measured; with the elastic memory, what the<br/>fixed costs leave is one region that holds the running requests, as many as fit; otherwise a<br/>model with memory per request (e.g. recurrent state, which depends on --rs-rollback) runs the most requests at<br/>once that fit in the KV cache, a model without it runs requests that share the KV cache, as many at once as<br/>their sizes allow, and the memory left goes to the cache<br/>(default: the free device memory; a larger budget is lowered to it) |
 | `--rs-rollback {snapshot,replay}` | how the recurrent state of a hybrid or recurrent model rolls back rejected speculative tokens:<br/>- snapshot: one state per draft position, the most memory per sequence and no extra compute<br/>- replay: one state and the inputs of the last step, a short extra scan per step for much less memory<br/>  per sequence (gated delta-net models, e.g. Qwen3.5; others use snapshot)<br/>(default: snapshot) |
 | `--gpu-wait {spin,yield,block}` | how a thread waits for the GPU to finish its work (CUDA only):<br/>- spin: keeps one CPU core busy, the lowest latency<br/>- yield: like spin, but gives the core to other threads that are ready to run<br/>- block: sleeps until the GPU is done, an idle core for a short wake-up delay per wait<br/>(default: chosen by the GPU driver) |
 | `--rpc SERVERS` | comma-separated list of RPC servers (host:port)<br/>(env: LOCAL_INFERENCE_ARG_RPC) |
@@ -168,14 +167,12 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--prefix-share-min N` | the least gain in tokens worth sharing a prefix from another slot (default: 256) |
 | `--slow-loop-ms N` | log a time breakdown of server loop iterations that take longer than N ms (default: 1000, 0 = off) |
 | `--cache-idle-slots, --no-cache-idle-slots` | save an idle slot to the prompt cache when its memory is needed, by a new task or to free KV cells; until then it stays in the KV cache (default: enabled, requires cache-ram)<br/>(env: LOCAL_INFERENCE_ARG_CACHE_IDLE_SLOTS) |
-| `--context-shift, --no-context-shift` | whether to use context shift on infinite text generation (default: disabled)<br/>(env: LOCAL_INFERENCE_ARG_CONTEXT_SHIFT) |
 | `-r, --reverse-prompt PROMPT` | halt generation at PROMPT, return control in interactive mode |
 | `-sp, --special` | special tokens output enabled (default: false) |
 | `--warmup, --no-warmup` | whether to perform warmup with an empty run (default: enabled) |
 | `--spm-infill` | use Suffix/Prefix/Middle pattern for infill (instead of Prefix/Suffix/Middle) as some models prefer this. (default: disabled) |
 | `--max-output-tokens N` | required with the elastic memory: the most tokens a request generates; a request's max_tokens is capped at it, and a request without max_tokens uses it<br/>(env: LOCAL_INFERENCE_ARG_MAX_OUTPUT_TOKENS) |
 | `--pooling {none,mean,cls,last,rank}` | pooling type for embeddings, use model default if unspecified<br/>(env: LOCAL_INFERENCE_ARG_POOLING) |
-| `-np, --parallel N` | most requests processed at once, which the memory budget may lower; no effect with the elastic memory, where what runs is what fits (default: -1, -1 = as many as fit)<br/>(env: LOCAL_INFERENCE_ARG_N_PARALLEL) |
 | `-cb, --cont-batching, -nocb, --no-cont-batching` | whether to enable continuous batching (a.k.a dynamic batching) (default: enabled)<br/>(env: LOCAL_INFERENCE_ARG_CONT_BATCHING) |
 | `-mm, --mmproj FILE` | path to a multimodal projector file. see tools/mtmd/README.md<br/>note: if -hf is used, this argument can be omitted<br/>(env: LOCAL_INFERENCE_ARG_MMPROJ) |
 | `-mmu, --mmproj-url URL` | URL to a multimodal projector file. see tools/mtmd/README.md<br/>(env: LOCAL_INFERENCE_ARG_MMPROJ_URL) |
@@ -919,7 +916,7 @@ By default, it is read-only. To make POST request to change global properties, y
 ```
 
 - `default_generation_settings` - the default generation settings for the `/completion` endpoint, which has the same fields as the `generation_settings` response object from the `/completion` endpoint.
-- `total_slots` - the total number of slots for process requests (defined by `--parallel` option)
+- `total_slots` - the most requests the server can hold at once
 - `model_path` - the path to model file (same with `-m` argument)
 - `chat_template` - the model's original Jinja2 prompt template
 - `chat_template_caps` - capabilities of the chat template (see `common/jinja/caps.h` for more info)
@@ -1705,7 +1702,7 @@ models_directory
 You may also specify default arguments that will be passed to every model instance:
 
 ```sh
-local-inference-server -ctx 8192 -n 1024 -np 2
+local-inference-server --max-output-tokens 1024 --vram-budget 22G
 ```
 
 Note: model instances inherit both command line arguments and environment variables from the router server.

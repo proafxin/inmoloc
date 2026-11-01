@@ -85,8 +85,6 @@ services:
       - bf16
       - --cache-type-v
       - bf16
-      - --flash-attn
-      - "on"
       - --gpu-wait
       - block
       - --metrics
@@ -125,8 +123,6 @@ services:
       - 0.0.0.0
       - --port
       - "8101"
-      - --parallel
-      - "256"
       - --batch-size
       - "2048"
       - --ubatch-size
@@ -138,8 +134,6 @@ services:
       - q8_0
       - --cache-type-v
       - q8_0
-      - --flash-attn
-      - "on"
       - --alias
       - harrier
     ports:

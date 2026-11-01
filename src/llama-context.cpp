@@ -752,9 +752,7 @@ void llama_context::sched_reserve() {
     // avoid reserving graphs with zero outputs - assume one output per sequence
     const int n_outputs = n_seqs;
 
-    LLAMA_LOG_WARN("%s: %s context: n_tokens = %d, n_seqs = %d, n_outputs = %d, n_outputs_max = %u, samplers = %zu\n", __func__,
-            cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP ? "draft" : "main", n_tokens, n_seqs, n_outputs, cparams.n_outputs_max,
-            sampling.samplers.size());
+    LLAMA_LOG_DEBUG("%s: worst-case: n_tokens = %d, n_seqs = %d, n_outputs = %d\n", __func__, n_tokens, n_seqs, n_outputs);
 
     resolve_fused_ops(mctx.get(), n_seqs);
 

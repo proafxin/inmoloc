@@ -1628,8 +1628,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_examples({LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-c", "--ctx-size"}, "N",
-        string_format("size of the prompt context (default: %d, 0 = loaded from model); in the server, the most the KV cache "
-                      "holds, 0 = sized from --vram-budget; not used with the elastic memory", params.n_ctx),
+        string_format("size of the prompt context (default: %d, 0 = loaded from model)", params.n_ctx),
         [](common_params & params, int value) {
             params.n_ctx = value;
             if (value == 0) {
@@ -1637,7 +1636,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 params.fit_params_min_ctx = UINT32_MAX;
             }
         }
-    ).set_env("LOCAL_INFERENCE_ARG_CTX_SIZE"));
+    ).set_env("LOCAL_INFERENCE_ARG_CTX_SIZE").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-n", "--predict", "--n-predict"}, "N",
         string_format(
@@ -1776,7 +1775,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.ctx_shift = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY}).set_env("LOCAL_INFERENCE_ARG_CONTEXT_SHIFT"));
+    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY}).set_env("LOCAL_INFERENCE_ARG_CONTEXT_SHIFT"));
     add_opt(common_arg(
         {"--chunks"}, "N",
         string_format("max number of chunks to process (default: %d, -1 = all)", params.n_chunks),
@@ -2571,27 +2570,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             LOG_WRN("DEPRECATED: --defrag-thold is deprecated and no longer necessary to specify\n");
         }
     ).set_env("LOCAL_INFERENCE_ARG_DEFRAG_THOLD"));
-    if (ex == LLAMA_EXAMPLE_SERVER) {
-        // this is to make sure this option appears in the server-specific section of the help message
-        add_opt(common_arg(
-            {"-np", "--parallel"}, "N",
-            string_format("most requests processed at once, which the memory budget may lower; no effect with the elastic memory, where what runs is what fits (default: %d, -1 = as many as fit)", params.n_parallel),
-            [](common_params & params, int value) {
-                if (value == 0) {
-                    throw std::invalid_argument("error: invalid value for n_parallel\n");
-                }
-                params.n_parallel = value;
-            }
-        ).set_env("LOCAL_INFERENCE_ARG_N_PARALLEL").set_examples({LLAMA_EXAMPLE_SERVER}));
-    } else {
-        add_opt(common_arg(
-            {"-np", "--parallel"}, "N",
-            string_format("number of parallel sequences to decode (default: %d)", params.n_parallel),
-            [](common_params & params, int value) {
-                params.n_parallel = value;
-            }
-        ).set_env("LOCAL_INFERENCE_ARG_N_PARALLEL"));
-    }
+    add_opt(common_arg(
+        {"-np", "--parallel"}, "N",
+        string_format("number of parallel sequences to decode (default: %d)", params.n_parallel),
+        [](common_params & params, int value) {
+            params.n_parallel = value;
+        }
+    ).set_env("LOCAL_INFERENCE_ARG_N_PARALLEL").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--vram-budget"}, "SIZE",
         "device memory the server may use, summed over the devices the model runs on, e.g. 10G, 10240M or 10240 (MiB);\n"
@@ -2599,8 +2584,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         "the memory the process holds outside them (e.g. the CUDA context) are measured; with the elastic memory, what the\n"
         "fixed costs leave is one region that holds the running requests, as many as fit; otherwise a\n"
         "model with memory per request (e.g. recurrent state, which depends on --rs-rollback) runs the most requests at\n"
-        "once (at most --parallel) that fit in the KV cache, a model without it runs --parallel requests that share the\n"
-        "KV cache, as many at once as their sizes allow, and the memory left goes to the cache (at most --ctx-size)\n"
+        "once that fit in the KV cache, a model without it runs requests that share the KV cache, as many at once as\n"
+        "their sizes allow, and the memory left goes to the cache\n"
         "(default: the free device memory; a larger budget is lowered to it)",
         [](common_params & params, const std::string & value) {
             size_t pos = 0;

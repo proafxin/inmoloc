@@ -75,8 +75,6 @@ public:
     // tensors of the views stay the same ones
     void finalize(size_t bytes);
 
-    uint32_t n_blocks_max = 0;
-
     //
     // layout
     //
@@ -202,6 +200,8 @@ private:
     size_t block_bytes    = 0;
     size_t rows_per_block = 0; // block_bytes/row_bytes
 
+    uint32_t n_blocks_max = 0; // what the box was created with, the most finalize() takes it to
+
     bool row_lists  = false;
     bool row_copies = false;
 
@@ -285,7 +285,6 @@ std::unique_ptr<llama_box> llama_box_make(
                 ggml_type   type_r,
                 ggml_type   type_s,
                  uint32_t   rs_size,
-                 uint32_t   n_seq_max,
                  uint32_t   n_rs_seq,
                      bool   rs_replay_req,
                      bool   offload,

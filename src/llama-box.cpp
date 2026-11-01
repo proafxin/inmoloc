@@ -533,7 +533,6 @@ std::unique_ptr<llama_box> llama_box_make(
                 ggml_type   type_r,
                 ggml_type   type_s,
                  uint32_t   rs_size,
-                 uint32_t   n_seq_max,
                  uint32_t   n_rs_seq,
                      bool   rs_replay_req,
                      bool   offload,

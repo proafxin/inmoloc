@@ -81,7 +81,6 @@ class ServerProcess:
     slot_save_path: str | None = None
     id_slot: int | None = None
     cache_prompt: bool | None = None
-    n_slots: int | None = None
     ctk: str | None = None
     ctv: str | None = None
     ctkd: str | None = None
@@ -100,7 +99,6 @@ class ServerProcess:
     models_preset: str | None = None
     no_models_autoload: bool | None = None
     lora_files: List[str] | None = None
-    enable_ctx_shift: int | None = False
     spec_type: str | None = None
     spec_draft_n_min: int | None = None
     spec_draft_n_max: int | None = None
@@ -223,10 +221,6 @@ class ServerProcess:
             server_args.extend(["--alias", self.model_alias])
         if self.model_tags:
             server_args.extend(["--tags", self.model_tags])
-        if self.n_ctx:
-            server_args.extend(["--ctx-size", self.n_ctx])
-        if self.n_slots:
-            server_args.extend(["--parallel", self.n_slots])
         if self.ctk:
             server_args.extend(["-ctk", self.ctk])
         if self.ctv:
@@ -253,8 +247,6 @@ class ServerProcess:
         if self.lora_files:
             for lora_file in self.lora_files:
                 server_args.extend(["--lora", lora_file])
-        if self.enable_ctx_shift:
-            server_args.append("--context-shift")
         if self.spec_type:
             server_args.extend(["--spec-type", self.spec_type])
         if self.api_key:
@@ -603,7 +595,6 @@ class ServerPreset:
         server.model_alias = "tinyllama-2"
         server.n_ctx = 512
         server.n_batch = 32
-        server.n_slots = 2
         server.n_predict = 64
         server.seed = 42
         return server
@@ -618,7 +609,6 @@ class ServerPreset:
         server.n_ctx = 512
         server.n_batch = 128
         server.n_ubatch = 128
-        server.n_slots = 2
         server.seed = 42
         server.server_embeddings = True
         return server
@@ -633,7 +623,6 @@ class ServerPreset:
         server.n_ctx = 1024
         server.n_batch = 300
         server.n_ubatch = 300
-        server.n_slots = 2
         server.fa = "on"
         server.seed = 42
         server.server_embeddings = True
@@ -656,7 +645,6 @@ class ServerPreset:
         server.model_alias = "tinyllama-infill"
         server.n_ctx = 2048
         server.n_batch = 1024
-        server.n_slots = 1
         server.n_predict = 64
         server.temperature = 0.0
         server.seed = 42
@@ -671,7 +659,6 @@ class ServerPreset:
         server.model_alias = "stories15m-moe"
         server.n_ctx = 2048
         server.n_batch = 1024
-        server.n_slots = 1
         server.n_predict = 64
         server.temperature = 0.0
         server.seed = 42
@@ -686,7 +673,6 @@ class ServerPreset:
         server.model_alias = "jina-reranker"
         server.n_ctx = 512
         server.n_batch = 512
-        server.n_slots = 1
         server.seed = 42
         server.server_reranking = True
         return server
@@ -701,7 +687,6 @@ class ServerPreset:
         server.model_alias = "tinygemma3"
         server.n_ctx = 1024
         server.n_batch = 512
-        server.n_slots = 2
         server.n_predict = 4
         server.seed = 42
         return server
@@ -717,7 +702,6 @@ class ServerPreset:
         server.model_hf_file = None
         server.n_ctx = 1024
         server.n_batch = 16
-        server.n_slots = 1
         server.n_predict = 16
         server.seed = 42
         return server

@@ -3214,12 +3214,6 @@ private:
             const size_t max_probs = cur_p->size;
             const size_t n_probs = std::min(max_probs, n_probs_request);
 
-            if (max_probs > 0 && cur_p->data[0].p > 1.0f) {
-                SLT_WRN(slot, "probability above 1: backend sampling = %d, %zu candidates, first id %d logit %f p %f, second p %f\n",
-                        slot.task->params.sampling.backend_sampling ? 1 : 0, max_probs, cur_p->data[0].id, cur_p->data[0].logit,
-                        cur_p->data[0].p, max_probs > 1 ? cur_p->data[1].p : 0.0f);
-            }
-
             // set probability for sampled token
             for (size_t i = 0; i < max_probs; i++) {
                 if (cur_p->data[i].id == result.tok) {

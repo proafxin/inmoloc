@@ -2524,7 +2524,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     std::shared_ptr<llama_box> box_own;
                     if (cparams.elastic) {
                         box_own = llama_box_make(*this, GGML_TYPE_F16, GGML_TYPE_F16, 0,
-                                GGML_TYPE_F32, GGML_TYPE_F32, std::max((uint32_t) 1, cparams.n_rs_cells), cparams.n_seq_max,
+                                GGML_TYPE_F32, GGML_TYPE_F32, std::max((uint32_t) 1, cparams.n_rs_cells),
                                 cparams.n_rs_seq, cparams.rs_replay, cparams.offload_kqv,
                                 cparams.box_bytes, cparams.box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16,
                                 [](int32_t) { return false; }, [](int32_t) { return true; });
@@ -2583,7 +2583,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             const auto & hp = hparams;
 
                             box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
-                                    GGML_TYPE_F32, GGML_TYPE_F32, std::max((uint32_t) 1, cparams.n_rs_cells), cparams.n_seq_max,
+                                    GGML_TYPE_F32, GGML_TYPE_F32, std::max((uint32_t) 1, cparams.n_rs_cells),
                                     cparams.n_rs_seq, cparams.rs_replay, cparams.offload_kqv,
                                     cparams.box_bytes, cparams.box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16,
                                     filter_attn ? filter_attn : [&hp](int32_t il) { return !hp.is_recr(il); },
@@ -2728,7 +2728,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             std::shared_ptr<llama_box> box_own;
                             if (cparams.elastic && !cparams.ctx_other && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
                                 box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
-                                        GGML_TYPE_F32, GGML_TYPE_F32, 0, cparams.n_seq_max, 0, false, cparams.offload_kqv,
+                                        GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
                                         cparams.box_bytes, cparams.box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16,
                                         filter ? filter : [](int32_t) { return true; }, nullptr);
                             }
@@ -2762,7 +2762,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         std::shared_ptr<llama_box> box_own;
                         if (cparams.elastic && !in_box && !cparams.ctx_other && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
                             box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
-                                    GGML_TYPE_F32, GGML_TYPE_F32, 0, cparams.n_seq_max, 0, false, cparams.offload_kqv,
+                                    GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
                                     cparams.box_bytes, cparams.box_deferred, cparams.box_draft, cparams.box_draft_type_k, cparams.box_draft_type_v,
                                     filter ? filter : [](int32_t) { return true; }, nullptr);
                         }

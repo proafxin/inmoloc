@@ -64,15 +64,13 @@ build/bin/local-inference-server -m qwen3.8.gguf -ngl 999 --cache-type-k q8_0 --
 
 ## Server options
 
-The options below are specific to inmoloc. `--n-predict`, `--fit`, `--fit-target` and `--fit-ctx` are removed from the server, and the other options are as in llama.cpp; see [the server documentation](tools/server/README.md).
+The options below are specific to inmoloc. `--ctx-size`, `--parallel`, `--context-shift`, `--n-predict`, `--fit`, `--fit-target` and `--fit-ctx` are removed from the server, and the other options are as in llama.cpp; see [the server documentation](tools/server/README.md).
 
 | Option | Default | Description |
 | --- | --- | --- |
 | `--vram-budget SIZE` | free device memory | Device memory the server may use, summed over the devices the model runs on (e.g. `22G`). |
 | `--max-output-tokens N` | required with elastic memory | The most tokens a request generates. A request's `max_tokens` is capped at it, and a request without `max_tokens` uses it. |
 | `--ubatch-size N` | `512` | The most tokens in one GPU step. It sets the compute memory of the model and of an MTP draft, which are fixed costs of the budget, and not how many requests run. |
-| `--ctx-size N` | automatic | Without elastic memory, the most tokens the KV cache holds; without it the cache is sized from the budget. Not used with elastic memory. |
-| `--parallel N` | auto | Upper limit on requests at once; the budget may lower it. No effect with elastic memory, where what runs is what fits. |
 | `--prefix-share`, `--no-prefix-share` | enabled | Let a new request start from another request's cached prefix. |
 | `--prefix-share-min N` | `256` | Least number of tokens a shared prefix must save. |
 | `--rs-rollback {snapshot,replay}` | `snapshot` | How recurrent state rolls back rejected speculative tokens. `replay` applies to gated delta-net models and takes less memory per request. |
@@ -89,13 +87,13 @@ On one RTX 5090 laptop GPU (24 GiB) with Qwen3.8-27B, MTP drafting of 2 tokens, 
 
 | Requests | Tokens/s | Tokens/s per request | Time to first token | Wait | Median between tokens | Longest gap | Failed |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 44.9 | 45.9 | 0.25 s | 0.01 s | 47 ms | 56 ms | 0 |
-| 2 | 65.9 | 35.2 | 0.40 s | 0.00 s | 66 ms | 131 ms | 0 |
-| 4 | 166.8 | 47.3 | 0.61 s | 0.12 s | 47 ms | 333 ms | 0 |
-| 8 | 260.7 | 37.8 | 0.88 s | 0.28 s | 58 ms | 406 ms | 0 |
-| 16 | 359.6 | 26.7 | 2.29 s | 0.26 s | 85 ms | 1219 ms | 0 |
-| 32 | 347.9 | 22.3 | 2.57 s | 8.59 s | 114 ms | 1889 ms | 0 |
-| 64 | 371.7 | 18.5 | 1.62 s | 29.05 s | 119 ms | 598 ms | 0 |
+| 1 | 45.1 | 45.8 | 0.21 s | 0.01 s | 47 ms | 54 ms | 0 |
+| 2 | 62.4 | 33.3 | 0.31 s | 0.00 s | 66 ms | 74 ms | 0 |
+| 4 | 173.3 | 46.9 | 0.39 s | 0.12 s | 47 ms | 167 ms | 0 |
+| 8 | 274.4 | 38.4 | 0.91 s | 0.10 s | 58 ms | 347 ms | 0 |
+| 16 | 353.9 | 26.2 | 2.25 s | 0.10 s | 87 ms | 1025 ms | 0 |
+| 32 | 365.1 | 23.0 | 2.16 s | 8.06 s | 112 ms | 1398 ms | 0 |
+| 64 | 377.3 | 18.7 | 1.46 s | 28.55 s | 116 ms | 534 ms | 0 |
 
 ### llama.cpp, 8 slots
 
@@ -129,13 +127,13 @@ The same, with `-c 12288 --parallel 12 --n-predict 512`, the most slots that fit
 
 | Requests | llama.cpp 8 slots tokens/s | llama.cpp 12 slots tokens/s | inmoloc tokens/s | llama.cpp 8 slots time | llama.cpp 12 slots time | inmoloc time |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 34.5 | 36.1 | 44.9 | 14.8 s | 14.2 s | 11.4 s |
-| 2 | 64.6 | 67.3 | 65.9 | 15.8 s | 15.2 s | 15.5 s |
-| 4 | 150.5 | 153.0 | 166.8 | 13.6 s | 13.4 s | 12.3 s |
-| 8 | 216.6 | 204.4 | 260.7 | 18.9 s | 20.0 s | 15.7 s |
-| 16 | 211.9 | 135.8 | 359.6 | 38.7 s | 60.3 s | 22.8 s |
-| 32 | 213.4 | 197.5 | 347.9 | 76.8 s | 83.0 s | 47.1 s |
-| 64 | 206.0 | 206.0 | 371.7 | 159.1 s | 159.0 s | 88.2 s |
+| 1 | 34.5 | 36.1 | 45.1 | 14.8 s | 14.2 s | 11.4 s |
+| 2 | 64.6 | 67.3 | 62.4 | 15.8 s | 15.2 s | 16.4 s |
+| 4 | 150.5 | 153.0 | 173.3 | 13.6 s | 13.4 s | 11.8 s |
+| 8 | 216.6 | 204.4 | 274.4 | 18.9 s | 20.0 s | 14.9 s |
+| 16 | 211.9 | 135.8 | 353.9 | 38.7 s | 60.3 s | 23.1 s |
+| 32 | 213.4 | 197.5 | 365.1 | 76.8 s | 83.0 s | 44.9 s |
+| 64 | 206.0 | 206.0 | 377.3 | 159.1 s | 159.0 s | 86.9 s |
 
 ### Mixed requests
 
@@ -226,7 +224,7 @@ llama.cpp at commit 56381e407 (2026-09-12); vLLM as of 2026-10-15.
 
 ## Coming from llama.cpp
 
-`llama-server` command lines need the new name and `--max-output-tokens`, and those with `--n-predict` or the `--fit` options need those removed. To let inmoloc size the server for you, replace the fixed sizes with a memory budget:
+`llama-server` command lines need the new name and `--max-output-tokens`, and those with `--ctx-size`, `--parallel`, `--context-shift`, `--n-predict` or the `--fit` options need those removed. To let inmoloc size the server for you, replace the fixed sizes with a memory budget:
 
 ```sh
 # llama.cpp
@@ -239,13 +237,14 @@ local-inference-server -m model.gguf -ngl 999 --max-output-tokens 512 --vram-bud
 | llama.cpp | inmoloc |
 | --- | --- |
 | `llama-server`, `llama-cli`, ... | `local-inference-server`, `local-inference-cli`, ...; unified binary `local-inference` |
-| `--ctx-size N`: the KV cache size | The most the KV cache holds. Leave it out to size the cache from `--vram-budget`. Not used with elastic memory |
-| `--parallel N`: the number of slots | An upper limit, the budget runs as many requests at once as fit. No effect with elastic memory |
-| `--kv-unified-per-slot N` | `--vram-budget` sizes the cache, `--ctx-size` caps it |
+| `--ctx-size N`: the KV cache size | Removed from the server: `--vram-budget` sizes the memory |
+| `--parallel N`: the number of slots | Removed from the server: as many requests run at once as fit |
+| `--kv-unified-per-slot N` | `--vram-budget` sizes the cache |
 | `--kv-unified` | Always on; `--no-kv-unified` is refused |
 | `--n-predict N`: the default output of a request, which the request can override | Removed from the server: `--max-output-tokens` is the limit, and what a request without `max_tokens` uses |
 | `--gpu-layers` auto: `--fit` chooses how many layers fit | All layers go on the device, and a model that does not fit there fails at load |
-| `--flash-attn`, `--context-shift` | No effect with elastic memory |
+| `--context-shift` | Removed from the server: a request stays within the context window |
+| `--flash-attn` | No effect with elastic memory |
 | `--fit`, `--fit-target`, `--fit-ctx` | Removed from the server: `--vram-budget` is the limit, with no margin |
 | `LLAMA_ARG_*` environment variables | `LOCAL_INFERENCE_ARG_*` |
 | `llamacpp:*` metrics | `local_inference:*` |

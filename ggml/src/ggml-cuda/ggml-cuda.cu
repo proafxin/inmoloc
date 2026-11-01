@@ -4870,10 +4870,6 @@ static size_t ggml_cuda_cublas_cost(int device) {
         // measure, since it moves with the other processes: then only the workspace is known
         const size_t taken = own && own_0 > 0 && own_1 > own_0 ? own_1 - own_0 : 0;
 
-        GGML_LOG_INFO("%s: device %d: handle %zu MiB, process %zu -> %zu MiB (%s), workspace %zu MiB\n", __func__, device,
-                taken/(1024*1024), own_0/(1024*1024), own_1/(1024*1024), own ? "measured" : "not measured",
-                ggml_cuda_cublas_workspace_size(device)/(1024*1024));
-
         cost[device] = taken + ggml_cuda_cublas_workspace_size(device);
     }
     return cost[device];
