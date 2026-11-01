@@ -118,6 +118,9 @@ public:
                  const char *   name_tag = "",
         // the elastic memory that holds the cells, see llama_box: kv_size is its cells then
                   llama_box *   box = nullptr,
+        // offset added to the model layer index when looking up K/V tensors in the box, for caches
+        // that share a box with another cache but use a different range of layer slots (e.g. indexer)
+                  int32_t       box_il_offset = 0,
         // the elastic memory of a target context, whose blocks hold the rows of this draft context
         std::shared_ptr<llama_box> box_ref = nullptr,
         // the elastic memory this cache owns, a model whose only memory is this cache
@@ -369,6 +372,7 @@ private:
 
     // the elastic memory that holds the cells, nullptr when the cache has its own buffers
     llama_box * box = nullptr;
+    int32_t box_il_offset = 0; // added to il when looking up K/V in the box (for indexer caches sharing a box)
 
     // a draft context keeps the box of its target alive, and takes the blocks for its own tokens
     std::shared_ptr<llama_box> box_ref;

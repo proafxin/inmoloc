@@ -2630,6 +2630,9 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* rs_replay         */ cparams.rs_replay,
                             /* offload           */ cparams.offload_kqv,
                             /* unified           */ cparams.kv_unified,
+                            /* use_box           */ cparams.elastic,
+                            /* box_bytes         */ cparams.box_bytes,
+                            /* box_deferred      */ cparams.box_deferred,
                             /* filter_attn       */ std::move(filter_attn),
                             /* filter_recr       */ std::move(filter_recr),
                             /* filter_idx        */ std::move(filter_idx));
@@ -2786,6 +2789,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 nullptr,
                                 "",
                                 nullptr,
+                                0,
                                 in_box ? params.box : nullptr,
                                 box_own);
                     }

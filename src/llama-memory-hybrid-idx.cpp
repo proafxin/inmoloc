@@ -36,6 +36,9 @@ llama_memory_hybrid_idx::llama_memory_hybrid_idx(
                      bool   rs_replay,
                      bool   offload,
                      bool   unified,
+                     bool   use_box,
+                   size_t   box_bytes,
+                     bool   box_deferred,
                             /* layer filters */
     const layer_filter_cb & filter_attn,
     const layer_filter_cb & filter_recr,
@@ -45,7 +48,23 @@ llama_memory_hybrid_idx::llama_memory_hybrid_idx(
         type_k, type_v, v_trans, kv_size, n_pad, n_swa, swa_type,
         type_r, type_s, rs_size,
         n_seq_max, n_rs_seq, rs_replay, offload, unified,
-        filter_attn, filter_recr),
+        filter_attn, filter_recr,
+        use_box, box_bytes, box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16,
+        // build indexer attn_layer descriptors for the box: K-only (has_v=false), one head of indexer_head_size
+        // use il + n_layer_all as the box slot to avoid colliding with the main attention layers
+        [&]() -> std::vector<llama_box::attn_layer> {
+            if (!use_box || filter_idx == nullptr || model.hparams.indexer_head_size == 0) {
+                return {};
+            }
+            std::vector<llama_box::attn_layer> layers;
+            for (uint32_t il = 0; il < model.hparams.n_layer_all; ++il) {
+                if (filter_idx(il)) {
+                    layers.push_back({ (int32_t)(il + model.hparams.n_layer_all), type_k, type_k,
+                                       model.hparams.indexer_head_size, model.hparams.indexer_head_size, false });
+                }
+            }
+            return layers;
+        }()),
     hparams_idx(model.hparams),
     mem_idx(filter_idx == nullptr ? nullptr : [&] {
         // MQA with a single key head of indexer_head_size, as llama_kv_cache_dsa shapes its own
@@ -60,12 +79,17 @@ llama_memory_hybrid_idx::llama_memory_hybrid_idx(
         hparams_idx.n_embd_head_k_mla_impl = model.hparams.indexer_head_size;
         hparams_idx.n_embd_head_v_mla_impl = model.hparams.indexer_head_size;
 
-        LLAMA_LOG_INFO("%s: creating indexer KV cache, size = %u cells\n", __func__, kv_size);
+        const uint32_t n_cells = use_box && get_box() ? get_box()->get_n_cells() : kv_size;
+        LLAMA_LOG_INFO("%s: creating indexer KV cache, size = %u cells%s\n", __func__, n_cells,
+                       use_box ? " (elastic)" : "");
 
+        // box_il_offset = n_layer_all so this cache looks up il + n_layer_all in the box,
+        // matching the extra_attn slots registered above
         return new llama_kv_cache(
             model, hparams_idx, type_k, type_v, v_trans, offload, unified,
-            kv_size, n_seq_max, n_pad, n_swa, swa_type,
-            nullptr, filter_idx, nullptr, nullptr, "idx_");
+            n_cells, n_seq_max, n_pad, n_swa, swa_type,
+            nullptr, filter_idx, nullptr, nullptr, "idx_",
+            use_box ? get_box() : nullptr, use_box ? (int32_t) model.hparams.n_layer_all : 0);
     }()) {}
 
 llama_memory_context_ptr llama_memory_hybrid_idx::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {
@@ -104,6 +128,11 @@ llama_memory_context_ptr llama_memory_hybrid_idx::init_batch(llama_batch_allocr 
         if (balloc.get_n_used() < balloc.get_n_tokens()) {
             // failed to find a suitable split
             break;
+        }
+
+        // the box first gives the seqs their states and pages, which the caches then place the ubatches in
+        if (get_box() && !box_prepare(ubatches)) {
+            return std::make_unique<llama_memory_hybrid_idx_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
         }
 
         // prepare the recurrent batches first

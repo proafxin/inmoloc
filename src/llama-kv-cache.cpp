@@ -85,9 +85,11 @@ llama_kv_cache::llama_kv_cache(
     const  layer_share_cb & share,
              const char *   name_tag,
                 llama_box *   box_in,
+                  int32_t     box_il_offset_in,
     std::shared_ptr<llama_box>  box_ref_in,
     std::shared_ptr<llama_box>  box_own_in) :
     model(model), hparams(hparams), v_trans(v_trans), box(box_ref_in ? box_ref_in.get() : (box_own_in ? box_own_in.get() : box_in)),
+    box_il_offset(box_il_offset_in),
     box_ref(std::move(box_ref_in)), box_own(std::move(box_own_in)),
     n_seq_max(n_seq_max), n_stream(unified ? 1 : n_seq_max), n_pad(n_pad), n_swa(n_swa), swa_type(swa_type),
     other(static_cast<llama_kv_cache *>(mem_other)),
@@ -251,8 +253,8 @@ llama_kv_cache::llama_kv_cache(
 
         if (box) {
             // views of the whole box, read and written through the rows of the cells, see cell_row()
-            ggml_tensor * k = box->get_k(il);
-            ggml_tensor * v = box->get_v(il);
+            ggml_tensor * k = box->get_k(il + box_il_offset);
+            ggml_tensor * v = box->get_v(il + box_il_offset);
             GGML_ASSERT(k && (v || !has_v) && k->type == type_k);
 
             map_layer_ids[il] = layers.size();

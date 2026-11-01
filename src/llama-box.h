@@ -276,7 +276,8 @@ private:
 
 // the elastic memory of a model; filter_attn selects the attention layers, and filter_recr the recurrent ones (nullptr
 // for a model without them, which ignores the state parameters); kv_size cells and rs_size states size it when box_bytes
-// is 0
+// is 0; extra_attn holds pre-built layer descriptors for layers whose dimensions differ from the main hparams (e.g. an
+// indexer cache with a different head size), appended after the main attention layers
 std::unique_ptr<llama_box> llama_box_make(
         const llama_model & model,
                 ggml_type   type_k,
@@ -294,4 +295,5 @@ std::unique_ptr<llama_box> llama_box_make(
                 ggml_type   box_draft_type_k,
                 ggml_type   box_draft_type_v,
     const std::function<bool(int32_t)> & filter_attn,
-    const std::function<bool(int32_t)> & filter_recr);
+    const std::function<bool(int32_t)> & filter_recr,
+    std::vector<llama_box::attn_layer>   extra_attn = {});

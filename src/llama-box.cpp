@@ -542,7 +542,8 @@ std::unique_ptr<llama_box> llama_box_make(
                 ggml_type   box_draft_type_k,
                 ggml_type   box_draft_type_v,
     const std::function<bool(int32_t)> & filter_attn,
-    const std::function<bool(int32_t)> & filter_recr) {
+    const std::function<bool(int32_t)> & filter_recr,
+    std::vector<llama_box::attn_layer>   extra_attn) {
     const auto & hparams = model.hparams;
 
     const bool has_recr = filter_recr != nullptr;
@@ -586,6 +587,11 @@ std::unique_ptr<llama_box> llama_box_make(
         const uint32_t il = hparams.n_layer();
         draft = { (int32_t) il, box_draft_type_k, box_draft_type_v, hparams.n_embd_k_gqa(il), hparams.n_embd_v_gqa(il), !hparams.is_mla() };
         has_draft = true;
+    }
+
+    // append extra attention layers (e.g. indexer cache with different head dimensions)
+    for (auto & l : extra_attn) {
+        attn.push_back(std::move(l));
     }
 
     // every layer has to be read in place, or attention copies the rows of all of them

@@ -40,12 +40,14 @@ llama_memory_hybrid::llama_memory_hybrid(
                      bool   box_deferred,
                      bool   box_draft,
                 ggml_type   box_draft_type_k,
-                ggml_type   box_draft_type_v) :
+                ggml_type   box_draft_type_v,
+    std::vector<llama_box::attn_layer>   box_extra_attn) :
     hparams(model.hparams),
     box(use_box ? llama_box_make(model, type_k, type_v, kv_size, type_r, type_s, rs_size, n_rs_seq,
                 rs_replay, offload, box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v,
                 filter_attn == nullptr ? [&](int32_t il) { return !model.hparams.is_recr(il); } : filter_attn,
-                filter_recr == nullptr ? [&](int32_t il) { return  model.hparams.is_recr(il); } : filter_recr) : nullptr),
+                filter_recr == nullptr ? [&](int32_t il) { return  model.hparams.is_recr(il); } : filter_recr,
+                std::move(box_extra_attn)) : nullptr),
     mem_attn(new llama_kv_cache(
         model,
         model.hparams,
@@ -66,7 +68,8 @@ llama_memory_hybrid::llama_memory_hybrid(
         nullptr,
         nullptr,
         "",
-        box.get()
+        box.get(),
+        0
     )),
     mem_recr(new llama_memory_recurrent(
         model,

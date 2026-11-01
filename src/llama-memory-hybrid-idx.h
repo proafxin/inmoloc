@@ -34,6 +34,9 @@ public:
                      bool   rs_replay,
                      bool   offload,
                      bool   unified,
+                     bool   use_box,
+                   size_t   box_bytes,
+                     bool   box_deferred,
                             /* layer filters */
     const layer_filter_cb & filter_attn,
     const layer_filter_cb & filter_recr,
