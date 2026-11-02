@@ -16,8 +16,8 @@ inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps
 
 llama.cpp and vLLM make you choose fixed sizes up front, and a wrong choice either wastes memory or fails to load:
 
-- **llama.cpp needs `--parallel` and `--ctx-size` chosen by hand.** It pre-allocates the whole KV cache up front (`-c × --parallel`) on top of all layers, so on a shared GPU it either OOMs at load or you must cut the context window and concurrency until it fits — with no way to use what other services leave free. Finding a working `-c`/`--parallel` pair is trial and error: too large OOMs at load, too small wastes memory, and MTP makes the guess even harder. It retries constantly instead of queuing, which burns CPU. It stops at 256 sequences, splits its cache into fixed parts by default, and when the cache fills every active request fails. Every request pays for the cells of all the others through attention. MTP adds to the concurrency cost: every extra slot enlarges the shared context window, so it takes more VRAM.
-- **vLLM reserves a fixed fraction of GPU memory** (`--gpu-memory-utilization`) before it serves, uses an arrival-order queue (small requests wait behind large ones), preempts requests that then recompute, and profiles/captures graphs/compiles the model before it serves — slow startup and extra VRAM. It scales a little, but returns low value for the resources it uses, and its model support is more limited. MTP has been a problem there too: open PRs show it is still hard to use MTP without heavy VRAM cost.
+- **llama.cpp needs `--parallel` and `--ctx-size` chosen by hand.** It pre-allocates the whole KV cache up front (`-c × --parallel`) on top of all layers, so on a shared GPU it either OOMs at load or you must cut the context window and concurrency until it fits — with no way to use what other services leave free. Finding a working `-c`/`--parallel` pair is trial and error: too large OOMs at load, too small wastes memory, and MTP makes the guess even harder. It retries constantly instead of queuing, which burns CPU. It stops at 256 sequences, splits its cache into fixed parts by default, and when the cache fills every active request fails. Even `--kv-unified` is a hard failure: requests beyond the unified cache fail instead of queuing. Every request pays for the cells of all the others through attention. MTP adds to the concurrency cost: every extra slot enlarges the shared context window, so it takes more VRAM.
+- **vLLM reserves a fixed fraction of GPU memory** (`--gpu-memory-utilization`) before it serves, uses an arrival-order queue (small requests wait behind large ones), preempts requests that then recompute, and profiles/captures graphs/compiles the model before it serves — slow startup and extra VRAM. On Qwen3.8 27B, its [recipe](https://recipes.vllm.ai/Qwen/Qwen3.8-27B) lists NVFP4 at 24.6 GiB, and a 32 GB RTX 5090 fits it only with CUDA graphs off. GGUF models load only through a plugin that vLLM calls [highly experimental and under-optimized](https://docs.vllm.ai/en/latest/features/quantization/gguf/). MTP has been a problem there too: open PRs show it is still hard to use MTP without heavy VRAM cost. Measured on a 24 GiB GPU: with a 4-bit build of Qwen3.8 27B (INT4 W4A16) and MTP drafting, vLLM 0.33.0 does not start, because the draft model runs out of memory while loading; inmoloc serves the same model at Q4_K_XL with MTP drafting 2 within a 22826 MiB budget, at 387 tok/s with 64 concurrent requests and none failed.
 - **inmoloc assumes a single model is fully loaded on the GPU** and does not serve from the CPU. Within that constraint, you give it a memory budget (`--vram-budget`) and an output limit (`--max-output-tokens`), and it sizes itself. It loads the model, measures what the weights and overhead actually take, then sizes the KV cache from what remains — so as many concurrent requests run as fit, nothing is set aside for requests that have not arrived, running requests never run out of memory, new ones wait, and the earliest request that fits starts. It starts in seconds, with no dry runs, replaces the expensive retry with an efficient queue, shares prefixes across requests, charges each request's attention cost only to its own cells, keeps MTP draft depth nearly free, and holds recurrent state per request flat at any draft depth with replay rollback.
 
 | | llama.cpp | vLLM | inmoloc |
@@ -93,19 +93,19 @@ Unless `--gpu-layers` says otherwise, all layers go on the device, and a model t
 
 ## Measured
 
-Same GPU (RTX 5090 laptop, 24 GiB), Kvark-Sparkle-1.0-27B-Q4_K_M, MTP drafting 2, q8_0 KV cache, `--max-output-tokens 512`, 512 output tokens per request. inmoloc sizes itself from `--vram-budget`; llama.cpp needs `-c`/`--parallel` tuned by hand and OOMs at load if guessed too high. Each server ran alone on the GPU in its own run — neither number shares VRAM with another service.
+Same GPU (RTX 5090 laptop, 24 GiB), Kvark-Sparkle-1.0-27B-Q4_K_M, MTP drafting 2, q8_0 KV cache, `--max-output-tokens 512`, 512 output tokens per request, with prompts of 128 tokens in the 23G runs and 64 tokens in the 18G runs. inmoloc sizes itself from `--vram-budget`; llama.cpp needs `-c`/`--parallel` tuned by hand and OOMs at load if guessed too high. Each server ran alone on the GPU in its own run — neither number shares VRAM with another service.
 
 ### 18G budget per server
 
 | Requests | inmoloc wall s | inmoloc agg tok/s | llama.cpp `-c 4096 --parallel 6` wall s | llama.cpp agg tok/s | Failed (both) |
 |----------|----------------|-------------------|-----------------------------------------|---------------------|---------------|
 | 1 | 11.3 | 45.4 | 12.2 | 42.0 | 0 |
-| 2 | 9.9 | 106.9 | 22.3 | 46.0 | 0 |
-| 4 | 11.9 | 175.6 | 12.2 | 167.8 | 0 |
-| 8 | 15.4 | 178.2 | 37.2 | 110.1 | 0 |
-| 16 | 24.3 | 205.4 | 52.0 | 157.6 | 0 |
-| 32 | 49.5 | 210.6 | 100.1 | 163.7 | 0 |
-| 64 | 92.2 | 215.8 | 185.9 | 176.2 | 0 |
+| 2 | 9.6 | 106.9 | 22.3 | 46.0 | 0 |
+| 4 | 11.7 | 175.6 | 12.2 | 167.8 | 0 |
+| 8 | 23.0 | 178.2 | 37.2 | 110.1 | 0 |
+| 16 | 39.9 | 205.4 | 52.0 | 157.6 | 0 |
+| 32 | 77.8 | 210.6 | 100.1 | 163.7 | 0 |
+| 64 | 151.9 | 215.8 | 185.9 | 176.2 | 0 |
 
 ### 23G budget per server
 
