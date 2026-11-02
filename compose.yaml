@@ -11,13 +11,13 @@ x-gpu: &gpu
 
 services:
   qwen:
-    image: ${INMOLOC_IMAGE:-inmoloc:elastic18}
+    image: inmoloc:elastic20
     container_name: qwen
     restart: unless-stopped
     ipc: host
     command:
       - --model
-      - /models/Qwen3.8-27B-AP-Q4_K_XL.gguf
+      - /models/Kvark-Sparkle-1.0-27B-Q4_K_M.gguf
       - -ngl
       - "999"
       - --host
@@ -38,8 +38,6 @@ services:
       - q8_0
       - --cache-type-v
       - q8_0
-      - --gpu-wait
-      - block
       - --metrics
       - --alias
       - qwen
@@ -58,7 +56,7 @@ services:
     deploy: *gpu
 
   paddleocr:
-    image: ${INMOLOC_IMAGE:-inmoloc:elastic18}
+    image: inmoloc:elastic20
     container_name: paddleocr
     restart: unless-stopped
     ipc: host
@@ -85,8 +83,6 @@ services:
       - bf16
       - --cache-type-v
       - bf16
-      - --gpu-wait
-      - block
       - --metrics
       - --alias
       - ocrt
@@ -105,7 +101,7 @@ services:
     deploy: *gpu
 
   embedding:
-    image: ${INMOLOC_IMAGE:-inmoloc:elastic18}
+    image: inmoloc:elastic20
     container_name: embedding
     restart: unless-stopped
     ipc: host
@@ -117,8 +113,6 @@ services:
       - last
       - -ngl
       - "999"
-      - --gpu-wait
-      - block
       - --host
       - 0.0.0.0
       - --port
@@ -160,7 +154,7 @@ services:
     ipc: host
     command:
       - --model
-      - /models/Qwen3.8-27B-AP-Q4_K_XL.gguf
+      - /models/Kvark-Sparkle-1.0-27B-Q4_K_M.gguf
       - -ngl
       - "999"
       - --host
@@ -168,9 +162,9 @@ services:
       - --port
       - "8120"
       - -c
-      - "${TEXT_CTX:-65536}"
+      - "${TEXT_CTX:-4096}"
       - --parallel
-      - "${TEXT_PARALLEL:-8}"
+      - "${TEXT_PARALLEL:-6}"
       - --spec-type
       - draft-mtp
       - --spec-draft-n-max

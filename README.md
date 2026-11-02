@@ -12,19 +12,31 @@ inmoloc (Inferencia de Modelos Locales) serves many requests at once on GPUs. It
 
 inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps its model support, quantization formats and backends. It is maintained as its own project; see [differences from llama.cpp](docs/differences-from-llama.cpp.md) and [NOTICE](NOTICE).
 
+## Why inmoloc exists
+
+llama.cpp and vLLM make you choose fixed sizes up front, and a wrong choice either wastes memory or fails to load:
+
+- **llama.cpp needs `--parallel` and `--ctx-size` chosen by hand.** It pre-allocates the whole KV cache up front (`-c × --parallel`) on top of all layers, so on a shared GPU it either OOMs at load or you must cut the context window and concurrency until it fits — with no way to use what other services leave free. It retries constantly instead of queuing, which burns CPU. It stops at 256 sequences, splits its cache into fixed parts by default, and when the cache fills every active request fails. Every request pays for the cells of all the others through attention. MTP adds to the concurrency cost: every extra slot enlarges the shared context window, so it takes more VRAM.
+- **vLLM reserves a fixed fraction of GPU memory** (`--gpu-memory-utilization`) before it serves, uses an arrival-order queue (small requests wait behind large ones), preempts requests that then recompute, and profiles/captures graphs/compiles the model before it serves — slow startup and extra VRAM. It scales a little, but returns low value for the resources it uses, and its model support is more limited. MTP has been a problem there too: open PRs show it is still hard to use MTP without heavy VRAM cost.
+- **inmoloc assumes a single model is fully loaded on the GPU** and does not serve from the CPU. Within that constraint, you give it a memory budget (`--vram-budget`) and an output limit (`--max-output-tokens`), and it sizes itself. It loads the model, measures what the weights and overhead actually take, then sizes the KV cache from what remains — so as many concurrent requests run as fit, nothing is set aside for requests that have not arrived, running requests never run out of memory, new ones wait, and the earliest request that fits starts. It starts in seconds, with no dry runs, replaces the expensive retry with an efficient queue, shares prefixes across requests, charges each request's attention cost only to its own cells, keeps MTP draft depth nearly free, and holds recurrent state per request flat at any draft depth with replay rollback.
+
+| | llama.cpp | vLLM | inmoloc |
+| --- | --- | --- | --- |
+| Sizing | fixed `-c`/`--parallel` up front | fixed GPU-memory fraction | `--vram-budget` after measuring |
+| Concurrency limit | `--parallel`, max 256 | configured limit | what fits in the budget |
+| Cache full | every active request fails | newest requests preempted | running ones never run out |
+| Waiting | constant retry, burns CPU | arrival-order queue | earliest request that fits starts |
+| Attention cost | every request pays for all others | own blocks | each request pays for its own cells only |
+| Prefix sharing | within a slot only | across requests | across requests |
+| Model support | wide, all GGUF | more limited | all llama.cpp GGUF models |
+
+inmoloc solves these simultaneously — fixed upfront sizing, CPU-burning retry, no scaling, preemption, slow startup, and MTP cost — with one memory budget and one output limit, and it loads the same models without any changes to them and gets much higher performance.
+
 ## Features
 
 llama.cpp and vLLM are as of the versions in [the comparison](#compared-with-llamacpp-and-vllm). The models that use elastic memory are listed under [Compatibility](#compatibility).
 
-- **No slot count or context size to guess.** llama.cpp needs `--parallel` and `--ctx-size` chosen by hand, and vLLM a fraction of GPU memory, and a wrong choice wastes memory or fails requests. inmoloc needs a memory budget and an output limit.
-- **No fixed limit on requests at once.** llama.cpp stops at 256 sequences. With elastic memory the only limit is the memory that requests take, and nothing is set aside for requests that have not arrived.
-- **Long and short requests share all the memory.** llama.cpp splits its cache into fixed parts by default, so a long request cannot use what another part leaves idle. With elastic memory, any mix of requests fits as long as its total size does.
-- **A full memory does not fail or undo running requests.** When llama.cpp's cache fills, every active request fails, and vLLM preempts requests that then have to recompute. With elastic memory, running requests never run out of memory, and new ones wait.
-- **Large requests do not hold up small ones.** In an arrival-order queue like vLLM's, smaller requests wait behind a large one. inmoloc starts the earliest request that fits.
-- **Fast startup.** vLLM profiles memory, captures graphs and compiles the model before it serves. inmoloc starts in seconds.
 - **Memory stays within the budget.** Everything the server needs is counted against `--vram-budget`, with no margin to tune, and memory does not grow while serving.
-- **Requests do not slow each other down through attention** (CUDA). In llama.cpp each request pays for the cells of all the others. In inmoloc a request's cost follows its own context.
-- **A shared prefix is computed once.** llama.cpp reuses a prefix only within a slot. inmoloc reuses it across requests.
 - **Images do not stop generation.** Other requests keep generating while images are encoded.
 - **Speculative decoding does not multiply recurrent state.** On hybrid gated delta-net models such as Qwen3.5, memory per request stays nearly the same at any draft depth.
 - **Waiting for the GPU does not cost a CPU core** (CUDA), with `--gpu-wait block`.
@@ -195,24 +207,7 @@ With a prompt cache in host memory on both servers (`--cache-ram 4096`), each ru
 
 At 128 requests at once, inmoloc served twice as many requests from a cached prompt: the prompts of finished requests stay in device memory, shared across requests, until their cells are needed, and then go to the host cache. At 256, the pages are new to both servers.
 
-## Compared with llama.cpp and vLLM
-
-llama.cpp at commit 56381e407 (2026-09-12); vLLM as of 2026-10-15.
-
-| | llama.cpp | vLLM | inmoloc |
-| --- | --- | --- | --- |
-| Startup | Loads the model | Profiles memory, captures CUDA graphs, compiles the model | Loads the model; with elastic memory, no dry runs |
-| GPU memory taken | What the model and context need | A fixed fraction (`--gpu-memory-utilization`) | What the model and context need, within `--vram-budget` |
-| KV cache | `--parallel` fixed parts by default, shared with `--kv-unified` | Shared pool of blocks | Shared, per token |
-| Requests at once | `--parallel`, at most 256 | A configured limit | Elastic memory: what fits, with no fixed limit |
-| Memory per request | Fixed at startup | Fixed at startup | Taken at admission with elastic memory, else fixed at startup |
-| Cache full | Every active request fails | Newest requests preempted | Elastic memory: requests wait, running ones never run out. Other models: newest requests preempted |
-| Waiting requests | Wait for a slot; waiting requests are offered again when one frees | Arrival-order queue | Elastic memory: no slots, a queue partitioned by cost in blocks; the earliest request that fits starts |
-| Attention reads | All used cells | Own blocks | Own cells (CUDA) |
-| Shared prefixes | Own slot only | Across requests | Across requests |
-| Quantized KV cache | q8_0, q4_0 and others | fp8 | q8_0, q4_0 and others |
-| GGUF models | Native | Experimental plugin | Native |
-| Multi-GPU | Layer and row split | Tensor and pipeline parallel | Layer and row split |
+## Compatibility
 
 ## Compatibility
 
