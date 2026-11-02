@@ -25,7 +25,7 @@ services:
       - --port
       - "8100"
       - --vram-budget
-      - ${TEXT_BUDGET:-18G}
+      - ${TEXT_BUDGET:-23G}
       - --spec-type
       - draft-mtp
       - --spec-draft-n-max
@@ -78,7 +78,7 @@ services:
       - --vram-budget
       - ${OCR_BUDGET:-2.5G}
       - --cache-ram
-      - "4096"
+      - "2048"
       - --cache-type-k
       - bf16
       - --cache-type-v
@@ -162,15 +162,17 @@ services:
       - --port
       - "8120"
       - -c
-      - "${TEXT_CTX:-4096}"
+      - "${TEXT_CTX:-8192}"
       - --parallel
-      - "${TEXT_PARALLEL:-6}"
+      - "${TEXT_PARALLEL:-8}"
       - --spec-type
       - draft-mtp
       - --spec-draft-n-max
       - "2"
+      - --n-predict
+      - "512"
       - --cache-ram
-      - "0"
+      - "2048"
       - --metrics
       - --cache-type-k
       - q8_0
