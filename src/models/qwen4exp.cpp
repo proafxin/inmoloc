@@ -953,7 +953,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn_linear(
     ggml_tensor * conv_input = build_conv_state_at(inp, conv_states_all, qkv_mixed,
             conv_kernel_size - 1, conv_channels, il);
 
-    ggml_tensor * state = build_rs(inp, ssm_states_all, hparams.n_embd_s(), n_seqs);
+    ggml_tensor * state = build_rs(inp, ssm_states_all, hparams.n_embd_s(), n_seqs, nullptr, il);
     state = ggml_reshape_4d(ctx0, state, head_v_dim, head_v_dim, num_v_heads, n_seqs);
     cb(state, "state_predelta", il);
 
@@ -1183,9 +1183,11 @@ ggml_tensor * llama_model_qwen4exp::graph::build_conv_state_at(
     // the row is exactly this convolution's state, so the gather is reused as a whole
     GGML_ASSERT(state_cols * channels == row_total);
 
-    auto it = rs_rows.find(conv_states_all);
+    const auto key = std::make_pair(conv_states_all, il);
+
+    auto it = rs_rows.find(key);
     if (it == rs_rows.end()) {
-        it = rs_rows.emplace(conv_states_all, build_rs(inp, conv_states_all, row_total, n_seqs)).first;
+        it = rs_rows.emplace(key, build_rs(inp, conv_states_all, row_total, n_seqs, nullptr, il)).first;
     }
     ggml_tensor * rows = it->second;
 
@@ -1208,6 +1210,11 @@ ggml_tensor * llama_model_qwen4exp::graph::build_conv_state_at(
                 state_cols, channels, n_seqs,
                 conv_input->nb[1], conv_input->nb[2],
                 ggml_row_size(conv_input->type, s_idx));
+
+        if (mctx_cur->is_box()) {
+            ggml_build_forward_expand(gf, build_rs_store(inp, conv_states_all, tail, 0, il, (uint32_t) slot));
+            continue;
+        }
 
         ggml_tensor * dst = ggml_view_2d(ctx0, conv_states_all,
                 state_cols * channels, n_seqs,

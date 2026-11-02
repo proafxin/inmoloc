@@ -335,6 +335,8 @@ public:
     ggml_tensor * box_s_write (ggml_context * ctx, int il, uint32_t k = 0) const;
     ggml_tensor * box_x_read  (ggml_context * ctx, int il) const;
     ggml_tensor * box_x_write (ggml_context * ctx, int il) const;
+    ggml_tensor * box_c_read  (ggml_context * ctx, int il) const;
+    ggml_tensor * box_c_write (ggml_context * ctx, int il, uint32_t k) const;
 
     ggml_tensor * box_run(ggml_context * ctx, int il, uint32_t run) const;
 

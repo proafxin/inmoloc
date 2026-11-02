@@ -25,7 +25,7 @@ services:
       - --port
       - "8100"
       - --vram-budget
-      - ${TEXT_BUDGET:-23G}
+      - ${TEXT_BUDGET:-22G}
       - --spec-type
       - draft-mtp
       - --spec-draft-n-max

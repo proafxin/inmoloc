@@ -854,9 +854,21 @@ llama_kv_cache::slot_info_vec_t llama_kv_cache::prepare(const std::vector<llama_
     // takes a block
     if (box_ref || box_own) {
         std::map<llama_seq_id, uint32_t> n_new;
+        std::map<llama_seq_id, llama_pos> pos_first;
         for (const auto & ubatch : ubatches) {
             for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
-                n_new[ubatch.seq_id[i][0]]++;
+                const llama_seq_id seq_id = ubatch.seq_id[i][0];
+
+                n_new[seq_id]++;
+
+                const auto it = pos_first.emplace(seq_id, ubatch.pos[i]).first;
+                it->second = std::min(it->second, ubatch.pos[i]);
+            }
+        }
+
+        for (const auto & [seq_id, p] : pos_first) {
+            if (box_keep > 0 && p > (llama_pos) box_keep) {
+                seq_rm(seq_id, 0, p - (llama_pos) box_keep);
             }
         }
 
@@ -2766,6 +2778,12 @@ void llama_kv_cache::fill_kv_idx(ggml_tensor * kv_idx, int32_t * rng, const llam
 
         group_start.push_back((int32_t) group_off);
         group_off += (int64_t) group_cells[g].size();
+    }
+
+    // a copy of the rows reads the padding too, masked out: it has to be a row that holds a value, a NaN of a row nothing
+    // wrote stays a NaN under the mask
+    if (group_off > 0) {
+        std::fill(idx + group_off, idx + n_idx*n_group, idx[0]);
     }
 
     for (uint32_t i = 0; i < n_tokens; ++i) {

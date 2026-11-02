@@ -2464,8 +2464,9 @@ struct llama_model_qwen4exp : public llama_model_base {
                     ggml_tensor * gate,
                             int   layer);
 
-        // build_rs writes the state tensor in place, so one gather per cache tensor is reused
-        std::map<ggml_tensor *, ggml_tensor *> rs_rows;
+        // build_rs writes the state tensor in place, so one gather per cache tensor is reused; the layer tells apart the
+        // rows of the one view the elastic memory has for all the layers
+        std::map<std::pair<ggml_tensor *, int>, ggml_tensor *> rs_rows;
 
         // one conv history per cache tensor: delta-net and PLE each have their own
         ggml_tensor * build_conv_state_at(

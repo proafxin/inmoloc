@@ -127,7 +127,10 @@ public:
                          bool   use_box = false,
                        size_t   box_bytes = 0,
                          bool   box_deferred = false,
-                     uint32_t   n_batch = 0);
+                     uint32_t   n_batch = 0,
+                         bool   box_draft = false,
+                    ggml_type   box_draft_type_k = GGML_TYPE_F16,
+                    ggml_type   box_draft_type_v = GGML_TYPE_F16);
 
     ~llama_kv_cache_dsv4() = default;
 
@@ -233,6 +236,29 @@ private:
 
     // copies between sequences for seq_cp()
     void box_seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst);
+};
+
+// the hparams of a K-only cache, which a cache keeps a reference to: a base of the draft cache, to outlive its construction
+struct llama_dsv4_draft_hparams {
+    llama_hparams hparams_draft;
+
+    explicit llama_dsv4_draft_hparams(const llama_hparams & hparams);
+};
+
+// the MTP draft of the elastic memory: its K rows are in the raw blocks of its target, for the same sequences, so it takes
+// no memory of its own and gives up its cells as they leave the window, which lets the target give the blocks back
+class llama_kv_cache_dsv4_draft : private llama_dsv4_draft_hparams, public llama_kv_cache_iswa {
+public:
+    llama_kv_cache_dsv4_draft(
+            const llama_model & model,
+                    ggml_type   type_k,
+                    ggml_type   type_v,
+                         bool   offload,
+                     uint32_t   n_seq_max,
+                     uint32_t   n_ubatch,
+                     uint32_t   n_rs_seq,
+        const layer_filter_cb & filter,
+        const std::shared_ptr<llama_box> & box);
 };
 
 // DSV4 raw attention only uses the SWA half of kv_raw. The base half is kept

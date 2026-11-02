@@ -11,10 +11,14 @@
 #include "../src/llama-arch.h"
 #include "../src/llama-model-saver.h"
 
+#include <algorithm>
 #include <cinttypes>
+#include <map>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <cstdint>
 #include <random>
 #include <stdexcept>
@@ -384,13 +388,77 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     return ret;
 }
 
+// where the NaNs of a run are, to tell which of the runs compared has them
+static void report_nans(const char * name, const std::vector<float> & logits, const uint32_t n_tokens) {
+    size_t n_nan = 0;
+    size_t first = logits.size();
+    for (size_t i = 0; i < logits.size(); i++) {
+        if (std::isnan(logits[i])) {
+            n_nan++;
+            first = std::min(first, i);
+        }
+    }
+    if (n_nan > 0) {
+        const size_t n_vocab = logits.size()/n_tokens;
+        fprintf(stderr, "%s: %zu of %zu logits are NaN, the first in token %zu of %u\n", name, n_nan, logits.size(), first/n_vocab, n_tokens);
+    }
+}
+
+// the outputs of the attention layers of a run: random weights can leave so little of them in the logits that a wrong
+// read still gives the same logits, so they are compared themselves
+struct attn_outputs {
+    std::map<std::string, std::vector<float>> tensors;
+};
+
+static bool capture_attn(ggml_tensor * t, bool ask, void * user_data) {
+    // the names the graphs leave on the output of attention, a graph can rename what build_attn returns
+    static const char * names[] = { "kqv_out-", "attn_derope-", "attn_pregate-", "attn_kqv-", "attn_out-" };
+
+    const bool wanted = t->type == GGML_TYPE_F32 && std::any_of(std::begin(names), std::end(names),
+            [&](const char * name) { return strncmp(t->name, name, strlen(name)) == 0; });
+    if (ask) {
+        return wanted;
+    }
+
+    auto & out = ((attn_outputs *) user_data)->tensors[t->name];
+    const size_t n = out.size();
+    out.resize(n + ggml_nelements(t));
+    ggml_backend_tensor_get(t, out.data() + n, 0, ggml_nbytes(t));
+
+    return true;
+}
+
+// the worst NMSE between the attention outputs of two runs, a NaN when they do not match; prints the worst of them
+static double compare_attn(const attn_outputs & a, const attn_outputs & b) {
+    double worst = 0.0;
+    std::string name;
+
+    for (const auto & [key, ref] : a.tensors) {
+        const auto it = b.tensors.find(key);
+        if (it == b.tensors.end() || it->second.size() != ref.size()) {
+            fprintf(stderr, "attention: %s does not match in the runs compared\n", key.c_str());
+            return std::nan("");
+        }
+
+        const double val = nmse(ref, it->second);
+        if (!(val <= worst)) {
+            worst = val;
+            name  = key;
+        }
+    }
+
+    fprintf(stderr, "attention: %zu outputs, worst NMSE %.2e%s%s\n", a.tensors.size(), worst, name.empty() ? "" : " in ", name.c_str());
+
+    return worst;
+}
+
 static bool silent_model_load_progress(float /*progress*/, void * /*user_data*/) {
     return true;
 }
 
 static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
         struct gguf_context * gguf_ctx, FILE * file, const size_t seed, const std::vector<ggml_backend_dev_t> & devs,
-        const llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER, bool encode = false) {
+        const llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER, bool encode = false, bool elastic = true, attn_outputs * attn = nullptr) {
     GGML_ASSERT((gguf_ctx == nullptr) != (file == nullptr));
     llama_model_params model_params = llama_model_default_params();
     model_params.progress_callback = silent_model_load_progress;
@@ -403,6 +471,11 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
     ctx_params.n_ctx = 0;
     ctx_params.n_threads = 4;
     ctx_params.n_threads_batch = 4;
+    ctx_params.elastic = elastic;
+    if (attn) {
+        ctx_params.cb_eval           = capture_attn;
+        ctx_params.cb_eval_user_data = attn;
+    }
     if (!encode) {
         ctx_params.n_ubatch = 64;
     }
@@ -742,6 +815,7 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const in
             }
             std::pair<llama_model_ptr, llama_context_ptr> model_and_ctx_cpu;
             std::vector<float> logits_cpu;
+            attn_outputs attn_cpu;
             for (device_config & dc : dev_configs) {
                 // print test config first; should anything fail during model loading or inference, at least we know which test case caused it
                 printf(template_row_cfg.c_str(),
@@ -757,16 +831,22 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const in
                 bool skip = !arch_supported(arch) || (dc.split_mode == LLAMA_SPLIT_MODE_TENSOR && dc.devs.empty());
                 if (!skip) {
                     if (logits_cpu.empty()) {
-                        model_and_ctx_cpu = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, {}, LLAMA_SPLIT_MODE_LAYER, encode);
+                        // the reference is the memory that is not elastic: the elastic memory has to give the same logits
+                        model_and_ctx_cpu = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, {}, LLAMA_SPLIT_MODE_LAYER, encode, false, &attn_cpu);
                         logits_cpu = get_logits(model_and_ctx_cpu.first.get(), model_and_ctx_cpu.second.get(), tokens, encode);
                     }
                     if (dc.split_mode != LLAMA_SPLIT_MODE_TENSOR || llm_arch_supports_sm_tensor(arch)) {
-                        model_and_ctx_dev = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, dc.devs, dc.split_mode, encode);
+                        attn_outputs attn_dev;
+                        model_and_ctx_dev = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, dc.devs, dc.split_mode, encode, true, &attn_dev);
                         logits_dev = get_logits(model_and_ctx_dev.first.get(), model_and_ctx_dev.second.get(), tokens, encode);
-                        const double nmse_val = nmse(logits_cpu, logits_dev);
+                        report_nans("not elastic", logits_cpu, tokens.size());
+                        report_nans("elastic",     logits_dev, tokens.size());
+                        const double nmse_attn = compare_attn(attn_cpu, attn_dev);
+                        const double nmse_val = std::max(nmse(logits_cpu, logits_dev), nmse_attn);
                         snprintf(nmse_str, sizeof(nmse_str), "(%.2e)", nmse_val);
                         status_nmse = "\033[1;32mOK\033[0m";
-                        if (nmse_val > 1e-4) {
+                        // written so that a NaN fails
+                        if (!(nmse_val <= 1e-4)) {
                             all_ok = false;
                             status_nmse = "\033[1;31mFAIL\033[0m";
                         }

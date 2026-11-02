@@ -65,6 +65,7 @@ public:
         uint32_t  n_embd_x; // the cached replay inputs of the last tokens, 0 without replay
         uint32_t  n_rows_r; // conv rows: one per draft position
         uint32_t  n_rows_s; // scan rows: one per draft position, or one when a rollback replays
+        uint32_t  n_embd_c = 0; // a conv history next to the conv state (PLE), as many rows, 0 without one
     };
 
     // a piece of a state that is not a recurrent layer: n_rows rows of n_embd elements, read through a view of its own
@@ -148,6 +149,10 @@ public:
     int64_t r_row(int32_t s, uint32_t l, uint32_t k) const;
     int64_t s_row(int32_t s, uint32_t l, uint32_t k = 0) const;
     int64_t x_row(int32_t s, uint32_t l, uint32_t h) const;
+    int64_t c_row(int32_t s, uint32_t l, uint32_t k) const;
+
+    // whether recurrent layer l has a conv history, see recr_layer
+    bool has_c(uint32_t l) const { return recr[l].n_embd_c > 0; }
 
     // row k of a state piece in its view, the same for every piece of the size of the row
     int64_t p_row(int32_t s, uint32_t piece, uint32_t k) const {
@@ -168,6 +173,7 @@ public:
     ggml_tensor * get_r() const { return t_r; } // [n_embd_r, units]
     ggml_tensor * get_s() const { return t_s; } // [n_embd_s, units]
     ggml_tensor * get_x() const { return t_x; } // [n_embd_x, units], nullptr without replay
+    ggml_tensor * get_c() const { return t_c; } // [n_embd_c, units], nullptr without a conv history
 
     ggml_backend_buffer_t get_buffer() const { return buf.get(); }
 
@@ -268,6 +274,7 @@ private:
     size_t r_row_bytes = 0; // padded to unit
     size_t s_row_bytes = 0;
     size_t x_row_bytes = 0;
+    size_t c_row_bytes = 0;
 
     size_t   state_bytes  = 0;
     uint32_t state_blocks = 0;
@@ -288,6 +295,7 @@ private:
     std::vector<size_t> pc_r;
     std::vector<size_t> pc_s;
     std::vector<size_t> pc_x;
+    std::vector<size_t> pc_c;
 
     ggml_context_ptr        ctx;
     ggml_backend_buffer_ptr buf;
@@ -303,6 +311,7 @@ private:
     ggml_tensor * t_r = nullptr;
     ggml_tensor * t_s = nullptr;
     ggml_tensor * t_x = nullptr;
+    ggml_tensor * t_c = nullptr;
 
     // the free blocks, the rightmost taken first
     std::set<uint32_t> free_blocks;

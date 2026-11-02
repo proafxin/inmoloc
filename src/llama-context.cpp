@@ -453,11 +453,12 @@ llama_context::llama_context(
         memory.reset(model.create_memory(params_mem, cparams));
 
         // the elastic memory: a box of blocks read through lists of its rows only, see llama_box
-        const auto * mem_kv  = dynamic_cast<const llama_kv_cache *>(memory.get());
+        const auto * mem_kv   = dynamic_cast<const llama_kv_cache *>(memory.get());
+        const auto * mem_iswa = dynamic_cast<const llama_kv_cache_iswa *>(memory.get());
 
         const auto box_own = memory ? memory->get_box_shared() : nullptr;
 
-        const llama_box * box = box_own ? box_own.get() : (mem_kv ? mem_kv->get_box() : nullptr);
+        const llama_box * box = box_own ? box_own.get() : (mem_kv ? mem_kv->get_box() : (mem_iswa ? mem_iswa->get_base()->get_box() : nullptr));
         if (box) {
             // the box sets the cells, not the context size, and the sequences that can run, not a number given
             cparams.n_ctx     = box->get_n_cells();
@@ -4536,8 +4537,10 @@ bool llama_context_box_follow(llama_context * ctx) {
 }
 
 bool llama_context::box_follow() {
-    const auto * mem_kv = dynamic_cast<const llama_kv_cache *>(memory.get());
-    const llama_box * box = mem_kv ? mem_kv->get_box() : nullptr;
+    const auto * mem_kv   = dynamic_cast<const llama_kv_cache *>(memory.get());
+    const auto * mem_iswa = dynamic_cast<const llama_kv_cache_iswa *>(memory.get());
+
+    const llama_box * box = mem_kv ? mem_kv->get_box() : (mem_iswa ? mem_iswa->get_base()->get_box() : nullptr);
     if (!box) {
         return false;
     }

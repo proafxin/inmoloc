@@ -452,9 +452,7 @@ public:
 
     // the (pos, cell) pairs of sequence seq_id, ordered by position
     const std::set<std::pair<llama_pos, uint32_t>> & seq_pos_get(llama_seq_id seq_id) const {
-        assert(seq_id >= 0 && (size_t) seq_id < seq_pos.size());
-
-        return seq_pos[seq_id];
+        return seq_pos_cells(seq_id);
     }
 
     const llama_kv_cell_ext & ext_get(uint32_t i) const {

@@ -30,7 +30,9 @@ public:
         const  layer_reuse_cb & reuse,
         const  layer_share_cb & share,
         // the elastic memory, which holds the cells of both caches: kv_size is its cells then
-        const std::shared_ptr<llama_box> & box = nullptr);
+        const std::shared_ptr<llama_box> & box = nullptr,
+        // the same for a draft context, whose target holds the elastic memory
+        const std::shared_ptr<llama_box> & box_ref = nullptr);
 
     llama_kv_cache_iswa(
             const llama_model & model,
@@ -49,7 +51,8 @@ public:
         const layer_filter_cb & filter,
         const  layer_reuse_cb & reuse,
         const  layer_share_cb & share,
-        const std::shared_ptr<llama_box> & box = nullptr);
+        const std::shared_ptr<llama_box> & box = nullptr,
+        const std::shared_ptr<llama_box> & box_ref = nullptr);
 
     ~llama_kv_cache_iswa() = default;
 
@@ -86,6 +89,8 @@ public:
     bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override { return kv_base->box_reserve(seq_id, n_input, n_output); }
     void box_reserve_drop(llama_seq_id seq_id) override { kv_base->box_reserve_drop(seq_id); }
     void box_finalized() override { kv_base->box_finalized(); kv_swa->box_finalized(); }
+
+    void set_box_keep(uint32_t n) { kv_base->set_box_keep(n); kv_swa->set_box_keep(n); }
 
     // state write/load
 

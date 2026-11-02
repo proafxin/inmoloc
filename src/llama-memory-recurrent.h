@@ -327,6 +327,7 @@ public:
 
     // whether t is one of the scan-state tensors, which are read with s_copy_plain()
     bool is_s_l(const ggml_tensor * t) const;
+    bool is_p_l(const ggml_tensor * t) const;
 
     // rows of the input cache read by the replay of this step, and written by it
     int32_t x_read (int i) const;
@@ -348,6 +349,8 @@ public:
         BOX_S_WRITE,
         BOX_X_READ,  // the pending replay inputs
         BOX_X_WRITE, // the replay inputs this step caches
+        BOX_C_READ,  // conv history row k (the rollback index) of the state read
+        BOX_C_WRITE, // conv history row k of the state written
     };
 
     bool     is_box() const;

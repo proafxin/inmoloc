@@ -1368,6 +1368,31 @@ size_t llama_dsv4_comp_state::total_size() const {
 }
 
 //
+// llama_kv_cache_dsv4_draft
+//
+
+llama_dsv4_draft_hparams::llama_dsv4_draft_hparams(const llama_hparams & hparams) : hparams_draft(hparams) {
+    dsv4_make_k_only(hparams_draft);
+}
+
+llama_kv_cache_dsv4_draft::llama_kv_cache_dsv4_draft(
+        const llama_model & model,
+                ggml_type   type_k,
+                ggml_type   type_v,
+                     bool   offload,
+                 uint32_t   n_seq_max,
+                 uint32_t   n_ubatch,
+                 uint32_t   n_rs_seq,
+    const layer_filter_cb & filter,
+    const std::shared_ptr<llama_box> & box) :
+    llama_dsv4_draft_hparams(model.hparams),
+    llama_kv_cache_iswa(model, hparams_draft, type_k, type_v, false, offload, false, true, box->get_n_cells(), n_seq_max, n_ubatch, 1,
+            nullptr, filter, nullptr, nullptr, nullptr, box) {
+    // what a token of the next batch reads, and a rollback before it
+    set_box_keep(hparams_draft.n_swa - 1 + n_rs_seq);
+}
+
+//
 // llama_kv_cache_dsv4
 //
 
@@ -1389,7 +1414,10 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
                      bool   use_box,
                    size_t   box_bytes,
                      bool   box_deferred,
-                 uint32_t   n_batch) :
+                 uint32_t   n_batch,
+                     bool   box_draft,
+                ggml_type   box_draft_type_k,
+                ggml_type   box_draft_type_v) :
     hparams_raw(model.hparams),
     hparams_csa(model.hparams),
     hparams_hca(model.hparams),
@@ -1464,8 +1492,13 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
             lid.push_back({ (int32_t) il, type_k, type_k, n_embd_lid, n_embd_lid, false });
         }
 
-        box = llama_box_make(model, type_k, type_v, kv_size, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
-                box_bytes, box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16,
+        // the memory of n_seq_max sequences of kv_size tokens when no size is given: raw rows, compressed rows and states
+        constexpr uint32_t n_block = llama_box::n_block_tokens;
+
+        const uint32_t n_comp = kv_size/(DSV4_CSA_RATIO*n_block) + kv_size/(DSV4_HCA_RATIO*n_block) + 3;
+
+        box = llama_box_make(model, type_k, type_v, kv_size + n_seq_max*n_comp*n_block, GGML_TYPE_F32, GGML_TYPE_F32, n_seq_max, 0, false, offload,
+                box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v,
                 [&](int32_t il) { return filter_raw(il); }, nullptr, {}, std::move(lid), std::move(pieces), &hparams_raw);
 
         kv_size   = box->get_n_cells();
@@ -1479,7 +1512,8 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
         // the window of raw rows of a sequence, whatever its length, and its compressed rows, each kind with the block the
         // next row goes to
         const uint32_t n_swa      = hparams_raw.n_swa;
-        const uint32_t n_raw_keep = n_swa + n_rs_seq + std::max(n_batch, n_ubatch);
+        // a draft decodes a batch after its target, and holds its cells in the blocks until then
+        const uint32_t n_raw_keep = n_swa + n_rs_seq + (box->has_draft() ? 2 : 1)*std::max(n_batch, n_ubatch);
 
         box->set_blocks_fn([=](uint32_t n) {
             constexpr uint32_t n_block = llama_box::n_block_tokens;

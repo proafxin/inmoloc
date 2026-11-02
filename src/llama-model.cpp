@@ -2489,22 +2489,35 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         return il >= (int32_t) hparams.n_layer();
                     };
 
-                    res = new llama_kv_cache_iswa(
-                            *this,
-                            params.type_k,
-                            params.type_v,
-                            !cparams.flash_attn,
-                            cparams.offload_kqv,
-                            params.swa_full,
-                            cparams.kv_unified,
-                            cparams.n_ctx_seq,
-                            cparams.n_seq_max,
-                            cparams.n_ubatch,
-                            1,
-                            nullptr,
-                            filter_mtp,
-                            nullptr,
-                            nullptr);
+                    if (params.box && params.box->has_draft()) {
+                        res = new llama_kv_cache_dsv4_draft(
+                                *this,
+                                params.type_k,
+                                params.type_v,
+                                cparams.offload_kqv,
+                                cparams.n_seq_max,
+                                cparams.n_ubatch,
+                                cparams.n_rs_seq,
+                                filter_mtp,
+                                params.box);
+                    } else {
+                        res = new llama_kv_cache_iswa(
+                                *this,
+                                params.type_k,
+                                params.type_v,
+                                !cparams.flash_attn,
+                                cparams.offload_kqv,
+                                params.swa_full,
+                                cparams.kv_unified,
+                                cparams.n_ctx_seq,
+                                cparams.n_seq_max,
+                                cparams.n_ubatch,
+                                1,
+                                nullptr,
+                                filter_mtp,
+                                nullptr,
+                                nullptr);
+                    }
                 } else {
                     res = new llama_kv_cache_dsv4(
                             *this,
@@ -2524,7 +2537,10 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             cparams.elastic,
                             cparams.box_bytes,
                             cparams.box_deferred,
-                            cparams.n_batch);
+                            cparams.n_batch,
+                            cparams.box_draft,
+                            cparams.box_draft_type_k,
+                            cparams.box_draft_type_v);
                 }
             } break;
         case LLM_ARCH_DFLASH:

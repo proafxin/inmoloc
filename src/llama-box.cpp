@@ -63,9 +63,11 @@ llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> re
 
         const size_t n_extra = lid.size() > n_free ? lid.size() - n_free : 0;
 
-        const size_t mult = std::lcm(row_bytes, unit);
+        const size_t rowd = draft ? llama_box_row_stride(draft, 1) : row_bytes;
+        const size_t mult = std::lcm(std::lcm(row_bytes, rowd), unit);
 
         block_bytes = (attn.size() + n_extra)*n_block_tokens*row_bytes;
+        block_bytes += draft ? (draft->has_v ? 2 : 1)*n_block_tokens*rowd : 0;
         block_bytes = (block_bytes + mult - 1)/mult*mult;
     }
 
@@ -80,15 +82,15 @@ llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> re
     }
 
     // the free layers in order, then the room after the layers
-    for (size_t i = 0, j = 0, end = off; j < lid.size(); ++j) {
+    for (size_t i = 0, j = 0; j < lid.size(); ++j) {
         while (i < attn.size() && !attn[i].comp_free) {
             ++i;
         }
         if (i < attn.size()) {
             off_lid.push_back(off_k[i++]);
         } else {
-            off_lid.push_back(end);
-            end += n_block_tokens*row_bytes;
+            off_lid.push_back(off);
+            off += n_block_tokens*row_bytes;
         }
     }
 
@@ -109,6 +111,11 @@ llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> re
         s_row_bytes = GGML_PAD(ggml_row_size(l0.type_s, l0.n_embd_s), unit);
         x_row_bytes = l0.n_embd_x > 0 ? GGML_PAD(ggml_row_size(l0.type_r, l0.n_embd_x), unit) : 0;
 
+        // the layers with a conv history all have the same one
+        for (const auto & l : recr) {
+            c_row_bytes = std::max(c_row_bytes, l.n_embd_c > 0 ? GGML_PAD(ggml_row_size(l.type_r, l.n_embd_c), unit) : 0);
+        }
+
         int32_t il_max = 0;
         for (const auto & l : recr) {
             il_max = std::max(il_max, l.il);
@@ -125,6 +132,8 @@ llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> re
             state_bytes += recr[i].n_rows_s*s_row_bytes;
             pc_x.push_back(state_bytes);
             state_bytes += 2*x_row_bytes;
+            pc_c.push_back(state_bytes);
+            state_bytes += recr[i].n_embd_c > 0 ? recr[i].n_rows_r*c_row_bytes : 0;
         }
 
         // a model without attention has no tokens to hold: a block is a state
@@ -230,7 +239,7 @@ void llama_box::alloc(ggml_backend_buffer_type_t buft_in, bool no_alloc) {
     buft = buft_in;
 
     ggml_init_params params = {
-        /*.mem_size   =*/ (4 + 2*attn.size() + lid.size() + pieces.size())*ggml_tensor_overhead(),
+        /*.mem_size   =*/ (5 + 2*attn.size() + lid.size() + pieces.size())*ggml_tensor_overhead(),
         /*.mem_buffer =*/ NULL,
         /*.no_alloc   =*/ true,
     };
@@ -278,6 +287,12 @@ void llama_box::alloc(ggml_backend_buffer_type_t buft_in, bool no_alloc) {
         if (l0.n_embd_x > 0) {
             t_x = view(l0.type_r, l0.n_embd_x, unit, 0, "x", -1);
         }
+        for (const auto & l : recr) {
+            if (l.n_embd_c > 0) {
+                t_c = view(l.type_r, l.n_embd_c, unit, 0, "c", -1);
+                break;
+            }
+        }
     }
 
     if (no_alloc) {
@@ -309,6 +324,10 @@ int64_t llama_box::s_row(int32_t s, uint32_t l, uint32_t k) const {
 
 int64_t llama_box::x_row(int32_t s, uint32_t l, uint32_t h) const {
     return (int64_t) (((size_t) s*state_bytes + pc_x[l] + h*x_row_bytes)/unit);
+}
+
+int64_t llama_box::c_row(int32_t s, uint32_t l, uint32_t k) const {
+    return (int64_t) (((size_t) s*state_bytes + pc_c[l] + k*c_row_bytes)/unit);
 }
 
 uint32_t llama_box::states_blocks(uint32_t n) const {
@@ -741,7 +760,8 @@ std::unique_ptr<llama_box> llama_box_make(
         }
         buft = layer_buft(il);
         const uint32_t n_embd_x = rs_replay ? hparams.n_embd_gdn_inp()*(1 + n_rs_seq) : 0;
-        recr.push_back({ (int32_t) il, type_r, type_s, hparams.n_embd_r(), hparams.n_embd_s(), n_embd_x, 1 + n_rs_seq, rs_replay ? 1 : 1 + n_rs_seq });
+        recr.push_back({ (int32_t) il, type_r, type_s, hparams.n_embd_r(), hparams.n_embd_s(), n_embd_x, 1 + n_rs_seq, rs_replay ? 1 : 1 + n_rs_seq,
+                hparams.is_ple(il) ? hparams.ple_conv_state() : 0 });
     }
 
     // the one layer of an MTP head keeps its rows in the blocks, next to the layers of the same tokens

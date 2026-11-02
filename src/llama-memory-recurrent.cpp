@@ -52,7 +52,7 @@ llama_memory_recurrent::llama_memory_recurrent(
     seq_tails.assign(n_seq_max, -1);
 
     // a cell of the box is a state id, see llama_box
-    GGML_ASSERT(!box || (mem_size == box->get_max_states() && hparams.ple_conv_state() == 0));
+    GGML_ASSERT(!box || mem_size == box->get_max_states());
     if (box) {
         box_cow   .assign(n_seq_max, -1);
         box_x_cell.assign(n_seq_max, -1);
@@ -151,6 +151,7 @@ llama_memory_recurrent::llama_memory_recurrent(
             r_l[i] = box->get_r();
             s_l[i] = box->get_s();
             x_l[i] = rs_replay ? box->get_x() : nullptr;
+            p_l[i] = box->has_c(box->recr_index(i)) ? box->get_c() : nullptr;
             GGML_ASSERT(r_l[i] && s_l[i] && (!rs_replay || x_l[i]));
             continue;
         }
@@ -1687,6 +1688,12 @@ void llama_memory_recurrent::state_write_data(llama_io_write_i & io, const std::
             io.write(&p_size_row, sizeof(p_size_row));
 
             for (const auto & range : cell_ranges) {
+                if (box) {
+                    for (uint32_t id = range.first; id < range.second; ++id) {
+                        io.write_tensor(p_l[il], (size_t) box->c_row(id % size, box->recr_index(il), id / size)*llama_box::unit, p_size_row);
+                    }
+                    continue;
+                }
                 const size_t range_size = range.second - range.first;
                 io.write_tensor(p_l[il], range.first * p_size_row, range_size * p_size_row);
             }
@@ -1967,7 +1974,8 @@ bool llama_memory_recurrent::state_read_data(llama_io_read_i & io, uint32_t cell
             }
 
             if (cell_count) {
-                io.read_tensor(p_l[il], head * p_size_row, cell_count * p_size_row);
+                const size_t offs = box ? (size_t) box->c_row(head, box->recr_index(il), 0)*llama_box::unit : head * p_size_row;
+                io.read_tensor(p_l[il], offs, cell_count * p_size_row);
             }
         }
     }
@@ -2186,6 +2194,16 @@ int32_t llama_memory_recurrent_context::s_copy_plain(int i) const {
     return mem->cells[i + mem->head].src0;
 }
 
+bool llama_memory_recurrent_context::is_p_l(const ggml_tensor * t) const {
+    for (const auto * p : mem->p_l) {
+        if (p == t) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool llama_memory_recurrent_context::is_s_l(const ggml_tensor * t) const {
     for (const auto * s : mem->s_l) {
         if (s == t) {
@@ -2248,6 +2266,8 @@ int32_t llama_memory_recurrent_context::box_row(int i, uint32_t l, box_row_kind 
         case BOX_S_WRITE: return (int32_t) box->s_row(dst, l, k);
         case BOX_X_READ:  return mem->box_x_src[i] < 0 ? -1 : (int32_t) box->x_row(mem->box_x_src[i], l, mem->box_x_half[i]);
         case BOX_X_WRITE: return (int32_t) box->x_row(dst, l, mem->x_cur[mem->box_lead[i]]);
+        case BOX_C_READ:  return src < 0 || !box->has_c(l) ? -1 : (int32_t) box->c_row(src, l, k);
+        case BOX_C_WRITE: return !box->has_c(l) ? -1 : (int32_t) box->c_row(dst, l, k);
     }
 
     GGML_ABORT("unknown box row kind");

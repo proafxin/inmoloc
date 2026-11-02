@@ -180,6 +180,10 @@ public:
     // that what is copied is bounded by the context window of the model
     bool box_row_copies() const;
 
+    // a draft keeps the cells of the last n positions before the batch of a sequence, the others leave the raw blocks of
+    // its target, which go back with no cell in them; 0 keeps all
+    void set_box_keep(uint32_t n) { box_keep = n; }
+
     // the most cells attention reads for a ubatch, what its input lists are reserved for
     uint32_t attn_n_cells_max() const;
 
@@ -384,6 +388,8 @@ private:
 
     // the box of a model whose only memory is this cache: it takes and gives back the blocks of the sequences
     std::shared_ptr<llama_box> box_own;
+
+    uint32_t box_keep = 0;
 
     uint32_t n_seq_max = 1;
     const uint32_t n_stream  = 1;
