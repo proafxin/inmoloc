@@ -1,5 +1,6 @@
 #include "llama-kv-cache-dsa.h"
 
+#include "llama-box.h"
 #include "llama-impl.h"
 #include "llama-batch.h"
 #include "llama-model.h"
@@ -25,15 +26,33 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
            llama_swa_type   swa_type,
     const layer_filter_cb & filter_mla,
     const layer_filter_cb & filter_lid,
-    const  layer_reuse_cb & reuse) :
+    const  layer_reuse_cb & reuse,
+                     bool   use_box,
+                   size_t   box_bytes,
+                     bool   box_deferred,
+                     bool   box_draft,
+                ggml_type   box_draft_type_k,
+                ggml_type   box_draft_type_v,
+                     bool   box_swa) :
     hparams_lid(model.hparams), n_stream(unified ? 1 : n_seq_max) {
+
+    std::shared_ptr<llama_box> box_own;
+    if (use_box) {
+        // with a SWA cache next to it, the layers it does not filter are the layers of both
+        box_own = llama_box_make(model, type_k, type_v, kv_size, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
+                box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v,
+                [&](int32_t il) { return box_swa || filter_mla == nullptr || filter_mla(il); }, nullptr,
+                box_layers_lid(model, type_k, filter_lid));
+
+        kv_size = box_own->get_n_cells();
+    }
 
     LLAMA_LOG_INFO("%s: creating main KV cache, size = %u cells\n", __func__, kv_size);
 
     kv_mla = std::make_unique<llama_kv_cache>(
             model, model.hparams, type_k, type_v,
             v_trans, offload, unified, kv_size, n_seq_max, n_pad,
-            n_swa, swa_type, nullptr, filter_mla, reuse, nullptr);
+            n_swa, swa_type, nullptr, filter_mla, reuse, nullptr, "", nullptr, 0, nullptr, box_own);
 
     // we use llama_kv_cache for caching indexer keys
     // by hand-tweaking some hparams we fool it to create
@@ -50,7 +69,22 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
     kv_lid = std::make_unique<llama_kv_cache>(
             model, hparams_lid, type_k, type_v,
             v_trans, offload, unified, kv_size, n_seq_max, n_pad,
-            n_swa, swa_type, nullptr, filter_lid, reuse, nullptr);
+            n_swa, swa_type, nullptr, filter_lid, reuse, nullptr, "lid_",
+            box_own.get(), box_own ? (int32_t) model.hparams.n_layer_all : 0);
+}
+
+std::vector<llama_box::attn_layer> llama_kv_cache_dsa::box_layers_lid(const llama_model & model, ggml_type type_k, const layer_filter_cb & filter_lid) {
+    const auto & hparams = model.hparams;
+
+    // one key head per layer, in the slots above the model layers of the box
+    std::vector<llama_box::attn_layer> res;
+    for (uint32_t il = 0; il < hparams.n_layer_all; ++il) {
+        if (filter_lid == nullptr || filter_lid(il)) {
+            res.push_back({ (int32_t) (il + hparams.n_layer_all), type_k, type_k, hparams.indexer_head_size, hparams.indexer_head_size, false });
+        }
+    }
+
+    return res;
 }
 
 void llama_kv_cache_dsa::clear(bool data) {
@@ -61,8 +95,9 @@ void llama_kv_cache_dsa::clear(bool data) {
 bool llama_kv_cache_dsa::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     bool res = true;
 
-    res = res & kv_mla->seq_rm(seq_id, p0, p1);
+    // the MLA cache gives the blocks back, once no cache holds cells in them
     res = res & kv_lid->seq_rm(seq_id, p0, p1);
+    res = res & kv_mla->seq_rm(seq_id, p0, p1);
 
     return res;
 }
@@ -114,7 +149,8 @@ llama_memory_context_ptr llama_kv_cache_dsa::init_batch(
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
+            auto ubatch = kv_mla->box_row_copies() ? balloc.split_seq(n_ubatch) :
+                n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
 
             if (ubatch.n_tokens == 0) {
                 break;
@@ -133,7 +169,8 @@ llama_memory_context_ptr llama_kv_cache_dsa::init_batch(
             break;
         }
 
-        auto sinfos_lid = kv_lid->prepare(ubatches);
+        // the rows of the elastic memory are read through one list, so the two caches hold a token in the same cell
+        auto sinfos_lid = kv_mla->get_box() ? sinfos_mla : kv_lid->prepare(ubatches);
         if (sinfos_lid.empty()) {
             break;
         }

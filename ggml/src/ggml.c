@@ -6583,6 +6583,32 @@ struct ggml_tensor * ggml_lightning_indexer(
     return result;
 }
 
+struct ggml_tensor * ggml_lightning_indexer_rows(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * weights,
+        struct ggml_tensor  * mask,
+        struct ggml_tensor  * rows) {
+    GGML_ASSERT(q->type == GGML_TYPE_F32 && weights->type == GGML_TYPE_F32 && mask->type == GGML_TYPE_F16);
+    GGML_ASSERT(rows->type == GGML_TYPE_I32 && ggml_is_contiguous(rows) && rows->ne[1] == 1 && rows->ne[2] == 1 && rows->ne[3] == 1);
+    GGML_ASSERT(q->ne[0] == k->ne[0] && k->ne[1] == 1 && q->ne[3] == 1 && k->ne[3] == 1);
+    GGML_ASSERT(mask->ne[0] == rows->ne[0] && mask->ne[1] == q->ne[2] && mask->ne[2] == 1 && mask->ne[3] == 1);
+    GGML_ASSERT(q->ne[1] == weights->ne[0] && q->ne[2] == weights->ne[1]);
+
+    int64_t ne[4] = { rows->ne[0], q->ne[2], 1, 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    result->op     = GGML_OP_LIGHTNING_INDEXER;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = weights;
+    result->src[3] = mask;
+    result->src[4] = rows;
+
+    return result;
+}
+
 // ggml_dsv4_hc_comb
 
 struct ggml_tensor * ggml_dsv4_hc_comb(

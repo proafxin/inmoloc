@@ -507,6 +507,15 @@ public:
     ggml_tensor * get_kq_mask_mla() const { return self_kq_mask_mla_cnv; }
     ggml_tensor * get_kq_mask_lid() const { return self_kq_mask_lid; }
 
+    // with the elastic memory the indexer counts in the list of rows self_kv_idx: the masks, its scores and the top-k
+    ggml_tensor * get_k_lid(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * build_lid(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * weights, ggml_tensor * mask) const;
+    ggml_tensor * build_top_k(ggml_context * ctx, ggml_tensor * score, int n_top_k) const;
+
+    ggml_tensor * self_kv_idx  = nullptr; // I32 [n_kv, 1]         elastic memory: the rows of the sequences of the ubatch
+    ggml_tensor * self_kv_mask = nullptr; // F32 [n_kv, n_batch]   elastic memory: what each token sees of them
+    ggml_tensor * self_q_rng   = nullptr; // I32 [3, n_batch]      elastic memory: the live entries of the top-k of each token
+
     ggml_tensor * self_k_idxs_mla = nullptr; // I64 [n_batch]
     ggml_tensor * self_k_idxs_lid = nullptr; // I64 [n_batch]
 
@@ -721,6 +730,19 @@ public:
         ggml_tensor * k_rot      = nullptr;
     };
 
+    // the lists of the rows the attentions read in the elastic memory, see llama_kv_cache_dsv4_context::set_input_box()
+    struct box_input {
+        ggml_tensor * raw = nullptr; // I32 [n_raw, n_batch]
+        ggml_tensor * hca = nullptr; // I32 [n_hca, n_batch]
+        ggml_tensor * lid = nullptr; // I32 [n_lid, 1]
+
+        ggml_tensor * list_hca = nullptr; // I32 [n_raw + n_hca, n_batch]
+
+        ggml_tensor * rng_raw = nullptr; // I32 [3, n_batch]
+        ggml_tensor * rng_hca = nullptr; // I32 [3, n_batch]
+        ggml_tensor * rng_csa = nullptr; // I32 [3, n_batch]
+    };
+
     llm_graph_input_dsv4(
             const llama_cparams & cparams,
             std::unique_ptr<llm_graph_input_dsv4_raw> inp_raw,
@@ -739,8 +761,11 @@ public:
     const comp_input & get_csa() const { return inp_csa; }
     const comp_input & get_hca() const { return inp_hca; }
     const comp_input & get_lid() const { return inp_lid; }
+    const box_input  & get_box() const { return inp_box; }
 
     std::unique_ptr<llm_graph_input_dsv4_raw> inp_raw;
+
+    box_input inp_box;
 
     comp_input inp_csa;
     comp_input inp_hca;

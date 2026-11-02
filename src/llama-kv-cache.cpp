@@ -2679,6 +2679,33 @@ void llama_kv_cache::set_input_kv_mask(ggml_tensor * kv_idx, ggml_tensor * kv_ma
     }
 }
 
+// a selection over the list of rows: the mask says what a token sees of the list, and each query reads its n_top best entries
+// through the list the graph builds from the sorted top-k, of which only the visible ones are live
+void llama_kv_cache::set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * kv_mask, ggml_tensor * q_rng, uint32_t n_top, const llama_ubatch * ubatch, bool causal_attn) const {
+    GGML_ASSERT(ggml_backend_buffer_is_host(kv_mask->buffer));
+    GGML_ASSERT(ggml_backend_buffer_is_host(q_rng->buffer));
+
+    const uint32_t n_tokens = ubatch->n_tokens;
+    const int64_t  n_idx    = kv_idx->ne[0];
+
+    std::vector<int32_t> rng(3*n_tokens);
+
+    fill_kv_idx(kv_idx, rng.data(), ubatch, causal_attn);
+
+    float   * data = (float *) kv_mask->data;
+    int32_t * sel  = (int32_t *) q_rng->data;
+
+    std::fill(data, data + n_idx*n_tokens, -INFINITY);
+
+    for (uint32_t i = 0; i < n_tokens; ++i) {
+        std::fill(data + i*n_idx + rng[3*i + 1], data + i*n_idx + rng[3*i + 2], 0.0f);
+
+        sel[3*i + 0] = (int32_t) i;
+        sel[3*i + 1] = 0;
+        sel[3*i + 2] = std::min<int32_t>(rng[3*i + 2] - rng[3*i + 1], (int32_t) std::min<int64_t>(n_top, n_idx));
+    }
+}
+
 void llama_kv_cache::fill_kv_idx(ggml_tensor * kv_idx, int32_t * rng, const llama_ubatch * ubatch, bool causal_attn) const {
     GGML_ASSERT(n_stream == 1);
     GGML_ASSERT(ggml_backend_buffer_is_host(kv_idx->buffer));
@@ -3907,6 +3934,10 @@ void llama_kv_cache_context::set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor 
 
 void llama_kv_cache_context::set_input_kv_mask(ggml_tensor * kv_idx, ggml_tensor * kv_mask, const llama_ubatch * ubatch, bool causal_attn) const {
     kv->set_input_kv_mask(kv_idx, kv_mask, ubatch, causal_attn);
+}
+
+void llama_kv_cache_context::set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * kv_mask, ggml_tensor * q_rng, uint32_t n_top, const llama_ubatch * ubatch, bool causal_attn) const {
+    kv->set_input_kv_sel(kv_idx, kv_mask, q_rng, n_top, ubatch, causal_attn);
 }
 
 void llama_kv_cache_context::attn_read_counted_by_graph() const {

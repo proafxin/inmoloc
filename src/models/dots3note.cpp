@@ -243,7 +243,7 @@ llama_model_dots3note::graph::graph(const llama_model & model, const llm_graph_p
                 ggml_tensor * indexer_weights = ggml_mul_mat(ctx0, model.layers[il].indexer_proj, cur);
                 cb(indexer_weights, "indexer_weights", il);
 
-                indexer_k = mctx_lid->get_k(ctx0, il);
+                indexer_k = inp_attn->get_dsa()->get_k_lid(ctx0, il);
 
                 // split the batch into streams if needed
                 const auto n_stream = indexer_k->ne[3];
@@ -256,7 +256,7 @@ llama_model_dots3note::graph::graph(const llama_model & model, const llm_graph_p
 
                 ggml_tensor * indexer_score = nullptr;
                 if (cparams.fused_lid) {
-                    indexer_score = ggml_lightning_indexer(ctx0, indexer_q, indexer_k, indexer_weights, inp_attn->get_dsa()->get_kq_mask_lid());
+                    indexer_score = inp_attn->get_dsa()->build_lid(ctx0, indexer_q, indexer_k, indexer_weights, inp_attn->get_dsa()->get_kq_mask_lid());
                     cb(indexer_score, "indexer_score", il);
                     res->add_fused_node({LLM_FUSED_OP_LIGHTNING_INDEXER, indexer_score, il});
                 } else {
@@ -293,7 +293,7 @@ llama_model_dots3note::graph::graph(const llama_model & model, const llm_graph_p
 
                 // get indices of top k indexer scores
                 uint32_t n_top_k = indexer_score->ne[0] < n_indexer_top_k ? indexer_score->ne[0] : n_indexer_top_k;
-                top_k = ggml_cont(ctx0, ggml_top_k(ctx0, indexer_score, n_top_k));
+                top_k = ggml_cont(ctx0, inp_attn->get_dsa()->build_top_k(ctx0, indexer_score, n_top_k));
                 cb(top_k, "top_k", il);
             }
 

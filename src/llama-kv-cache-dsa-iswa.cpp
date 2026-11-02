@@ -25,7 +25,13 @@ llama_kv_cache_dsa_iswa::llama_kv_cache_dsa_iswa(
                  uint32_t   n_pad,
     const layer_filter_cb & filter_mla,
     const layer_filter_cb & filter_lid,
-    const  layer_reuse_cb & reuse) : unified(unified) {
+    const  layer_reuse_cb & reuse,
+                     bool   use_box,
+                   size_t   box_bytes,
+                     bool   box_deferred,
+                     bool   box_draft,
+                ggml_type   box_draft_type_k,
+                ggml_type   box_draft_type_v) : unified(unified) {
 
     const auto & hparams = model.hparams;
 
@@ -65,14 +71,22 @@ llama_kv_cache_dsa_iswa::llama_kv_cache_dsa_iswa(
     kv_dsa = std::make_unique<llama_kv_cache_dsa>(
             model, type_k, type_v,
             v_trans, offload, unified, size_dsa, n_seq_max, n_pad,
-            0, LLAMA_SWA_TYPE_NONE, filter_dsa, filter_lid, reuse);
+            0, LLAMA_SWA_TYPE_NONE, filter_dsa, filter_lid, reuse,
+            use_box, box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v, true);
+
+    const auto box = kv_dsa->get_box_shared();
+
+    // a block holds the rows of every layer: the SWA cache has the cells of the box, with its own layers
+    if (box) {
+        size_swa = box->get_n_cells();
+    }
 
     LLAMA_LOG_INFO("%s: creating SWA KV cache, size = %u cells\n", __func__, size_swa);
 
     kv_swa = std::make_unique<llama_kv_cache>(
             model, hparams, type_k, type_v,
             v_trans, offload, unified, size_swa, n_seq_max, n_pad,
-            hparams.n_swa, hparams.swa_type, nullptr, filter_swa, reuse, nullptr);
+            hparams.n_swa, hparams.swa_type, nullptr, filter_swa, reuse, nullptr, "", nullptr, 0, nullptr, box);
 }
 
 void llama_kv_cache_dsa_iswa::clear(bool data) {
@@ -83,8 +97,8 @@ void llama_kv_cache_dsa_iswa::clear(bool data) {
 bool llama_kv_cache_dsa_iswa::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     bool res = true;
 
-    res = res & kv_dsa->seq_rm(seq_id, p0, p1);
     res = res & kv_swa->seq_rm(seq_id, p0, p1);
+    res = res & kv_dsa->seq_rm(seq_id, p0, p1);
 
     return res;
 }
@@ -120,6 +134,12 @@ llama_pos llama_kv_cache_dsa_iswa::seq_pos_max(llama_seq_id seq_id) const {
 
 std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_dsa_iswa::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> mb = kv_dsa->memory_breakdown();
+
+    // both caches count the one box
+    if (get_box_shared()) {
+        return mb;
+    }
+
     for (const auto & buft_size : kv_swa->memory_breakdown()) {
         mb[buft_size.first] += buft_size.second;
     }
@@ -140,7 +160,7 @@ llama_memory_context_ptr llama_kv_cache_dsa_iswa::init_batch(llama_batch_allocr 
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = balloc.split_simple(n_ubatch);
+            auto ubatch = kv_dsa->get_mla()->box_row_copies() ? balloc.split_seq(n_ubatch) : balloc.split_simple(n_ubatch);
 
             if (ubatch.n_tokens == 0) {
                 break;
@@ -159,12 +179,15 @@ llama_memory_context_ptr llama_kv_cache_dsa_iswa::init_batch(llama_batch_allocr 
             break;
         }
 
-        auto sinfos_lid = kv_dsa->get_lid()->prepare(ubatches);
+        // the rows of the elastic memory are read through one list, so the caches hold a token in the same cell
+        const bool box = kv_dsa->get_mla()->get_box() != nullptr;
+
+        auto sinfos_lid = box ? sinfos_mla : kv_dsa->get_lid()->prepare(ubatches);
         if (sinfos_lid.empty()) {
             break;
         }
 
-        auto sinfos_swa = kv_swa->prepare(ubatches);
+        auto sinfos_swa = box ? sinfos_mla : kv_swa->prepare(ubatches);
         if (sinfos_swa.empty()) {
             break;
         }
@@ -200,12 +223,15 @@ llama_memory_context_ptr llama_kv_cache_dsa_iswa::init_batch(llama_batch_allocr 
             break;
         }
 
-        auto sinfos_lid = kv_dsa->get_lid()->prepare(ubatches);
+        // the rows of the elastic memory are read through one list, so the caches hold a token in the same cell
+        const bool box = kv_dsa->get_mla()->get_box() != nullptr;
+
+        auto sinfos_lid = box ? sinfos_mla : kv_dsa->get_lid()->prepare(ubatches);
         if (sinfos_lid.empty()) {
             break;
         }
 
-        auto sinfos_swa = kv_swa->prepare(ubatches);
+        auto sinfos_swa = box ? sinfos_mla : kv_swa->prepare(ubatches);
         if (sinfos_swa.empty()) {
             break;
         }

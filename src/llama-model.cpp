@@ -2289,7 +2289,10 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         hparams.swa_type,
                         nullptr,
                         filter_idx,
-                        nullptr);
+                        nullptr,
+                        cparams.elastic,
+                        cparams.box_bytes,
+                        cparams.box_deferred);
             } break;
         case LLM_ARCH_GLM_DSA:
         case LLM_ARCH_DEEPSEEK32:
@@ -2301,6 +2304,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     llama_kv_cache::layer_filter_cb filter =
                         [&](uint32_t il) { return il >= hparams.n_layer(); };
 
+                    const bool in_box = params.box && params.box->has_draft();
+
                     res = new llama_kv_cache(
                             *this,
                             hparams,
@@ -2309,7 +2314,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             !cparams.flash_attn,
                             cparams.offload_kqv,
                             cparams.kv_unified,
-                            cparams.n_ctx_seq,
+                            in_box ? params.box->get_n_cells() : cparams.n_ctx_seq,
                             cparams.n_seq_max,
                             1,
                             hparams.n_swa,
@@ -2317,7 +2322,11 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             nullptr,
                             filter,
                             nullptr,
-                            nullptr);
+                            nullptr,
+                            "",
+                            nullptr,
+                            0,
+                            in_box ? params.box : nullptr);
                 } else {
                     // Main context: DSA cache for the trunk layers only - the nextn
                     // layer(s) are never attended by the trunk graph.
@@ -2341,13 +2350,27 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             hparams.swa_type,
                             filter_mla,
                             filter_lid,
-                            nullptr);
+                            nullptr,
+                            cparams.elastic,
+                            cparams.box_bytes,
+                            cparams.box_deferred,
+                            cparams.box_draft,
+                            cparams.box_draft_type_k,
+                            cparams.box_draft_type_v);
                 }
             } break;
         case LLM_ARCH_HY_V4:
             {
                 if (hparams.indexer_top_k == 0) {
                     // full-attention checkpoint: no indexer, so no indexer key cache
+                    std::shared_ptr<llama_box> box_own;
+                    if (cparams.elastic && !cparams.ctx_other) {
+                        box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
+                                GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
+                                cparams.box_bytes, cparams.box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16,
+                                [](int32_t) { return true; }, nullptr);
+                    }
+
                     res = new llama_kv_cache(
                             *this,
                             hparams,
@@ -2356,7 +2379,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             !cparams.flash_attn,
                             cparams.offload_kqv,
                             cparams.kv_unified,
-                            cparams.n_ctx_seq,
+                            box_own ? box_own->get_n_cells() : cparams.n_ctx_seq,
                             cparams.n_seq_max,
                             1,
                             hparams.n_swa,
@@ -2364,7 +2387,12 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             nullptr,
                             nullptr,
                             nullptr,
-                            nullptr);
+                            nullptr,
+                            "",
+                            nullptr,
+                            0,
+                            nullptr,
+                            box_own);
                 } else {
                     // only "full" layers own an indexer, so the shared layers need no indexer cache
                     llama_kv_cache::layer_filter_cb filter_lid = [&](uint32_t il) { return hparams.is_indexer_full(il); };
@@ -2383,7 +2411,10 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             hparams.swa_type,
                             nullptr,
                             filter_lid,
-                            nullptr);
+                            nullptr,
+                            cparams.elastic,
+                            cparams.box_bytes,
+                            cparams.box_deferred);
                 }
             } break;
         case LLM_ARCH_DOTS3NOTE:
@@ -2395,6 +2426,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     llama_kv_cache::layer_filter_cb filter =
                         [&](uint32_t il) { return il >= hparams.n_layer(); };
 
+                    const bool in_box = params.box && params.box->has_draft();
+
                     res = new llama_kv_cache(
                             *this,
                             hparams,
@@ -2403,7 +2436,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             !cparams.flash_attn,
                             cparams.offload_kqv,
                             cparams.kv_unified,
-                            cparams.n_ctx_seq,
+                            in_box ? params.box->get_n_cells() : cparams.n_ctx_seq,
                             cparams.n_seq_max,
                             1,
                             hparams.n_swa,
@@ -2411,7 +2444,11 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             nullptr,
                             filter,
                             nullptr,
-                            nullptr);
+                            nullptr,
+                            "",
+                            nullptr,
+                            0,
+                            in_box ? params.box : nullptr);
                 } else {
                     // main context: DSA cache for the trunk full-attention layers plus a window-sized SWA cache
                     llama_kv_cache::layer_filter_cb filter_mla = nullptr;
@@ -2434,7 +2471,13 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             1,
                             filter_mla,
                             filter_lid,
-                            nullptr);
+                            nullptr,
+                            cparams.elastic,
+                            cparams.box_bytes,
+                            cparams.box_deferred,
+                            cparams.box_draft,
+                            cparams.box_draft_type_k,
+                            cparams.box_draft_type_v);
                 }
             } break;
         case LLM_ARCH_DEEPSEEK4:
@@ -2477,7 +2520,11 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             1,
                             cparams.n_rs_seq,
                             nullptr,
-                            nullptr);
+                            nullptr,
+                            cparams.elastic,
+                            cparams.box_bytes,
+                            cparams.box_deferred,
+                            cparams.n_batch);
                 }
             } break;
         case LLM_ARCH_DFLASH:

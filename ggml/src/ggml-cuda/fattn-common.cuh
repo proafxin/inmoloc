@@ -1105,10 +1105,10 @@ void launch_fattn(
     // the lists in place of KV_max and their length in place of ne31, see flash_attn_ext_vec
     const ggml_tensor * kv_idx = KQV->src[6] != nullptr ? KQV->src[5] : nullptr;
     const ggml_tensor * q_rng  = KQV->src[6];
-    GGML_ASSERT(!kv_idx || (!use_sparse && !mask && Q->ne[3] == 1));
+    GGML_ASSERT(!kv_idx || (!mask && Q->ne[3] == 1));
 
     const int32_t n_kv_max = kv_rows ? int32_t(kv_rows->ne[0]) : use_sparse ? ggml_get_op_params_i32(KQV, 4) : 0;
-    if (use_sparse && !kv_rows) {
+    if (use_sparse && !kv_rows && !kv_idx) {
         GGML_ASSERT(mask != nullptr);
         GGML_ASSERT(n_kv_max > 0);
         const size_t mask_rows = size_t(mask->ne[1]) * mask->ne[3];
@@ -1269,9 +1269,9 @@ void launch_fattn(
         Q->ne[0], ne01,     Q->ne[2], Q->ne[3], Q->nb[1], Q->nb[2], Q->nb[3],
         K->ne[0], n_kv, K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,
-        // the prefix lengths of a list of rows (ggml_flash_attn_ext_set_kv_rows_hi) are flagged by ne32 < 0
+        // ne32 flags the prefix lengths of a list of rows (ggml_flash_attn_ext_set_kv_rows_hi) with -1, per query ranges with -2
         kv_idx ? kv_idx->ne[0] : mask ? mask->ne[1] : 0,
-        rows_hi ? -1 : mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
+        kv_idx ? -2 : rows_hi ? -1 : mask ? mask->ne[2] : 0, kv_idx ? 1 : mask ? mask->ne[3] : 0,
         mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0
     );
     CUDA_CHECK(cudaGetLastError());

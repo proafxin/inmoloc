@@ -383,7 +383,7 @@ ggml_tensor * llama_model_hy_v4::graph::build_indexer_top_k(
 
     ggml_tensor * iw = ggml_mul_mat(ctx0, layer.indexer_proj, cur);
 
-    ik = mctx_lid->get_k(ctx0, il);
+    ik = inp_attn_dsa->get_k_lid(ctx0, il);
 
     const auto n_stream = ik->ne[3];
     iq = ggml_view_4d(ctx0, iq, iq->ne[0], iq->ne[1], iq->ne[2]/n_stream, n_stream,
@@ -396,7 +396,7 @@ ggml_tensor * llama_model_hy_v4::graph::build_indexer_top_k(
 
     ggml_tensor * score = nullptr;
     if (cparams.fused_lid) {
-        score = ggml_lightning_indexer(ctx0, iq, ik, iw, inp_attn_dsa->get_kq_mask_lid());
+        score = inp_attn_dsa->build_lid(ctx0, iq, ik, iw, inp_attn_dsa->get_kq_mask_lid());
         cb(score, "indexer_score", il);
         res->add_fused_node({LLM_FUSED_OP_LIGHTNING_INDEXER, score, il});
     } else {
@@ -415,7 +415,7 @@ ggml_tensor * llama_model_hy_v4::graph::build_indexer_top_k(
 
     const uint32_t n_top_k = score->ne[0] < (int64_t) hparams.indexer_top_k ? score->ne[0] : hparams.indexer_top_k;
 
-    return ggml_cont(ctx0, ggml_top_k(ctx0, score, n_top_k));
+    return ggml_cont(ctx0, inp_attn_dsa->build_top_k(ctx0, score, n_top_k));
 }
 
 ggml_tensor * llama_model_hy_v4::graph::build_attention_dsa(

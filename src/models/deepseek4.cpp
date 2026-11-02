@@ -263,6 +263,42 @@ static dsv4_state_tensors dsv4_build_state_snapshot(
     return { kv, score };
 }
 
+// the elastic memory: the state rows of the sequences of the ubatch, then the rows of its tokens; the plan refers to
+// these, so nothing depends on how many sequences the box holds
+static dsv4_state_tensors dsv4_box_source(
+        ggml_context * ctx,
+        const llm_graph_input_dsv4::comp_input & inp,
+        const llama_dsv4_comp_state * state,
+        ggml_tensor * scratch_kv,
+        ggml_tensor * scratch_score,
+        int32_t il) {
+    ggml_tensor * base_kv    = ggml_get_rows(ctx, state->get_kv_all(ctx, il),    inp.state_restore_src_idxs);
+    ggml_tensor * base_score = ggml_get_rows(ctx, state->get_score_all(ctx, il), inp.state_restore_src_idxs);
+
+    return { ggml_concat(ctx, base_kv, scratch_kv, 1), ggml_concat(ctx, base_score, scratch_score, 1) };
+}
+
+// stores the rollback snapshots and the state after the ubatch
+static void dsv4_box_store(
+        ggml_context * ctx,
+        ggml_cgraph * gf,
+        const llm_graph_input_dsv4::comp_input & inp,
+        const llama_dsv4_comp_state * state,
+        const dsv4_state_tensors & source,
+        int32_t il) {
+    const dsv4_state_tensors snapshot = dsv4_build_state_snapshot(ctx, inp, state, source.kv, source.score, il);
+    if (snapshot.kv != nullptr) {
+        ggml_build_forward_expand(gf, snapshot.kv);
+        ggml_build_forward_expand(gf, snapshot.score);
+    }
+
+    ggml_tensor * kv    = ggml_get_rows(ctx, source.kv,    inp.state_persist_src_idxs);
+    ggml_tensor * score = ggml_get_rows(ctx, source.score, inp.state_persist_src_idxs);
+
+    ggml_build_forward_expand(gf, state->cpy_kv   (ctx, kv,    inp.state_persist_dst_idxs, il));
+    ggml_build_forward_expand(gf, state->cpy_score(ctx, score, inp.state_persist_dst_idxs, il));
+}
+
 static constexpr int64_t DSV4_CSA_RATIO  = 4;
 static constexpr int64_t DSV4_HCA_RATIO  = 128;
 
@@ -624,14 +660,24 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
     indexer_weights = ggml_scale(ctx0, indexer_weights, 1.0f/sqrtf(float(n_embd_indexer_head*n_indexer_head)));
     cb(indexer_weights, "lid_weights", il);
 
+    const bool box = inp_dsv4->mctx->get_box() != nullptr;
+
+    ggml_tensor * rows = inp_dsv4->get_box().lid;
+
     ggml_tensor * indexer_k = inp_dsv4->mctx->get_lid()->get_k(ctx0, il);
     const int64_t n_lid = inp_lid.kq_mask->ne[0];
     GGML_ASSERT(n_lid > 0);
     GGML_ASSERT(n_lid <= indexer_k->ne[2]);
 
-    indexer_k = ggml_view_4d(ctx0, indexer_k,
-            indexer_k->ne[0], indexer_k->ne[1], n_lid, indexer_k->ne[3],
-            indexer_k->nb[1], indexer_k->nb[2], indexer_k->nb[3], 0);
+    if (box && !cparams.fused_lid) {
+        // no kernel reads the rows of the box in place, the plain ops work on a copy
+        indexer_k = ggml_get_rows(ctx0, inp_dsv4->mctx->get_box()->get_lid(il), ggml_reshape_1d(ctx0, rows, n_lid));
+        indexer_k = ggml_reshape_4d(ctx0, indexer_k, indexer_k->ne[0], 1, n_lid, 1);
+    } else if (!box) {
+        indexer_k = ggml_view_4d(ctx0, indexer_k,
+                indexer_k->ne[0], indexer_k->ne[1], n_lid, indexer_k->ne[3],
+                indexer_k->nb[1], indexer_k->nb[2], indexer_k->nb[3], 0);
+    }
     cb(indexer_k, "lid_k", il);
 
     const int64_t n_stream = indexer_k->ne[3];
@@ -644,7 +690,8 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
 
     ggml_tensor * indexer_score = nullptr;
     if (cparams.fused_lid) {
-        indexer_score = ggml_lightning_indexer(ctx0, indexer_q, indexer_k, indexer_weights, inp_lid.kq_mask);
+        indexer_score = box ? ggml_lightning_indexer_rows(ctx0, indexer_q, indexer_k, indexer_weights, inp_lid.kq_mask, rows) :
+            ggml_lightning_indexer(ctx0, indexer_q, indexer_k, indexer_weights, inp_lid.kq_mask);
         cb(indexer_score, "lid_score_masked", il);
         res->add_fused_node({LLM_FUSED_OP_LIGHTNING_INDEXER, indexer_score, il});
     } else {
@@ -670,7 +717,8 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
     }
 
     const uint32_t n_top_k = indexer_score->ne[0] < hparams.indexer_top_k ? indexer_score->ne[0] : hparams.indexer_top_k;
-    ggml_tensor * top_k = ggml_cont(ctx0, ggml_top_k(ctx0, indexer_score, n_top_k));
+    // the live entries first, so that the host knows how many entries of the list a token reads
+    ggml_tensor * top_k = ggml_cont(ctx0, box ? ggml_argsort_top_k(ctx0, indexer_score, n_top_k) : ggml_top_k(ctx0, indexer_score, n_top_k));
     cb(top_k, "lid_top_k", il);
 
     return top_k;
@@ -765,6 +813,67 @@ ggml_tensor * llama_model_deepseek4::graph::build_csa_lid_attention(
     cb(out, "attn_csa_lid", il);
 
     return out;
+}
+
+ggml_tensor * llama_model_deepseek4::graph::build_box_attention(
+        llm_graph_input_dsv4_raw * inp_attn,
+        ggml_tensor * q,
+        ggml_tensor * kv,
+        ggml_tensor * list,
+        ggml_tensor * rng,
+        ggml_tensor * sinks,
+        float kq_scale,
+        int il) const {
+    ggml_tensor * k_rot = inp_attn->self_k_rot;
+    if (k_rot) {
+        q  = llama_mul_mat_hadamard(ctx0, q, k_rot);
+        kv = llama_mul_mat_hadamard(ctx0, kv, k_rot);
+    }
+
+    ggml_build_forward_expand(gf, q);
+    ggml_build_forward_expand(gf, kv);
+
+    const llama_kv_cache_dsv4_raw_context * mctx_raw = inp_attn->mctx;
+
+    ggml_build_forward_expand(gf, mctx_raw->cpy_k(ctx0, kv, inp_attn->get_k_idxs(), il));
+
+    // the K view of the layer holds its raw and its compressed rows: all of them are read in place
+    ggml_tensor * k = mctx_raw->get_k(ctx0, il);
+
+    ggml_tensor * out = build_attn_mha(q, k, k, nullptr, nullptr, sinks, nullptr, 0, kq_scale, il, list, rng);
+    if (k_rot) {
+        out = llama_mul_mat_hadamard(ctx0, out, k_rot);
+    }
+    cb(out, "attn_box", il);
+
+    return out;
+}
+
+ggml_tensor * llama_model_deepseek4::graph::build_csa_box_attention(
+        const llama_model & model,
+        llm_graph_input_dsv4 * inp_dsv4,
+        llm_graph_input_dsv4_raw * inp_attn,
+        ggml_tensor * q,
+        ggml_tensor * kv,
+        ggml_tensor * qr,
+        ggml_tensor * cur,
+        ggml_tensor * inp_pos,
+        ggml_tensor * sinks,
+        float kq_scale,
+        int il) const {
+    const auto & box = inp_dsv4->get_box();
+
+    ggml_tensor * top_k = build_lid_top_k(model, inp_dsv4, qr, cur, inp_pos, il);
+
+    const int64_t n_top = top_k->ne[0];
+    const int64_t n_q   = top_k->ne[1];
+
+    // the top-k of a token names entries of the indexer list, which holds the same rows as the K view
+    ggml_tensor * sel = ggml_get_rows(ctx0, ggml_reshape_2d(ctx0, box.lid, 1, box.lid->ne[0]),
+            ggml_reshape_1d(ctx0, top_k, n_top*n_q));
+    sel = ggml_reshape_2d(ctx0, sel, n_top, n_q);
+
+    return build_box_attention(inp_attn, q, kv, ggml_concat(ctx0, box.raw, sel, 0), box.rng_csa, sinks, kq_scale, il);
 }
 
 ggml_tensor * llama_model_deepseek4::graph::build_hca_attention(
@@ -938,11 +1047,51 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
     const int64_t ratio = hparams.dsv4_compress_ratios[il];
     GGML_ASSERT(inp_dsv4 || ratio == 0);
 
+    const bool box = inp_dsv4 && inp_dsv4->mctx->get_box();
+
+    // the elastic memory: one step of a compressor, from the rows of the sequences and of the tokens to the next state
+    const auto box_compress = [&](const llm_graph_input_dsv4::comp_input & inp, const llama_dsv4_comp_state * state,
+            const llama_kv_cache_dsv4_comp_context * comp, ggml_tensor * wkv, ggml_tensor * wgate, ggml_tensor * ape, ggml_tensor * norm,
+            int64_t n_embd_comp, const char * name) {
+        ggml_tensor * scratch_kv    = build_lora_mm(wkv, cur);
+        ggml_tensor * scratch_score = build_lora_mm(wgate, cur);
+        cb(scratch_kv, name, il);
+
+        scratch_score = ggml_add(ctx0, scratch_score, ggml_get_rows(ctx0, ape, inp.state_pos));
+        cb(scratch_score, name, il);
+
+        const dsv4_state_tensors source = dsv4_box_source(ctx0, inp, state, scratch_kv, scratch_score, il);
+
+        ggml_tensor * comp_kv = ratio == DSV4_HCA_RATIO ?
+            build_hca_compressed_kv_from_state(source.kv, source.score, inp.state_read_idxs, inp.state_write_pos, norm, n_embd_comp, name, il) :
+            build_overlap_compressed_kv_from_state(source.kv, source.score, inp.state_read_idxs, inp.state_write_pos, norm, DSV4_CSA_RATIO, n_embd_comp, name, il);
+
+        if (inp.k_rot) {
+            comp_kv = llama_mul_mat_hadamard(ctx0, comp_kv, inp.k_rot);
+        }
+
+        ggml_build_forward_expand(gf, comp->cpy_k(ctx0, comp_kv, inp.state_write_idxs, il));
+
+        dsv4_box_store(ctx0, gf, inp, state, source, il);
+    };
+
+    if (box && ratio == DSV4_HCA_RATIO) {
+        box_compress(inp_dsv4->get_hca(), inp_dsv4->mctx->get_hca_state(), inp_dsv4->mctx->get_hca(),
+                layer.attn_comp_wkv, layer.attn_comp_wgate, layer.attn_comp_ape, layer.attn_comp_norm, n_embd_head, "hca_state_compress");
+    }
+
+    if (box && ratio == DSV4_CSA_RATIO) {
+        box_compress(inp_dsv4->get_csa(), inp_dsv4->mctx->get_csa_state(), inp_dsv4->mctx->get_csa(),
+                layer.attn_comp_wkv, layer.attn_comp_wgate, layer.attn_comp_ape, layer.attn_comp_norm, n_embd_head, "csa_state_compress");
+        box_compress(inp_dsv4->get_lid(), inp_dsv4->mctx->get_lid_state(), inp_dsv4->mctx->get_lid(),
+                layer.indexer_comp_wkv, layer.indexer_comp_wgate, layer.indexer_comp_ape, layer.indexer_comp_norm, hparams.indexer_head_size, "lid_state_compress");
+    }
+
     ggml_tensor * hca_state_kv    = nullptr;
     ggml_tensor * hca_state_score = nullptr;
     ggml_tensor * hca_source_kv   = nullptr;
     ggml_tensor * hca_source_score = nullptr;
-    if (ratio == DSV4_HCA_RATIO && inp_dsv4->get_hca().state_pos) {
+    if (!box && ratio == DSV4_HCA_RATIO && inp_dsv4->get_hca().state_pos) {
         hca_state_kv = build_lora_mm(layer.attn_comp_wkv, cur);
         cb(hca_state_kv, "hca_state_kv", il);
 
@@ -957,7 +1106,7 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
 
     }
 
-    if (ratio == DSV4_CSA_RATIO && inp_dsv4->get_csa().state_pos) {
+    if (!box && ratio == DSV4_CSA_RATIO && inp_dsv4->get_csa().state_pos) {
         ggml_tensor * csa_state_kv = build_lora_mm(layer.attn_comp_wkv, cur);
         cb(csa_state_kv, "csa_state_kv", il);
 
@@ -1099,7 +1248,7 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
 
     const llama_dsv4_comp_state * hca_state = nullptr;
     dsv4_state_tensors hca_restored = {};
-    if (ratio == DSV4_HCA_RATIO && inp_dsv4->get_hca().state_write_idxs) {
+    if (!box && ratio == DSV4_HCA_RATIO && inp_dsv4->get_hca().state_write_idxs) {
         GGML_ASSERT(hca_state_kv);
         GGML_ASSERT(hca_state_score);
 
@@ -1132,7 +1281,7 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
                     kv_comp_hca, inp_dsv4->get_hca().state_write_idxs, il));
     }
 
-    if (ratio == DSV4_HCA_RATIO && inp_dsv4->get_hca().state_pos) {
+    if (!box && ratio == DSV4_HCA_RATIO && inp_dsv4->get_hca().state_pos) {
         GGML_ASSERT(hca_state_kv);
         GGML_ASSERT(hca_state_score);
 
@@ -1186,6 +1335,18 @@ ggml_tensor * llama_model_deepseek4::graph::build_attention_impl(
                 nullptr, layer.attn_sinks, nullptr,
                 1.0f/sqrtf(float(n_embd_head)), il);
         cb(out, "attn_raw", il);
+    } else if (box) {
+        const auto & b = inp_dsv4->get_box();
+
+        const float kq_scale = 1.0f/sqrtf(float(n_embd_head));
+
+        if (ratio == DSV4_CSA_RATIO) {
+            out = build_csa_box_attention(model, inp_dsv4, inp_attn, q, kv, qr, cur, inp_pos, layer.attn_sinks, kq_scale, il);
+        } else if (ratio == DSV4_HCA_RATIO) {
+            out = build_box_attention(inp_attn, q, kv, b.list_hca, b.rng_hca, layer.attn_sinks, kq_scale, il);
+        } else {
+            out = build_box_attention(inp_attn, q, kv, b.raw, b.rng_raw, layer.attn_sinks, kq_scale, il);
+        }
     } else if (ratio == DSV4_CSA_RATIO &&
             inp_dsv4->get_csa().kq_mask &&
             inp_dsv4->get_lid().kq_mask &&

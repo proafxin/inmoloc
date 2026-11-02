@@ -27,7 +27,10 @@ public:
                llama_swa_type   swa_type,
         const layer_filter_cb & filter,
         const layer_filter_cb & filter_idx,
-        const  layer_reuse_cb & reuse);
+        const  layer_reuse_cb & reuse,
+                         bool   use_box = false,
+                       size_t   box_bytes = 0,
+                         bool   box_deferred = false);
 
     ~llama_kv_cache_msa() = default;
 
@@ -66,6 +69,12 @@ public:
 
     llama_kv_cache * get_base() const;
     llama_kv_cache * get_idx () const;
+
+    // the elastic memory, owned by the main cache: the indexer keeps its keys in the same blocks
+    std::shared_ptr<llama_box> get_box_shared() const override { return kv_base->get_box_shared(); }
+    bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override { return kv_base->box_reserve(seq_id, n_input, n_output); }
+    void box_reserve_drop(llama_seq_id seq_id) override { kv_base->box_reserve_drop(seq_id); }
+    void box_finalized() override { kv_base->box_finalized(); kv_idx->box_finalized(); }
 
     uint32_t       get_n_pad()    const { return n_pad; }
     uint32_t       get_n_seq_max() const { return n_seq_max; }

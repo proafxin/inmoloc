@@ -1,5 +1,6 @@
 #pragma once
 
+#include "llama-box.h"
 #include "llama-kv-cache.h"
 
 #include <vector>
@@ -28,7 +29,14 @@ public:
                llama_swa_type   swa_type,
         const layer_filter_cb & filter_mla,
         const layer_filter_cb & filter_lid,
-        const  layer_reuse_cb & reuse);
+        const  layer_reuse_cb & reuse,
+                         bool   use_box = false,
+                       size_t   box_bytes = 0,
+                         bool   box_deferred = false,
+                         bool   box_draft = false,
+                    ggml_type   box_draft_type_k = GGML_TYPE_F16,
+                    ggml_type   box_draft_type_v = GGML_TYPE_F16,
+                         bool   box_swa = false);
 
     ~llama_kv_cache_dsa() = default;
 
@@ -65,12 +73,21 @@ public:
     void state_write(llama_io_write_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) const override;
     void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) override;
 
+    // the elastic memory, owned by the MLA cache: the indexer keeps its keys in the same blocks
+    std::shared_ptr<llama_box> get_box_shared() const override { return kv_mla->get_box_shared(); }
+    bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override { return kv_mla->box_reserve(seq_id, n_input, n_output); }
+    void box_reserve_drop(llama_seq_id seq_id) override { kv_mla->box_reserve_drop(seq_id); }
+    void box_finalized() override { kv_mla->box_finalized(); kv_lid->box_finalized(); }
+
     //
     // llama_kv_cache_dsa specific API
     //
 
     llama_kv_cache * get_mla() const;
     llama_kv_cache * get_lid() const;
+
+    // the rows of the indexer layers of a model in the elastic memory
+    static std::vector<llama_box::attn_layer> box_layers_lid(const llama_model & model, ggml_type type_k, const layer_filter_cb & filter_lid);
 
 private:
     // we keep indexer KV cache hparams instance here as llama_kv_cache stores only reference to it

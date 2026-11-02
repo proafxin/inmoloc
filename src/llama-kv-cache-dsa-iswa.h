@@ -26,7 +26,13 @@ public:
                      uint32_t   n_pad,
         const layer_filter_cb & filter_mla,
         const layer_filter_cb & filter_lid,
-        const  layer_reuse_cb & reuse);
+        const  layer_reuse_cb & reuse,
+                         bool   use_box = false,
+                       size_t   box_bytes = 0,
+                         bool   box_deferred = false,
+                         bool   box_draft = false,
+                    ggml_type   box_draft_type_k = GGML_TYPE_F16,
+                    ggml_type   box_draft_type_v = GGML_TYPE_F16);
 
     ~llama_kv_cache_dsa_iswa() = default;
 
@@ -62,6 +68,12 @@ public:
 
     void state_write(llama_io_write_i & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) const override;
     void state_read (llama_io_read_i  & io, llama_seq_id seq_id = -1, llama_state_seq_flags flags = 0) override;
+
+    // the elastic memory, held by the DSA cache: the SWA cache keeps its rows in the same blocks
+    std::shared_ptr<llama_box> get_box_shared() const override { return kv_dsa->get_box_shared(); }
+    bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override { return kv_dsa->box_reserve(seq_id, n_input, n_output); }
+    void box_reserve_drop(llama_seq_id seq_id) override { kv_dsa->box_reserve_drop(seq_id); }
+    void box_finalized() override { kv_dsa->box_finalized(); kv_swa->box_finalized(); }
 
     //
     // llama_kv_cache_dsa_iswa specific API

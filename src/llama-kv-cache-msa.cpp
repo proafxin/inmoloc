@@ -1,5 +1,6 @@
 #include "llama-kv-cache-msa.h"
 
+#include "llama-box.h"
 #include "llama-impl.h"
 #include "llama-batch.h"
 #include "llama-model.h"
@@ -24,17 +25,47 @@ llama_kv_cache_msa::llama_kv_cache_msa(
            llama_swa_type   swa_type,
     const layer_filter_cb & filter,
     const layer_filter_cb & filter_idx,
-    const  layer_reuse_cb & reuse) :
+    const  layer_reuse_cb & reuse,
+                     bool   use_box,
+                   size_t   box_bytes,
+                     bool   box_deferred) :
     hparams_idx(model.hparams),
     n_stream(unified ? 1 : n_seq_max), n_seq_max(n_seq_max), n_pad(n_pad),
     n_swa(n_swa), swa_type(swa_type) {
+
+    std::shared_ptr<llama_box> box_own;
+    if (use_box) {
+        const auto & hparams = model.hparams;
+
+        // one key head per layer, in the slots above the model layers of the box
+        std::vector<llama_box::attn_layer> layers_idx;
+        for (uint32_t il = 0; il < hparams.n_layer_all; ++il) {
+            if (filter_idx == nullptr || filter_idx(il)) {
+                layers_idx.push_back({ (int32_t) (il + hparams.n_layer_all), type_k, type_k, hparams.indexer_head_size, hparams.indexer_head_size, false });
+            }
+        }
+
+        box_own = llama_box_make(model, type_k, type_v, kv_size, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
+                box_bytes, box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16,
+                [&](int32_t il) { return filter == nullptr || filter(il); }, nullptr, std::move(layers_idx));
+
+        // the blocks of a sequence are chosen in the rows of that sequence: attention reads copies of them
+        box_own->set_row_lists(false);
+        box_own->set_row_copies(true);
+
+        kv_size = box_own->get_n_cells();
+
+        // fool llama_kv_cache into thinking this is a MLA cache, the box has no V rows for the indexer
+        hparams_idx.n_embd_head_k_mla_impl = hparams.indexer_head_size;
+        hparams_idx.n_embd_head_v_mla_impl = hparams.indexer_head_size;
+    }
 
     LLAMA_LOG_INFO("%s: creating main KV cache, size = %u cells\n", __func__, kv_size);
 
     kv_base = std::make_unique<llama_kv_cache>(
             model, model.hparams, type_k, type_v,
             v_trans, offload, unified, kv_size, n_seq_max, n_pad,
-            n_swa, swa_type, nullptr, filter, reuse, nullptr);
+            n_swa, swa_type, nullptr, filter, reuse, nullptr, "", nullptr, 0, nullptr, box_own);
 
     // the MSA indexer uses a single key head per layer
     std::fill(hparams_idx.n_head_kv_arr.begin(), hparams_idx.n_head_kv_arr.end(), 1);
@@ -46,7 +77,8 @@ llama_kv_cache_msa::llama_kv_cache_msa(
     kv_idx = std::make_unique<llama_kv_cache>(
             model, hparams_idx, type_k, type_v,
             v_trans, offload, unified, kv_size, n_seq_max, n_pad,
-            n_swa, swa_type, nullptr, filter_idx, reuse, nullptr);
+            n_swa, swa_type, nullptr, filter_idx, reuse, nullptr, "idx_",
+            box_own.get(), box_own ? (int32_t) model.hparams.n_layer_all : 0);
 }
 
 void llama_kv_cache_msa::clear(bool data) {
@@ -57,8 +89,9 @@ void llama_kv_cache_msa::clear(bool data) {
 bool llama_kv_cache_msa::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     bool res = true;
 
-    res = res & kv_base->seq_rm(seq_id, p0, p1);
+    // the main cache gives the blocks back, once no cache holds cells in them
     res = res & kv_idx ->seq_rm(seq_id, p0, p1);
+    res = res & kv_base->seq_rm(seq_id, p0, p1);
 
     return res;
 }
@@ -110,7 +143,8 @@ llama_memory_context_ptr llama_kv_cache_msa::init_batch(
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
+            auto ubatch = kv_base->box_row_copies() ? balloc.split_seq(n_ubatch) :
+                n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
 
             if (ubatch.n_tokens == 0) {
                 break;
@@ -129,7 +163,8 @@ llama_memory_context_ptr llama_kv_cache_msa::init_batch(
             break;
         }
 
-        auto sinfos_idx = kv_idx->prepare(ubatches);
+        // the rows of the elastic memory are read through one list, so the two caches hold a token in the same cell
+        auto sinfos_idx = kv_base->get_box() ? sinfos_base : kv_idx->prepare(ubatches);
         if (sinfos_idx.empty()) {
             break;
         }
@@ -265,6 +300,13 @@ uint32_t llama_kv_cache_msa_context::get_n_pos() const {
 
     llama_pos pos_max = -1;
 
+    // the elastic memory has the one sequence of the ubatch, and the longest there can be when graphs are reserved
+    if (kv->get_base()->get_box()) {
+        pos_max = i_next < ubatches.size() ? kv->seq_pos_max(ubatches[i_next].seq_id[0][0]) : (llama_pos) kv->get_base()->attn_n_cells_max() - 1;
+
+        return std::max(n_pad_cur, GGML_PAD((uint32_t) (pos_max + 1), n_pad_cur));
+    }
+
     for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) kv->get_n_seq_max(); ++seq_id) {
         pos_max = std::max(pos_max, kv->seq_pos_max(seq_id));
     }
@@ -285,6 +327,20 @@ void llama_kv_cache_msa_context::set_input_cell_pos(ggml_tensor * dst, const lla
     const int64_t n_tps = n_tokens/n_stream_ub;
 
     int32_t * data = (int32_t *) dst->data;
+
+    // the elastic memory: the entries of the list of rows of the sequence, see llama_kv_cache::seq_cells_causal()
+    if (kv->get_base()->get_box()) {
+        std::vector<int32_t>   list;
+        std::vector<llama_pos> pos;
+        kv->get_base()->seq_cells_causal(ubatch->seq_id[0][0], ubatch->is_pos_2d(), list, pos);
+
+        std::fill(data, data + n_kv, 0);
+        for (size_t r = 0; r < pos.size(); ++r) {
+            data[r] = (int32_t) (pos[r]/div);
+        }
+
+        return;
+    }
 
     for (int64_t s = 0; s < n_stream_ub; ++s) {
         const llama_seq_id seq_id = ubatch->seq_id[s*n_tps][0];
@@ -319,7 +375,20 @@ void llama_kv_cache_msa_context::set_input_pos_slot(ggml_tensor * dst, const lla
 
         std::vector<int32_t> map(n_pos, 0);
 
-        for (uint32_t j = 0; j < cells.size(); ++j) {
+        if (kv->get_base()->get_box()) {
+            // the entries of the list of rows of the sequence, see llama_kv_cache::seq_cells_causal()
+            std::vector<int32_t>   list;
+            std::vector<llama_pos> pos;
+            kv->get_base()->seq_cells_causal(seq_id, ubatch->is_pos_2d(), list, pos);
+
+            for (size_t r = 0; r < pos.size(); ++r) {
+                if (pos[r] >= 0 && pos[r] < n_pos) {
+                    map[pos[r]] = (int32_t) r;
+                }
+            }
+        }
+
+        for (uint32_t j = 0; !kv->get_base()->get_box() && j < cells.size(); ++j) {
             if (cells.is_empty(j) || !cells.seq_has(j, seq_id)) {
                 continue;
             }
@@ -367,6 +436,21 @@ void llama_kv_cache_msa_context::set_input_pos_mask(ggml_tensor * dst, const lla
         const auto & cells = kv->get_base()->get_cells(seq_id);
 
         const llama_pos p1 = ubatch->pos[i];
+
+        // the elastic memory walks the cells of the sequence, not the box
+        if (kv->get_base()->get_box()) {
+            for (const auto & [p0, c] : cells.seq_pos_get(seq_id)) {
+                if (p0 > p1) {
+                    break;
+                }
+
+                if (p0 >= 0 && p0 < n_pos && !llama_hparams::is_masked_swa(n_swa, swa_type, p0, p1)) {
+                    data[i*n_pos + p0] = 0.0f;
+                }
+            }
+
+            continue;
+        }
 
         for (uint32_t j = 0; j < cells.size(); ++j) {
             if (cells.is_empty(j) || !cells.seq_has(j, seq_id)) {

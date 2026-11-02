@@ -16,6 +16,7 @@
 struct ggml_context;
 struct ggml_tensor;
 struct llama_model;
+struct llama_hparams;
 
 // the elastic memory: one buffer, the box, holds the attention KV and the recurrent states of all the requests, handed
 // out by offset as the requests come and go; a model without recurrent layers has no states
@@ -37,6 +38,12 @@ struct llama_model;
 //     the states hold no cells
 //   - recurrent: one view per kind (conv, scan, replay inputs) for all the layers, with rows of unit bytes: a row of a
 //     layer's state piece is at the unit index of its byte offset in the box, see r_row(), s_row(), x_row()
+//
+// a model with compressed history (DeepSeek V4) keeps its raw rows for a window and its compressed rows for good, so the
+// blocks of a sequence are of several kinds, all of the same size: raw blocks go back as they leave the window, the
+// others stay. A compressed block has the layout of a raw block, so compressed row r of a kind is row kv_row() of cell
+// b*n_block_tokens + r%n_block_tokens, for every layer of the kind, in the same view as the raw rows of the layer: one
+// attention reads both in place. The indexer rows have views of their own, on the blocks of the CSA rows
 class llama_box {
 public:
     struct attn_layer {
@@ -46,6 +53,7 @@ public:
         uint32_t  n_embd_k;
         uint32_t  n_embd_v;
         bool      has_v;
+        bool      comp_free = false; // no compressed rows of the layer in a block of BLOCK_CSA, the indexer rows can use them
     };
 
     struct recr_layer {
@@ -59,6 +67,20 @@ public:
         uint32_t  n_rows_s; // scan rows: one per draft position, or one when a rollback replays
     };
 
+    // a piece of a state that is not a recurrent layer: n_rows rows of n_embd elements, read through a view of its own
+    struct state_piece {
+        ggml_type type;
+        uint32_t  n_embd;
+        uint32_t  n_rows;
+    };
+
+    enum block_kind : uint32_t {
+        BLOCK_RAW = 0,
+        BLOCK_CSA = 1,
+        BLOCK_HCA = 2,
+        BLOCK_KINDS,
+    };
+
     static constexpr uint32_t n_block_tokens = 128;
 
     // the row unit of the recurrent views, which every state row is padded to
@@ -66,7 +88,9 @@ public:
 
     // a box of `bytes` bytes, or with the memory of a cache of n_tokens cells and n_states states when bytes is 0; draft
     // is the layer of an MTP draft that keeps its tokens in the blocks, nullptr for none; no memory is taken until alloc()
-    llama_box(std::vector<attn_layer> attn, std::vector<recr_layer> recr, const attn_layer * draft, size_t bytes, uint32_t n_tokens, uint32_t n_states);
+    // lid are the indexer layers on the blocks of BLOCK_CSA, pieces the rest of a state
+    llama_box(std::vector<attn_layer> attn, std::vector<recr_layer> recr, const attn_layer * draft, size_t bytes, uint32_t n_tokens, uint32_t n_states,
+            std::vector<attn_layer> lid = {}, std::vector<state_piece> pieces = {});
 
     // takes the buffer from buft and creates the views; a dry run (no_alloc) takes none
     void alloc(ggml_backend_buffer_type_t buft, bool no_alloc);
@@ -125,9 +149,22 @@ public:
     int64_t s_row(int32_t s, uint32_t l, uint32_t k = 0) const;
     int64_t x_row(int32_t s, uint32_t l, uint32_t h) const;
 
+    // row k of a state piece in its view, the same for every piece of the size of the row
+    int64_t p_row(int32_t s, uint32_t piece, uint32_t k) const {
+        return (int64_t) (((size_t) s*state_bytes + k*GGML_PAD(ggml_row_size(pieces[piece].type, pieces[piece].n_embd), unit))/unit);
+    }
+
+    // row of compressed row r of seq_id, in the K views of the layers of the kind and in the indexer views
+    int64_t comp_row(llama_seq_id seq_id, block_kind kind, uint32_t r) const {
+        const auto & blocks = seqs.at(seq_id).comp[kind];
+        return kv_row(blocks.at(r/n_block_tokens)*n_block_tokens + r%n_block_tokens);
+    }
+
     // views of the whole box
     ggml_tensor * get_k(int32_t il) const;
     ggml_tensor * get_v(int32_t il) const;
+    ggml_tensor * get_lid(int32_t il) const { return t_lid.at(il); }
+    ggml_tensor * get_piece(uint32_t piece) const { return t_p.at(piece); } // [n_embd, units]
     ggml_tensor * get_r() const { return t_r; } // [n_embd_r, units]
     ggml_tensor * get_s() const { return t_s; } // [n_embd_s, units]
     ggml_tensor * get_x() const { return t_x; } // [n_embd_x, units], nullptr without replay
@@ -151,9 +188,26 @@ public:
     // the rightmost free block for the tokens of seq_id; false when there is none
     bool block_take(llama_seq_id seq_id);
 
+    // the same for the compressed rows of seq_id: until it holds n_blocks blocks of the kind
+    bool comp_take(llama_seq_id seq_id, block_kind kind, uint32_t n_blocks);
+
+    uint32_t comp_blocks(llama_seq_id seq_id, block_kind kind) const { return (uint32_t) seqs.at(seq_id).comp[kind].size(); }
+
+    // the raw blocks of seq_id that hold no cell any more go back: they left the window; what an admitted request gives
+    // back is charged again, it may need the blocks for its next tokens
+    void seq_evict(llama_seq_id seq_id);
+
     // the caches that keep cells in the blocks: fn tells whether a block holds a used cell of the cache
     void add_user(const void * user, std::function<bool(uint32_t)> fn);
     void remove_user(const void * user);
+
+    // copies of the compressed blocks and the states of sequences, between them or to host memory (block_bytes, state_bytes)
+    void comp_copy(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, block_kind kind);
+    void comp_get(llama_seq_id seq_id, block_kind kind, uint32_t i, void * data) const;
+    void comp_set(llama_seq_id seq_id, block_kind kind, uint32_t i, const void * data);
+    void state_copy(int32_t src, int32_t dst);
+    void state_get(int32_t s, void * data) const;
+    void state_set(int32_t s, const void * data);
 
     // the blocks of seq_id become free, except those whose cells a cache still holds for other sequences, which go back
     // when they are empty, see reclaim(); an admitted request keeps its blocks: they are what its admission took
@@ -173,6 +227,9 @@ public:
     // the blocks of the input and of the most output of a request; the output continues in the last block of the input
     uint32_t blocks_input (uint32_t n_input) const;
     uint32_t blocks_output(uint32_t n_input, uint32_t n_output) const;
+
+    // the blocks a sequence of n tokens takes, when they are not one per n_block_tokens tokens
+    void set_blocks_fn(std::function<uint32_t(uint32_t)> fn) { blocks_fn = std::move(fn); }
 
     // admits a request of seq_id: takes the state (state_alloc_fn, when the seq holds none) and the input blocks the seq
     // does not hold yet, and charges its output blocks; false, with nothing taken, when they do not fit next to the
@@ -219,6 +276,14 @@ private:
     std::vector<size_t> off_k;
     std::vector<size_t> off_v;
 
+    std::vector<attn_layer> lid;
+    std::vector<size_t>     off_lid;
+
+    std::vector<state_piece> pieces;
+    std::vector<size_t>      off_p;
+
+    std::function<uint32_t(uint32_t)> blocks_fn;
+
     // the offset of the pieces of each recurrent layer in a state
     std::vector<size_t> pc_r;
     std::vector<size_t> pc_s;
@@ -232,6 +297,8 @@ private:
 
     std::vector<ggml_tensor *> t_k; // by model layer, nullptr for the others
     std::vector<ggml_tensor *> t_v;
+    std::vector<ggml_tensor *> t_lid;
+    std::vector<ggml_tensor *> t_p;
 
     ggml_tensor * t_r = nullptr;
     ggml_tensor * t_s = nullptr;
@@ -254,6 +321,9 @@ private:
     struct seq_info {
         std::vector<uint32_t> blocks;
 
+        // the blocks of the compressed rows, by kind, in the order of the rows
+        std::vector<uint32_t> comp[BLOCK_KINDS];
+
         // an admitted request: the blocks its input takes (the blocks after them are output) and the output blocks it
         // may still take
         bool     admitted       = false;
@@ -267,6 +337,9 @@ private:
     uint32_t reserved = 0;
 
     uint32_t block_pop();
+
+    // a block of a seq was taken: after the input of an admitted request it is output, taken from its charge
+    void block_charge(seq_info & seq);
 
     // the blocks the first n states cover
     uint32_t states_blocks(uint32_t n) const;
@@ -296,4 +369,7 @@ std::unique_ptr<llama_box> llama_box_make(
                 ggml_type   box_draft_type_v,
     const std::function<bool(int32_t)> & filter_attn,
     const std::function<bool(int32_t)> & filter_recr,
-    std::vector<llama_box::attn_layer>   extra_attn = {});
+    std::vector<llama_box::attn_layer>   extra_attn = {},
+    std::vector<llama_box::attn_layer>   lid = {},
+    std::vector<llama_box::state_piece>  pieces = {},
+    const llama_hparams * hparams_attn = nullptr);

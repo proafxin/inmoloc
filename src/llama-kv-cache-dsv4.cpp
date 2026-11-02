@@ -11,6 +11,7 @@
 #include <climits>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -432,18 +433,36 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
         uint32_t kv_size,
         uint32_t n_stream,
         uint32_t n_rs_seq,
-        const std::vector<uint32_t> & rs_idx) {
+        const std::vector<uint32_t> & rs_idx,
+        const llama_kv_cache_dsv4 * kv_box,
+        const llama_dsv4_comp_state * state,
+        bool lists) {
     llama_kv_cache_dsv4_context::comp_plan plan;
     plan.n_visible.resize(ubatch.n_tokens);
     plan.n_stream = dsv4_comp_graph_n_stream(ubatch, n_stream);
 
+    llama_box * box = kv_box ? kv_box->get_box() : nullptr;
+
+    const llama_box::block_kind kind = ratio == DSV4_CSA_RATIO ? llama_box::BLOCK_CSA : llama_box::BLOCK_HCA;
+
+    // the elastic memory: the graph reads the state rows of the sequences of the ubatch into [state rows | scratch], which
+    // the source indices below refer to, and the rows of the box are written directly
+    std::vector<int32_t> seq_base(box ? box->get_n_seq_max() : 0, -1);
+    for (uint32_t s = 0; box && s < ubatch.n_seqs_unq; ++s) {
+        seq_base[ubatch.seq_id_unq[s]] = (int32_t) (s*state_size);
+    }
+
+    const auto write_row = [&](llama_seq_id seq_id, uint32_t r) -> int64_t {
+        return box->comp_row(seq_id, kind, r);
+    };
+
     // n_stream is the persistent cache/state layout; plan.n_stream is the
     // graph view for this ubatch and can be a subset of those streams.
-    if (n_stream <= 1 && ubatch.n_seqs_unq > 1) {
+    if (!box && n_stream <= 1 && ubatch.n_seqs_unq > 1) {
         throw std::runtime_error("DSV4 single compressed stream cannot serve multiple sequences");
     }
 
-    const int64_t state_rows = (int64_t) state_size*n_stream;
+    const int64_t state_rows = box ? (int64_t) state_size*ubatch.n_seqs_unq : (int64_t) state_size*n_stream;
 
     struct persist_row {
         int32_t dst;
@@ -483,7 +502,7 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
             return (int32_t) (state_rows + curr_token_idx_map.at(key));
         }
 
-        const int64_t stream_off = dsv4_stream_offset(n_stream, seq_id, state_size);
+        const int64_t stream_off = box ? (int64_t) seq_base[seq_id] : dsv4_stream_offset(n_stream, seq_id, state_size);
         return (int32_t) (stream_off + pos%state_size);
     };
 
@@ -502,7 +521,7 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
 
         for (int32_t s = 0; s < ubatch.n_seq_id[i]; ++s) {
             const llama_seq_id seq_id = ubatch.seq_id[i][s];
-            const int64_t stream_off = dsv4_stream_offset(n_stream, seq_id, state_size);
+            const int64_t stream_off = box ? (int64_t) seq_base[seq_id] : dsv4_stream_offset(n_stream, seq_id, state_size);
             const int32_t state_idx = (int32_t) (stream_off + pos%state_size);
 
             const auto it = std::find_if(persist_rows.begin(), persist_rows.end(),
@@ -521,9 +540,9 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
             }
 
             const llama_pos source_start = pos + 1 - ratio;
-            const int64_t cache_off = dsv4_stream_offset(n_stream, seq_id, kv_size);
+            const int64_t cache_off = box ? 0 : dsv4_stream_offset(n_stream, seq_id, kv_size);
 
-            plan.state_write_idxs.push_back(cache_off + pos/ratio);
+            plan.state_write_idxs.push_back(box ? write_row(seq_id, pos/ratio) : cache_off + pos/ratio);
             plan.state_write_pos.push_back((int32_t) source_start);
             ++state_write_counts[seq_id];
 
@@ -549,10 +568,11 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
 
         // Pad each stream to the reserve plan's block count.
         const auto append_dummy_block = [&](llama_seq_id seq_id, uint32_t i) {
-            const int64_t cache_off = dsv4_stream_offset(n_stream, seq_id, kv_size);
+            const int64_t cache_off = box ? 0 : dsv4_stream_offset(n_stream, seq_id, kv_size);
             const int32_t source_idx = state_source_idx(seq_id, ubatch.pos[i]);
 
-            plan.state_write_idxs.push_back(cache_off + kv_size - 1);
+            // the next row of the sequence, which no token sees yet, stands for the last one of a cache
+            plan.state_write_idxs.push_back(box ? write_row(seq_id, (ubatch.pos[i] + 1)/ratio) : cache_off + kv_size - 1);
             plan.state_write_pos .push_back(0);
 
             if (overlap) {
@@ -603,7 +623,7 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
         assert(kv_size > 0);
         // the last slot must not be live, or the dummy write would corrupt it;
         // a full stream implies a completed block, which implies real writes
-        assert(plan.n_kv < (int64_t) kv_size);
+        assert(box || plan.n_kv < (int64_t) kv_size);
 
         // Keep the compress/write ops in the graph when no HCA block completes
         // in this ubatch. The dummy block writes to the last cache slot and is
@@ -615,10 +635,10 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
         assert(i < ubatch.n_tokens);
 
         const llama_seq_id seq_id = ubatch.seq_id[i][0];
-        const int64_t cache_off = dsv4_stream_offset(n_stream, seq_id, kv_size);
+        const int64_t cache_off = box ? 0 : dsv4_stream_offset(n_stream, seq_id, kv_size);
         const int32_t source_idx = state_source_idx(seq_id, ubatch.pos[i]);
 
-        plan.state_write_idxs.push_back(cache_off + kv_size - 1);
+        plan.state_write_idxs.push_back(box ? write_row(seq_id, (ubatch.pos[i] + 1)/ratio) : cache_off + kv_size - 1);
         plan.state_write_pos .push_back(0);
 
         for (uint32_t j = 0; j < ratio; ++j) {
@@ -639,6 +659,92 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
     // before the first block is visible, so the graph topology never changes.
     // Padded slots are masked out; comp cache buffers are zero-initialized.
     plan.n_kv = std::max<int64_t>(GGML_PAD(plan.n_kv, 256u), 256);
+
+    if (box) {
+        // the attentions read lists; the list of the indexer holds the rows of the sequences one after the other
+        plan.n_kv = 0;
+
+        if (lists) {
+            std::vector<int32_t> seq_rows(box->get_n_seq_max(), 0);
+            for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+                seq_rows[ubatch.seq_id[i][0]] = std::max(seq_rows[ubatch.seq_id[i][0]], plan.n_visible[i]);
+            }
+
+            std::vector<int32_t> seq_start(box->get_n_seq_max(), 0);
+            int64_t n_rows = 0;
+            for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+                seq_start[ubatch.seq_id_unq[s]] = (int32_t) n_rows;
+                n_rows += seq_rows[ubatch.seq_id_unq[s]];
+            }
+
+            plan.n_kv = std::max<int64_t>(GGML_PAD(n_rows, 256u), 256);
+
+            plan.n_skip.resize(ubatch.n_tokens);
+            for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+                plan.n_skip[i]     = seq_start[ubatch.seq_id[i][0]];
+                plan.n_visible[i] += plan.n_skip[i];
+            }
+        }
+
+        // the state rows of the sequences, from the plane of a pending rollback
+        for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+            const llama_seq_id seq_id = ubatch.seq_id_unq[s];
+            const int32_t st = kv_box->get_seq_state(seq_id);
+            const uint32_t rollback = (size_t) seq_id < rs_idx.size() ? rs_idx[seq_id] : 0;
+
+            for (uint32_t r = 0; r < state_size; ++r) {
+                plan.state_restore_src_idxs.push_back(state->box_row(st, rollback, r));
+            }
+        }
+
+        // the state after the ubatch: the last token of a row, or the row as it was
+        std::vector<int32_t> persist_src(state_rows);
+        for (int64_t r = 0; r < state_rows; ++r) {
+            persist_src[r] = (int32_t) r;
+        }
+        for (const persist_row & row : persist_rows) {
+            persist_src[row.dst] = (int32_t) (state_rows + row.src);
+        }
+
+        for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+            const llama_seq_id seq_id = ubatch.seq_id_unq[s];
+            const int32_t st   = kv_box->get_seq_state(seq_id);
+            const int64_t base = seq_base[seq_id];
+
+            for (uint32_t r = 0; r < state_size; ++r) {
+                plan.state_persist_src_idxs.push_back(persist_src[base + r]);
+                plan.state_persist_dst_idxs.push_back(state->box_row(st, 0, r));
+            }
+
+            std::vector<uint32_t> token_idxs;
+            for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+                if (dsv4_token_has_seq(ubatch, i, seq_id)) {
+                    token_idxs.push_back(i);
+                }
+            }
+
+            // a rollback of d tokens finds the state before the last d tokens of the ubatch
+            for (uint32_t d = 1; d <= n_rs_seq; ++d) {
+                const uint32_t prefix = d <= token_idxs.size() ? (uint32_t) token_idxs.size() - d : 0;
+
+                for (uint32_t r = 0; r < state_size; ++r) {
+                    int32_t src = (int32_t) (base + r);
+
+                    for (uint32_t j = 0; j < prefix; ++j) {
+                        const uint32_t i_tok = token_idxs[j];
+                        if (ubatch.pos[i_tok] >= 0 && (uint32_t) (ubatch.pos[i_tok]%state_size) == r) {
+                            src = (int32_t) (state_rows + i_tok);
+                        }
+                    }
+
+                    plan.state_snapshot_src_idxs.push_back(src);
+                    plan.state_snapshot_dst_idxs.push_back(state->box_row(st, d, r));
+                }
+            }
+        }
+
+        return plan;
+    }
 
     std::sort(persist_rows.begin(), persist_rows.end(),
             [](const persist_row & a, const persist_row & b) {
@@ -744,14 +850,17 @@ static std::vector<llama_kv_cache_dsv4_context::comp_plan> dsv4_build_comp_plans
         uint32_t kv_size,
         uint32_t n_stream,
         uint32_t n_rs_seq,
-        const std::vector<uint32_t> & rs_idx) {
+        const std::vector<uint32_t> & rs_idx,
+        const llama_kv_cache_dsv4 * kv_box = nullptr,
+        const llama_dsv4_comp_state * state = nullptr,
+        bool lists = false) {
     std::vector<llama_kv_cache_dsv4_context::comp_plan> plans;
     plans.reserve(ubatches.size());
 
     // the first ubatch touching a seq consumes its rollback restore
     std::vector<uint32_t> rs(rs_idx);
     for (const llama_ubatch & ubatch : ubatches) {
-        plans.push_back(dsv4_build_comp_plan(ubatch, ratio, overlap, state_size, kv_size, n_stream, n_rs_seq, rs));
+        plans.push_back(dsv4_build_comp_plan(ubatch, ratio, overlap, state_size, kv_size, n_stream, n_rs_seq, rs, kv_box, state, lists));
 
         for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
             const llama_seq_id seq_id = ubatch.seq_id_unq[s];
@@ -766,12 +875,13 @@ static std::vector<llama_kv_cache_dsv4_context::comp_plan> dsv4_build_comp_plans
 
 static llama_kv_cache::slot_info_vec_t dsv4_build_comp_sinfos(
         const std::vector<llama_ubatch> & ubatches,
-        uint32_t n_stream) {
+        uint32_t n_stream,
+        const llama_box * box = nullptr) {
     llama_kv_cache::slot_info_vec_t sinfos;
     sinfos.reserve(ubatches.size());
 
     for (const llama_ubatch & ubatch : ubatches) {
-        if (n_stream <= 1 && ubatch.n_seqs_unq > 1) {
+        if (box == nullptr && n_stream <= 1 && ubatch.n_seqs_unq > 1) {
             throw std::runtime_error("DSV4 single compressed stream cannot serve multiple sequences");
         }
 
@@ -846,11 +956,13 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_reserve_comp_plan(
         uint32_t state_size,
         uint32_t kv_size,
         uint32_t n_stream,
-        uint32_t n_rs_seq) {
+        uint32_t n_rs_seq,
+        bool box = false,
+        bool lists = false) {
     llama_kv_cache_dsv4_context::comp_plan plan;
     plan.n_visible.resize(ubatch.n_tokens);
     plan.n_stream = dsv4_comp_graph_n_stream(ubatch, n_stream);
-    plan.n_kv = kv_size;
+    plan.n_kv = box && !lists ? 0 : kv_size;
 
     if (ubatch.n_tokens == 0) {
         return plan;
@@ -861,18 +973,20 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_reserve_comp_plan(
     const uint32_t n_seqs = std::max<uint32_t>(1, ubatch.n_seqs);
     const size_t n_blocks = (size_t) ubatch.n_tokens/ratio + n_seqs;
 
-    const uint64_t state_rows = (uint64_t) state_size*n_stream;
-    const size_t n_persist = (size_t) std::min<uint64_t>(ubatch.n_tokens, state_rows);
-    const size_t n_restore = n_rs_seq > 0 ? (size_t) state_size*n_stream : 0;
-    const size_t n_snapshot = (size_t) n_rs_seq*state_size*n_stream;
+    // the elastic memory: every token of a ubatch can be a sequence of its own
+    const uint64_t state_rows = (uint64_t) state_size*(box ? ubatch.n_tokens : n_stream);
+    const size_t n_persist = box ? state_rows : (size_t) std::min<uint64_t>(ubatch.n_tokens, state_rows);
+    const size_t n_restore = box || n_rs_seq > 0 ? (size_t) state_rows : 0;
+    const size_t n_snapshot = (size_t) n_rs_seq*state_rows;
 
     plan.state_pos .resize(ubatch.n_tokens);
     plan.state_persist_src_idxs.resize(n_persist);
     plan.state_persist_dst_idxs.resize(n_persist);
     plan.state_restore_src_idxs.resize(n_restore);
-    plan.state_restore_dst_idxs.resize(n_restore);
+    plan.state_restore_dst_idxs.resize(box ? 0 : n_restore);
     plan.state_snapshot_src_idxs.resize(n_snapshot);
     plan.state_snapshot_dst_idxs.resize(n_snapshot);
+    plan.n_skip.resize(box && lists ? ubatch.n_tokens : 0);
     plan.state_read_idxs .resize((overlap ? 2u : 1u)*ratio*n_blocks);
     plan.state_write_idxs.resize(n_blocks);
     plan.state_write_pos .resize(n_blocks);
@@ -997,9 +1111,51 @@ llama_dsv4_comp_state::llama_dsv4_comp_state(
 
     LLAMA_LOG_INFO("%s: %s ratio = %u, state = %u x %u, streams = %u, rs_seq = %u, layers = %zu, size = %7.2f MiB\n",
             __func__, name, ratio, state_size, n_embd_state, n_stream, n_rs_seq, layers.size(), total_size()/1024.0/1024.0);
+
+    for (const auto & l : layers) {
+        ils.push_back(l.il);
+    }
+}
+
+llama_dsv4_comp_state::llama_dsv4_comp_state(
+        llama_box * box,
+        uint32_t    n_layer,
+        uint32_t    ratio,
+        uint32_t    state_size,
+        uint32_t    n_rs_seq,
+        uint32_t    piece0,
+        const std::vector<uint32_t> & ils) :
+    ratio(ratio),
+    state_size(state_size),
+    n_embd_state(0),
+    n_stream(1),
+    n_rs_seq(n_rs_seq),
+    box(box),
+    piece0(piece0),
+    ils(ils) {
+    GGML_UNUSED(n_layer);
+
+    for (size_t i = 0; i < ils.size(); ++i) {
+        layer l = {};
+        l.il    = ils[i];
+        l.kv    = box->get_piece(piece0 + 2*(uint32_t) i);
+        l.score = box->get_piece(piece0 + 2*(uint32_t) i + 1);
+
+        map_layer_ids[ils[i]] = (int32_t) layers.size();
+        layers.push_back(std::move(l));
+    }
+}
+
+int32_t llama_dsv4_comp_state::box_row(int32_t s, uint32_t plane, uint32_t r) const {
+    return (int32_t) box->p_row(s, piece0, plane*state_size + r);
 }
 
 void llama_dsv4_comp_state::clear(llama_seq_id seq_id, bool data) {
+    // a box state holds nothing that is read before it is written
+    if (box) {
+        return;
+    }
+
     if (!data) {
         return;
     }
@@ -1161,12 +1317,20 @@ ggml_tensor * llama_dsv4_comp_state::get_kv_all(ggml_context * ctx, int32_t il) 
     const int32_t ids = map_layer_ids.at(il);
     ggml_tensor * state = layers[ids].kv;
 
+    if (box) {
+        return state;
+    }
+
     return ggml_view_2d(ctx, state, state->ne[0], get_n_rows()*(1 + n_rs_seq), state->nb[1], 0);
 }
 
 ggml_tensor * llama_dsv4_comp_state::get_score_all(ggml_context * ctx, int32_t il) const {
     const int32_t ids = map_layer_ids.at(il);
     ggml_tensor * state = layers[ids].score;
+
+    if (box) {
+        return state;
+    }
 
     return ggml_view_2d(ctx, state, state->ne[0], get_n_rows()*(1 + n_rs_seq), state->nb[1], 0);
 }
@@ -1221,7 +1385,11 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
                  uint32_t   n_pad,
                  uint32_t   n_rs_seq,
     const layer_filter_cb & filter,
-    const  layer_reuse_cb & reuse) :
+    const  layer_reuse_cb & reuse,
+                     bool   use_box,
+                   size_t   box_bytes,
+                     bool   box_deferred,
+                 uint32_t   n_batch) :
     hparams_raw(model.hparams),
     hparams_csa(model.hparams),
     hparams_hca(model.hparams),
@@ -1235,13 +1403,15 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
             return false;
         }
 
-        return true;
+        // the MTP draft has a cache of its own: the box only holds the layers of the model
+        return !use_box || il < (int32_t) model.hparams.n_layer();
     };
 
     GGML_UNUSED(unified);
 
     // Keep DSV4 KV/state streams per sequence even when public KV mode is unified.
-    const bool unified_raw = false;
+    // The elastic memory has one stream, each sequence reads through lists of its rows.
+    const bool unified_raw = use_box;
 
     hparams_raw.n_layer_nextn = 0;
     hparams_csa.n_layer_nextn = 0;
@@ -1252,10 +1422,80 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
 
     dsv4_make_k_only(hparams_raw);
 
+    const uint32_t n_layer = model.hparams.n_layer();
+
+    const auto is_csa = [&](uint32_t il) { return model.hparams.dsv4_compress_ratios[il] == DSV4_CSA_RATIO; };
+    const auto is_hca = [&](uint32_t il) { return model.hparams.dsv4_compress_ratios[il] == DSV4_HCA_RATIO; };
+
+    std::vector<uint32_t> ils_csa;
+    std::vector<uint32_t> ils_hca;
+    for (uint32_t il = 0; il < n_layer; ++il) {
+        if (filter && !filter(il)) {
+            continue;
+        }
+        if (is_csa(il)) {
+            ils_csa.push_back(il);
+        } else if (is_hca(il)) {
+            ils_hca.push_back(il);
+        }
+    }
+
+    const uint32_t state_csa = 2*DSV4_CSA_RATIO;
+    const uint32_t state_hca = DSV4_HCA_RATIO;
+
+    if (use_box) {
+        const uint32_t n_embd_head = model.hparams.n_embd_head_k();
+        const uint32_t n_embd_lid  = model.hparams.indexer_head_size;
+
+        std::vector<llama_box::attn_layer>  lid;
+        std::vector<llama_box::state_piece> pieces;
+
+        const auto add_pieces = [&](const std::vector<uint32_t> & ils, uint32_t n_embd, uint32_t size) {
+            for (size_t i = 0; i < 2*ils.size(); ++i) {
+                pieces.push_back({ GGML_TYPE_F32, n_embd, size*(1 + n_rs_seq) });
+            }
+        };
+
+        add_pieces(ils_csa, 2*n_embd_head, state_csa);
+        add_pieces(ils_hca,   n_embd_head, state_hca);
+        add_pieces(ils_csa, 2*n_embd_lid,  state_csa);
+
+        for (const uint32_t il : ils_csa) {
+            lid.push_back({ (int32_t) il, type_k, type_k, n_embd_lid, n_embd_lid, false });
+        }
+
+        box = llama_box_make(model, type_k, type_v, kv_size, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
+                box_bytes, box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16,
+                [&](int32_t il) { return filter_raw(il); }, nullptr, {}, std::move(lid), std::move(pieces), &hparams_raw);
+
+        kv_size   = box->get_n_cells();
+        n_seq_max = box->get_n_seq_max();
+
+        this->n_seq_max = n_seq_max;
+
+        rs_idx.assign(n_seq_max, 0);
+        seq_states.assign(n_seq_max, -1);
+
+        // the window of raw rows of a sequence, whatever its length, and its compressed rows, each kind with the block the
+        // next row goes to
+        const uint32_t n_swa      = hparams_raw.n_swa;
+        const uint32_t n_raw_keep = n_swa + n_rs_seq + std::max(n_batch, n_ubatch);
+
+        box->set_blocks_fn([=](uint32_t n) {
+            constexpr uint32_t n_block = llama_box::n_block_tokens;
+
+            const uint32_t n_raw = (std::min(n, n_raw_keep) + n_block - 1)/n_block + 1;
+            const uint32_t n_csa = ils_csa.empty() ? 0 : n/(DSV4_CSA_RATIO*n_block) + 1;
+            const uint32_t n_hca = ils_hca.empty() ? 0 : n/(DSV4_HCA_RATIO*n_block) + 1;
+
+            return n_raw + n_csa + n_hca;
+        });
+    }
+
     kv_raw = std::make_unique<llama_kv_cache_iswa>(
             model, hparams_raw, type_k, type_v,
             v_trans, offload, swa_full, unified_raw, kv_size, n_seq_max, n_ubatch, n_pad,
-            nullptr, filter_raw, reuse, nullptr);
+            nullptr, filter_raw, reuse, nullptr, box);
 
     dsv4_make_k_only(hparams_csa);
     dsv4_make_k_only(hparams_hca);
@@ -1284,14 +1524,21 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
         return model.hparams.dsv4_compress_ratios[il] == DSV4_HCA_RATIO;
     };
 
-    const bool unified_compressed = false;
+    // the elastic memory holds the compressed rows, these caches of one cell keep the rotation matrices of the graph
+    const bool unified_compressed = use_box;
+
+    const uint32_t n_seq_comp = use_box ? 1 : n_seq_max;
+
+    const auto comp_cells = [&](uint32_t ratio) {
+        return use_box ? 1u : GGML_PAD(dsv4_comp_size(kv_size, ratio), 256u);
+    };
 
     LLAMA_LOG_INFO("%s: creating DSV4 CSA compressed KV cache, size = %u cells\n",
             __func__, dsv4_comp_size(kv_size, DSV4_CSA_RATIO));
 
     kv_csa = std::make_unique<llama_kv_cache>(
             model, hparams_csa, type_k, type_v,
-            v_trans, offload, unified_compressed, GGML_PAD(dsv4_comp_size(kv_size, DSV4_CSA_RATIO), 256u), n_seq_max, n_pad,
+            v_trans, offload, unified_compressed, comp_cells(DSV4_CSA_RATIO), n_seq_comp, n_pad,
             0, LLAMA_SWA_TYPE_NONE, nullptr, filter_csa, nullptr, nullptr);
 
     LLAMA_LOG_INFO("%s: creating DSV4 HCA compressed KV cache, size = %u cells\n",
@@ -1299,7 +1546,7 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
 
     kv_hca = std::make_unique<llama_kv_cache>(
             model, hparams_hca, type_k, type_v,
-            v_trans, offload, unified_compressed, GGML_PAD(dsv4_comp_size(kv_size, DSV4_HCA_RATIO), 256u), n_seq_max, n_pad,
+            v_trans, offload, unified_compressed, comp_cells(DSV4_HCA_RATIO), n_seq_comp, n_pad,
             0, LLAMA_SWA_TYPE_NONE, nullptr, filter_hca, nullptr, nullptr);
 
     LLAMA_LOG_INFO("%s: creating DSV4 lightning-indexer KV cache, size = %u cells\n",
@@ -1307,8 +1554,19 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
 
     kv_lid = std::make_unique<llama_kv_cache>(
             model, hparams_lid, type_k, type_v,
-            v_trans, offload, unified_compressed, GGML_PAD(dsv4_comp_size(kv_size, DSV4_CSA_RATIO), 256u), n_seq_max, n_pad,
+            v_trans, offload, unified_compressed, comp_cells(DSV4_CSA_RATIO), n_seq_comp, n_pad,
             0, LLAMA_SWA_TYPE_NONE, nullptr, filter_csa, nullptr, nullptr);
+
+    if (use_box) {
+        const uint32_t n_csa = (uint32_t) ils_csa.size();
+        const uint32_t n_hca = (uint32_t) ils_hca.size();
+
+        csa_state = std::make_unique<llama_dsv4_comp_state>(box.get(), n_layer, DSV4_CSA_RATIO, state_csa, n_rs_seq, 0, ils_csa);
+        hca_state = std::make_unique<llama_dsv4_comp_state>(box.get(), n_layer, DSV4_HCA_RATIO, state_hca, n_rs_seq, 2*n_csa, ils_hca);
+        lid_state = std::make_unique<llama_dsv4_comp_state>(box.get(), n_layer, DSV4_CSA_RATIO, state_csa, n_rs_seq, 2*(n_csa + n_hca), ils_csa);
+
+        return;
+    }
 
     LLAMA_LOG_INFO("%s: creating DSV4 CSA compressor state\n", __func__);
 
@@ -1340,6 +1598,54 @@ llama_memory_context_ptr llama_kv_cache_dsv4::init_batch(
             uint32_t n_ubatch,
             bool embd_all) {
     GGML_UNUSED(embd_all);
+
+    if (box) {
+        if (dsv4_batch_has_coupled(balloc.get_batch())) {
+            LLAMA_LOG_ERROR("%s: the elastic memory has no tokens of several DSV4 sequences, copy the sequence instead\n", __func__);
+            return std::make_unique<llama_kv_cache_dsv4_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+        }
+
+        balloc.split_reset();
+
+        std::vector<llama_ubatch> ubatches;
+        while (true) {
+            // [TAG_RECURRENT_ROLLBACK_SPLITS]
+            auto ubatch = balloc.split_equal(n_ubatch, false, n_rs_seq > 0 ? n_rs_seq + 1 : 0);
+            if (ubatch.n_tokens == 0) {
+                break;
+            }
+            ubatches.push_back(std::move(ubatch)); // NOLINT
+        }
+
+        if (balloc.get_n_used() < balloc.get_n_tokens()) {
+            return std::make_unique<llama_kv_cache_dsv4_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+        }
+
+        if (!box_prepare(ubatches)) {
+            return std::make_unique<llama_kv_cache_dsv4_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+        }
+
+        auto sinfos_base = kv_raw->get_base()->prepare(ubatches);
+        if (sinfos_base.empty()) {
+            return std::make_unique<llama_kv_cache_dsv4_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+        }
+
+        auto sinfos_swa = kv_raw->get_swa()->prepare(ubatches);
+        if (sinfos_swa.empty()) {
+            return std::make_unique<llama_kv_cache_dsv4_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+        }
+
+        auto sinfos_read = sinfos_swa;
+        auto ubatches_raw = ubatches;
+
+        return std::make_unique<llama_kv_cache_dsv4_context>(
+                this,
+                std::move(sinfos_base),
+                std::move(sinfos_swa),
+                std::move(sinfos_read),
+                std::move(ubatches),
+                std::move(ubatches_raw));
+    }
 
     const bool raw_per_seq  = kv_raw->get_base()->get_n_stream() != 1;
     const bool comp_per_seq = csa_state->get_n_stream() > 1;
@@ -1453,7 +1759,117 @@ bool llama_kv_cache_dsv4::get_can_shift() const {
 
 void llama_kv_cache_dsv4::clear(bool data) {
     kv_raw->clear(data);
+
+    if (box) {
+        std::fill(seq_states.begin(), seq_states.end(), -1);
+        std::fill(rs_idx.begin(), rs_idx.end(), 0);
+        return;
+    }
+
     clear_compressed(-1, true); // DSV4 compressed buffers must never expose stale/uninit rows
+}
+
+bool llama_kv_cache_dsv4::box_state_take(llama_seq_id seq_id) {
+    if (seq_states[seq_id] < 0) {
+        seq_states[seq_id] = box->state_alloc();
+    }
+
+    return seq_states[seq_id] >= 0;
+}
+
+bool llama_kv_cache_dsv4::box_prepare(const std::vector<llama_ubatch> & ubatches) {
+    constexpr uint32_t n_block = llama_box::n_block_tokens;
+
+    std::map<llama_seq_id, std::pair<llama_pos, llama_pos>> seqs;
+
+    for (const auto & ubatch : ubatches) {
+        for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+            const llama_seq_id seq_id = ubatch.seq_id[i][0];
+
+            auto it = seqs.emplace(seq_id, std::make_pair(ubatch.pos[i], ubatch.pos[i])).first;
+
+            it->second.first  = std::min(it->second.first,  ubatch.pos[i]);
+            it->second.second = std::max(it->second.second, ubatch.pos[i]);
+        }
+    }
+
+    const bool has_csa = !csa_state->get_ils().empty();
+    const bool has_hca = !hca_state->get_ils().empty();
+
+    for (const auto & [seq_id, range] : seqs) {
+        if (!box_state_take(seq_id)) {
+            LLAMA_LOG_WARN("%s: no room in the box for the state of seq %d\n", __func__, seq_id);
+            return false;
+        }
+
+        // the raw rows out of reach of the first token of the batch, and of a rollback before it, leave the window
+        const llama_pos p_keep = range.first - (llama_pos) hparams_raw.n_swa + 1 - (llama_pos) n_rs_seq;
+        if (p_keep > 0) {
+            kv_raw->seq_rm(seq_id, -1, p_keep);
+            box->seq_evict(seq_id);
+        }
+
+        // the rows of the batch and the next one, which stands for a row not written yet, see dsv4_build_comp_plan()
+        const uint32_t n_next = (uint32_t) range.second + 1;
+        const uint32_t n_csa  = n_next/(DSV4_CSA_RATIO*n_block) + 1;
+        const uint32_t n_hca  = n_next/(DSV4_HCA_RATIO*n_block) + 1;
+
+        if ((has_csa && !box->comp_take(seq_id, llama_box::BLOCK_CSA, n_csa)) ||
+            (has_hca && !box->comp_take(seq_id, llama_box::BLOCK_HCA, n_hca))) {
+            LLAMA_LOG_WARN("%s: no free block in the box for the compressed rows of seq %d\n", __func__, seq_id);
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool llama_kv_cache_dsv4::box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) {
+    GGML_ASSERT(box);
+
+    std::function<int32_t()> state_alloc;
+    if (seq_states[seq_id] < 0) {
+        state_alloc = [this, seq_id]() {
+            return box_state_take(seq_id) ? seq_states[seq_id] : -1;
+        };
+    }
+
+    return box->reserve(seq_id, n_input, n_output, state_alloc);
+}
+
+void llama_kv_cache_dsv4::box_reserve_drop(llama_seq_id seq_id) {
+    GGML_ASSERT(box);
+
+    box->reserve_drop(seq_id);
+}
+
+void llama_kv_cache_dsv4::box_finalized() {
+    kv_raw->box_finalized();
+
+    const uint32_t n = box->get_n_seq_max();
+
+    n_seq_max = n;
+
+    rs_idx.assign(n, 0);
+    seq_states.assign(n, -1);
+}
+
+void llama_kv_cache_dsv4::box_seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst) {
+    for (const auto kind : { llama_box::BLOCK_CSA, llama_box::BLOCK_HCA }) {
+        if (!box->comp_take(seq_id_dst, kind, box->comp_blocks(seq_id_src, kind))) {
+            throw std::runtime_error("no free block in the box to copy a DSV4 sequence");
+        }
+
+        box->comp_copy(seq_id_src, seq_id_dst, kind);
+    }
+
+    if (!box_state_take(seq_id_dst)) {
+        throw std::runtime_error("no room in the box for the state of a DSV4 sequence");
+    }
+
+    box->state_copy(seq_states[seq_id_src], seq_states[seq_id_dst]);
+
+    rs_idx[seq_id_dst] = rs_idx[seq_id_src];
 }
 
 bool llama_kv_cache_dsv4::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
@@ -1471,6 +1887,11 @@ bool llama_kv_cache_dsv4::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1
             bool res = true;
 
             res = res & kv_raw->seq_rm(seq_id, p0, -1);
+
+            if (box) {
+                return res;
+            }
+
             res = res & kv_csa->seq_rm(seq_id, p0/DSV4_CSA_RATIO, -1);
             res = res & kv_hca->seq_rm(seq_id, p0/DSV4_HCA_RATIO, -1);
             res = res & kv_lid->seq_rm(seq_id, p0/DSV4_CSA_RATIO, -1);
@@ -1513,6 +1934,14 @@ void llama_kv_cache_dsv4::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_ds
     GGML_ASSERT(p0 <= 0 && p1 < 0 && "DSV4 only supports full sequence copies");
 
     kv_raw->seq_cp(seq_id_src, seq_id_dst, p0, p1);
+
+    if (box) {
+        if (seq_id_src != seq_id_dst) {
+            box_seq_cp(seq_id_src, seq_id_dst);
+        }
+        return;
+    }
+
     kv_csa->seq_cp(seq_id_src, seq_id_dst, -1, -1);
     kv_hca->seq_cp(seq_id_src, seq_id_dst, -1, -1);
     kv_lid->seq_cp(seq_id_src, seq_id_dst, -1, -1);
@@ -1530,6 +1959,16 @@ void llama_kv_cache_dsv4::seq_keep(llama_seq_id seq_id) {
     GGML_ASSERT(seq_id >= 0 && (uint32_t) seq_id < n_seq_max);
 
     kv_raw->seq_keep(seq_id);
+
+    if (box) {
+        for (llama_seq_id id = 0; id < (llama_seq_id) n_seq_max; ++id) {
+            if (id != seq_id) {
+                kv_raw->seq_rm(id, -1, -1);
+                clear_compressed(id, true);
+            }
+        }
+        return;
+    }
 
     for (llama_seq_id id = 0; id < (llama_seq_id) n_seq_max; ++id) {
         if (id == seq_id) {
@@ -1570,6 +2009,11 @@ llama_pos llama_kv_cache_dsv4::seq_pos_max(llama_seq_id seq_id) const {
 
 std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_dsv4::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> mb = kv_raw->memory_breakdown();
+    // the box counts once, in the raw cache that holds it
+    if (box) {
+        return mb;
+    }
+
     for (const auto & buft_size : kv_csa->memory_breakdown()) {
         mb[buft_size.first] += buft_size.second;
     }
@@ -1603,6 +2047,11 @@ void llama_kv_cache_dsv4::state_write(llama_io_write_i & io, llama_seq_id seq_id
     io.write(&mode,    sizeof(mode));
 
     kv_raw->state_write(io, seq_id, flags);
+
+    if (box) {
+        box_state_write(io, seq_id, partial_only);
+        return;
+    }
 
     if (!partial_only) {
         const llama_pos pos_max = seq_id >= 0 ? kv_raw->seq_pos_max(seq_id) : -1;
@@ -1651,6 +2100,11 @@ void llama_kv_cache_dsv4::state_read(llama_io_read_i & io, llama_seq_id seq_id, 
     }
 
     kv_raw->state_read(io, seq_id, flags);
+
+    if (box) {
+        box_state_read(io, seq_id, partial_only);
+        return;
+    }
 
     if (!partial_only) {
         clear_compressed(seq_id, true);
@@ -1725,7 +2179,96 @@ void llama_kv_cache_dsv4::reset_rs_idx_for_ubatches(const std::vector<llama_ubat
     }
 }
 
+void llama_kv_cache_dsv4::box_state_write(llama_io_write_i & io, llama_seq_id seq_id, bool partial_only) const {
+    GGML_ASSERT(seq_id >= 0 && "the box saves single sequences only");
+
+    const int32_t st = seq_states[seq_id];
+
+    io.write(&st, sizeof(st));
+    if (st < 0) {
+        return;
+    }
+
+    // the compressed rows only grow, a partial state leaves them in place
+    for (const auto kind : { llama_box::BLOCK_CSA, llama_box::BLOCK_HCA }) {
+        if (partial_only) {
+            break;
+        }
+
+        const uint32_t n = box->comp_blocks(seq_id, kind);
+
+        io.write(&n, sizeof(n));
+
+        std::vector<uint8_t> data(box->get_block_bytes());
+        for (uint32_t i = 0; i < n; ++i) {
+            box->comp_get(seq_id, kind, i, data.data());
+            io.write(data.data(), data.size());
+        }
+    }
+
+    std::vector<uint8_t> data(box->get_state_bytes());
+    box->state_get(st, data.data());
+    io.write(data.data(), data.size());
+
+    const uint32_t rs = rs_idx[seq_id];
+    io.write(&rs, sizeof(rs));
+}
+
+void llama_kv_cache_dsv4::box_state_read(llama_io_read_i & io, llama_seq_id seq_id, bool partial_only) {
+    GGML_ASSERT(seq_id >= 0 && "the box restores single sequences only");
+
+    int32_t st;
+    io.read(&st, sizeof(st));
+    if (st < 0) {
+        return;
+    }
+
+    if (!box_state_take(seq_id)) {
+        throw std::runtime_error("no room in the box for the state of a DSV4 sequence");
+    }
+
+    for (const auto kind : { llama_box::BLOCK_CSA, llama_box::BLOCK_HCA }) {
+        if (partial_only) {
+            break;
+        }
+
+        uint32_t n;
+        io.read(&n, sizeof(n));
+
+        if (!box->comp_take(seq_id, kind, n)) {
+            throw std::runtime_error("no free block in the box for a DSV4 sequence");
+        }
+
+        std::vector<uint8_t> data(box->get_block_bytes());
+        for (uint32_t i = 0; i < n; ++i) {
+            io.read(data.data(), data.size());
+            box->comp_set(seq_id, kind, i, data.data());
+        }
+    }
+
+    std::vector<uint8_t> data(box->get_state_bytes());
+    io.read(data.data(), data.size());
+    box->state_set(seq_states[seq_id], data.data());
+
+    uint32_t rs;
+    io.read(&rs, sizeof(rs));
+    rs_idx[seq_id] = rs;
+}
+
 void llama_kv_cache_dsv4::clear_compressed(llama_seq_id seq_id, bool data) {
+    if (box) {
+        // the blocks went back with the raw cells; a request keeps what its admission took
+        for (llama_seq_id s = seq_id >= 0 ? seq_id : 0; s < (seq_id >= 0 ? seq_id + 1 : (llama_seq_id) n_seq_max); ++s) {
+            rs_idx[s] = 0;
+
+            if (seq_states[s] >= 0 && !box->seq_admitted(s)) {
+                box->state_free(seq_states[s]);
+                seq_states[s] = -1;
+            }
+        }
+        return;
+    }
+
     if (seq_id < 0) {
         kv_csa->clear(data);
         kv_hca->clear(data);
@@ -1878,6 +2421,14 @@ ggml_tensor * llama_kv_cache_dsv4_raw_context::get_k(ggml_context * ctx, int32_t
     return kv_swa->get_k(ctx, il, n_kv, sinfos_read[i_next]);
 }
 
+void llama_kv_cache_dsv4_raw_context::seq_rows(llama_seq_id seq_id, bool is_2d, std::vector<int32_t> & rows, std::vector<llama_pos> & pos) const {
+    kv_swa->seq_cells_causal(seq_id, is_2d, rows, pos);
+
+    for (auto & r : rows) {
+        r = (int32_t) kv_swa->cell_row((uint32_t) r);
+    }
+}
+
 ggml_tensor * llama_kv_cache_dsv4_raw_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {
     const auto & sinfo = sinfos_write[i_next];
 
@@ -1976,10 +2527,23 @@ uint32_t llama_kv_cache_dsv4_comp_context::get_n_kv() const {
 }
 
 ggml_tensor * llama_kv_cache_dsv4_comp_context::get_k(ggml_context * ctx, int32_t il) const {
+    if (box) {
+        ggml_tensor * k = lid ? box->get_lid(il) : box->get_k(il);
+
+        return ggml_view_4d(ctx, k, k->ne[0], 1, k->ne[1], 1, ggml_row_size(k->type, k->ne[0]), k->nb[1], k->nb[1]*k->ne[1], 0);
+    }
+
     return kv->get_k(ctx, il, n_kv, sinfos[i_cur]);
 }
 
 ggml_tensor * llama_kv_cache_dsv4_comp_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {
+    if (box) {
+        // [n_embd, 1, n_rows] -> [n_embd, n_rows]
+        k_cur = ggml_view_2d(ctx, k_cur, k_cur->ne[0]*k_cur->ne[1], k_cur->ne[2], k_cur->nb[2], 0);
+
+        return ggml_set_rows(ctx, lid ? box->get_lid(il) : box->get_k(il), k_cur, k_idxs);
+    }
+
     return kv->cpy_k(ctx, k_cur, k_idxs, il, sinfos[i_cur]);
 }
 
@@ -1999,6 +2563,8 @@ llama_kv_cache_dsv4_context::llama_kv_cache_dsv4_context(llama_memory_status sta
 
 llama_kv_cache_dsv4_context::llama_kv_cache_dsv4_context(
         llama_kv_cache_dsv4 * kv) :
+    kv_dsv4(kv),
+    kv_box(kv->get_box()),
     ctx_raw(std::make_unique<llama_kv_cache_dsv4_raw_context>(kv->get_raw())),
     ctx_csa_mem(kv->get_csa()->init_full()),
     ctx_hca_mem(kv->get_hca()->init_full()),
@@ -2013,6 +2579,19 @@ llama_kv_cache_dsv4_context::llama_kv_cache_dsv4_context(
     status(llama_memory_status_combine(
                 llama_memory_status_combine(ctx_raw->get_status(), ctx_csa_mem->get_status()),
                 llama_memory_status_combine(ctx_hca_mem->get_status(), ctx_lid_mem->get_status()))) {
+    box_set_comp();
+}
+
+void llama_kv_cache_dsv4_context::box_set_comp() {
+    if (!kv_box) {
+        return;
+    }
+
+    const uint32_t n_cells = kv_dsv4->get_n_cells_max();
+
+    ctx_csa->set_box(kv_box, false, n_cells/DSV4_CSA_RATIO);
+    ctx_hca->set_box(kv_box, false, n_cells/DSV4_HCA_RATIO);
+    ctx_lid->set_box(kv_box, true,  n_cells/DSV4_CSA_RATIO);
 }
 
 llama_kv_cache_dsv4_context::llama_kv_cache_dsv4_context(
@@ -2047,16 +2626,18 @@ llama_kv_cache_dsv4_context::llama_kv_cache_dsv4_context(
         slot_info_vec_t sinfos_raw_swa_read,
         std::vector<llama_ubatch> ubatches,
         std::vector<llama_ubatch> ubatches_raw) :
+    kv_dsv4(kv),
+    kv_box(kv->get_box()),
     ubatches(std::move(ubatches)),
     plans_csa(dsv4_build_comp_plans(this->ubatches, DSV4_CSA_RATIO, true,
                 kv->get_csa_state()->get_state_size(), kv->get_csa()->get_size(), kv->get_csa_state()->get_n_stream(),
-                kv->get_n_rs_seq(), kv->get_rs_idx())),
+                kv->get_n_rs_seq(), kv->get_rs_idx(), kv->get_box() ? kv : nullptr, kv->get_csa_state())),
     plans_hca(dsv4_build_comp_plans(this->ubatches, DSV4_HCA_RATIO, false,
                 kv->get_hca_state()->get_state_size(), kv->get_hca()->get_size(), kv->get_hca_state()->get_n_stream(),
-                kv->get_n_rs_seq(), kv->get_rs_idx())),
+                kv->get_n_rs_seq(), kv->get_rs_idx(), kv->get_box() ? kv : nullptr, kv->get_hca_state())),
     plans_lid(dsv4_build_comp_plans(this->ubatches, DSV4_CSA_RATIO, true,
                 kv->get_lid_state()->get_state_size(), kv->get_lid()->get_size(), kv->get_lid_state()->get_n_stream(),
-                kv->get_n_rs_seq(), kv->get_rs_idx())),
+                kv->get_n_rs_seq(), kv->get_rs_idx(), kv->get_box() ? kv : nullptr, kv->get_lid_state(), true)),
     ctx_raw(std::make_unique<llama_kv_cache_dsv4_raw_context>(
                 kv->get_raw(),
                 std::move(sinfos_raw_base_write),
@@ -2069,21 +2650,23 @@ llama_kv_cache_dsv4_context::llama_kv_cache_dsv4_context(
     ctx_lid_mem(nullptr),
     ctx_csa(std::make_unique<llama_kv_cache_dsv4_comp_context>(
                 kv->get_csa(),
-                dsv4_build_comp_sinfos(this->ubatches, kv->get_csa()->get_n_stream()),
+                dsv4_build_comp_sinfos(this->ubatches, kv->get_csa()->get_n_stream(), kv->get_box()),
                 this->ubatches)),
     ctx_hca(std::make_unique<llama_kv_cache_dsv4_comp_context>(
                 kv->get_hca(),
-                dsv4_build_comp_sinfos(this->ubatches, kv->get_hca()->get_n_stream()),
+                dsv4_build_comp_sinfos(this->ubatches, kv->get_hca()->get_n_stream(), kv->get_box()),
                 this->ubatches)),
     ctx_lid(std::make_unique<llama_kv_cache_dsv4_comp_context>(
                 kv->get_lid(),
-                dsv4_build_comp_sinfos(this->ubatches, kv->get_lid()->get_n_stream()),
+                dsv4_build_comp_sinfos(this->ubatches, kv->get_lid()->get_n_stream(), kv->get_box()),
                 this->ubatches)),
     csa_state(kv->get_csa_state()),
     hca_state(kv->get_hca_state()),
     lid_state(kv->get_lid_state()),
     status(ctx_raw->get_status()) {
     kv->reset_rs_idx_for_ubatches(this->ubatches);
+
+    box_set_comp();
 }
 
 llama_kv_cache_dsv4_context::~llama_kv_cache_dsv4_context() = default;
@@ -2116,7 +2699,7 @@ bool llama_kv_cache_dsv4_context::apply() {
         res = res & ctx_lid_mem->apply();
     }
 
-    if (ubatches.empty()) {
+    if (ubatches.empty() && !kv_box) {
         csa_state->apply_copies(sc_info_csa);
         hca_state->apply_copies(sc_info_hca);
         lid_state->apply_copies(sc_info_lid);
@@ -2219,7 +2802,7 @@ const llama_kv_cache_dsv4_context::comp_plan & llama_kv_cache_dsv4_context::get_
 
     reserve_plan_csa = dsv4_build_reserve_comp_plan(
             ubatch, DSV4_CSA_RATIO, true,
-            csa_state->get_state_size(), get_csa()->get_n_kv(), csa_state->get_n_stream(), csa_state->get_n_rs_seq());
+            csa_state->get_state_size(), get_csa()->get_n_kv(), csa_state->get_n_stream(), csa_state->get_n_rs_seq(), kv_box != nullptr);
 
     return reserve_plan_csa;
 }
@@ -2233,7 +2816,7 @@ const llama_kv_cache_dsv4_context::comp_plan & llama_kv_cache_dsv4_context::get_
 
     reserve_plan_hca = dsv4_build_reserve_comp_plan(
             ubatch, DSV4_HCA_RATIO, false,
-            hca_state->get_state_size(), get_hca()->get_n_kv(), hca_state->get_n_stream(), hca_state->get_n_rs_seq());
+            hca_state->get_state_size(), get_hca()->get_n_kv(), hca_state->get_n_stream(), hca_state->get_n_rs_seq(), kv_box != nullptr);
 
     return reserve_plan_hca;
 }
@@ -2247,7 +2830,110 @@ const llama_kv_cache_dsv4_context::comp_plan & llama_kv_cache_dsv4_context::get_
 
     reserve_plan_lid = dsv4_build_reserve_comp_plan(
             ubatch, DSV4_CSA_RATIO, true,
-            lid_state->get_state_size(), get_lid()->get_n_kv(), lid_state->get_n_stream(), lid_state->get_n_rs_seq());
+            lid_state->get_state_size(), get_lid()->get_n_kv(), lid_state->get_n_stream(), lid_state->get_n_rs_seq(), kv_box != nullptr, true);
 
     return reserve_plan_lid;
+}
+
+uint32_t llama_kv_cache_dsv4_context::get_n_raw() const {
+    return kv_dsv4->get_n_swa();
+}
+
+int64_t llama_kv_cache_dsv4_context::get_n_hca(const llama_ubatch & ubatch) const {
+    if (reserve_plans) {
+        return kv_dsv4->get_n_cells_max()/DSV4_HCA_RATIO;
+    }
+
+    int64_t n = 0;
+    for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+        n = std::max<int64_t>(n, (ubatch.pos[i] + 1)/DSV4_HCA_RATIO);
+    }
+
+    return std::max<int64_t>(GGML_PAD(n, 256u), 256);
+}
+
+void llama_kv_cache_dsv4_context::set_input_box(ggml_tensor * raw, ggml_tensor * hca, ggml_tensor * lid, ggml_tensor * rng_raw, ggml_tensor * rng_hca, ggml_tensor * rng_csa,
+        uint32_t n_top, const llama_ubatch * ubatch) const {
+    GGML_ASSERT(ggml_backend_buffer_is_host(raw->buffer));
+    GGML_ASSERT(ggml_backend_buffer_is_host(hca->buffer));
+    GGML_ASSERT(ggml_backend_buffer_is_host(lid->buffer));
+
+    const int64_t n_raw = raw->ne[0];
+    const int64_t n_hca = hca->ne[0];
+    const int64_t n_lid = lid->ne[0];
+
+    const uint32_t n_swa = kv_dsv4->get_n_swa();
+
+    auto * d_raw = (int32_t *) raw->data;
+    auto * d_hca = (int32_t *) hca->data;
+    auto * d_lid = (int32_t *) lid->data;
+    auto * r_raw = (int32_t *) rng_raw->data;
+    auto * r_hca = (int32_t *) rng_hca->data;
+    auto * r_csa = (int32_t *) rng_csa->data;
+
+    std::fill(d_raw, d_raw + n_raw*ubatch->n_tokens, 0);
+    std::fill(d_hca, d_hca + n_hca*ubatch->n_tokens, 0);
+    std::fill(d_lid, d_lid + n_lid, 0);
+
+    std::map<llama_seq_id, std::pair<std::vector<int32_t>, std::vector<llama_pos>>> seqs;
+
+    for (uint32_t s = 0; s < ubatch->n_seqs_unq; ++s) {
+        auto & seq = seqs[ubatch->seq_id_unq[s]];
+        ctx_raw->seq_rows(ubatch->seq_id_unq[s], ubatch->is_pos_2d(), seq.first, seq.second);
+    }
+
+    const auto & plan_lid = get_lid_plan(*ubatch);
+    const auto & plan_csa = get_csa_plan(*ubatch);
+
+    // the indexer list, each sequence as far as its last token of the ubatch sees
+    for (uint32_t i = 0; i < ubatch->n_tokens; ++i) {
+        const llama_seq_id seq_id = ubatch->seq_id[i][0];
+
+        for (int32_t k = plan_lid.n_skip[i]; k < plan_lid.n_visible[i]; ++k) {
+            GGML_ASSERT(k < n_lid);
+            d_lid[k] = (int32_t) kv_box->comp_row(seq_id, llama_box::BLOCK_CSA, (uint32_t) (k - plan_lid.n_skip[i]));
+        }
+    }
+
+    for (uint32_t i = 0; i < ubatch->n_tokens; ++i) {
+        const llama_seq_id seq_id = ubatch->seq_id[i][0];
+        const llama_pos    p      = ubatch->pos[i];
+
+        const auto & rows = seqs.at(seq_id).first;
+        const auto & pos  = seqs.at(seq_id).second;
+
+        const int64_t hi = std::upper_bound(pos.begin(), pos.end(), p) - pos.begin();
+        const int64_t lo = std::lower_bound(pos.begin(), pos.end(), p - (llama_pos) n_swa + 1) - pos.begin();
+
+        const int64_t n_read = hi - lo;
+
+        GGML_ASSERT(n_read <= n_raw);
+
+        // at the end of the slots of the token, its compressed rows follow
+        for (int64_t k = 0; k < n_read; ++k) {
+            d_raw[i*n_raw + n_raw - n_read + k] = rows[lo + k];
+        }
+
+        const int32_t n_hca_i = (int32_t) ((p + 1)/DSV4_HCA_RATIO);
+
+        GGML_ASSERT(n_hca_i <= n_hca);
+
+        for (int32_t k = 0; k < n_hca_i; ++k) {
+            d_hca[i*n_hca + k] = (int32_t) kv_box->comp_row(seq_id, llama_box::BLOCK_HCA, (uint32_t) k);
+        }
+
+        const int32_t n_csa_i = plan_csa.n_visible[i];
+
+        r_raw[3*i + 0] = (int32_t) i;
+        r_raw[3*i + 1] = (int32_t) (n_raw - n_read);
+        r_raw[3*i + 2] = (int32_t) n_raw;
+
+        r_hca[3*i + 0] = (int32_t) i;
+        r_hca[3*i + 1] = (int32_t) (n_raw - n_read);
+        r_hca[3*i + 2] = (int32_t) n_raw + n_hca_i;
+
+        r_csa[3*i + 0] = (int32_t) i;
+        r_csa[3*i + 1] = (int32_t) (n_raw - n_read);
+        r_csa[3*i + 2] = (int32_t) n_raw + std::min<int32_t>(n_csa_i, (int32_t) std::min<int64_t>(n_top, n_lid));
+    }
 }

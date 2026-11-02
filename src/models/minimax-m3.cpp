@@ -226,7 +226,9 @@ llama_model_minimax_m3::graph::graph(const llama_model & model, const llm_graph_
     // stream then has its own slot space). A unified cache with multiple sequences
     // interleaves slots and would silently break block anchoring so it falls back to dense.
     const bool fa_on       = cparams.flash_attn;
-    const bool streams_ok  = cparams.n_seq_max == 1 || !cparams.kv_unified;
+    // the list of rows of the sequence of a ubatch is its stream in the elastic memory
+    const bool box         = static_cast<const llama_kv_cache_msa_context *>(mctx)->get_base()->has_box();
+    const bool streams_ok  = box || cparams.n_seq_max == 1 || !cparams.kv_unified;
     const bool msa_enabled = fa_on && streams_ok;
 
     auto * inp_attn = build_attn_inp_kv_msa(msa_enabled);
@@ -257,7 +259,7 @@ llama_model_minimax_m3::graph::graph(const llama_model & model, const llm_graph_
     if (msa_enabled) {
         const auto * mctx_msa = static_cast<const llama_kv_cache_msa_context *>(mctx);
 
-        msa_kqm = inp_attn->get_kq_mask();
+        msa_kqm = box ? ggml_cast(ctx0, inp_attn->self_kv_mask, GGML_TYPE_F16) : inp_attn->get_kq_mask();
         n_kv  = msa_kqm->ne[0];
         n_tps = msa_kqm->ne[1];        // tokens per stream
         ns    = msa_kqm->ne[3];        // streams in this ubatch
@@ -351,7 +353,7 @@ llama_model_minimax_m3::graph::graph(const llama_model & model, const llm_graph_
                 const auto * mctx_cur = mctx_msa_l->get_base();
                 const auto * mctx_idx = mctx_msa_l->get_idx();
                 ggml_build_forward_expand(gf, mctx_idx->cpy_k(ctx0, ik, inp_attn->get_k_idxs_idx(), il));
-                ggml_tensor * ik_kv = mctx_idx->get_k(ctx0, il);
+                ggml_tensor * ik_kv = box ? mctx_idx->get_k_rows(ctx0, il, inp_attn->self_kv_idx) : mctx_idx->get_k(ctx0, il);
 
                 if (inp_attn->self_k_rot) {
                     Qcur = llama_mul_mat_hadamard(ctx0, Qcur, inp_attn->self_k_rot);
@@ -367,8 +369,8 @@ llama_model_minimax_m3::graph::graph(const llama_model & model, const llm_graph_
                 ggml_build_forward_expand(gf, Vcur);
                 ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, Kcur, inp_attn->get_k_idxs(), il));
                 ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, Vcur, inp_attn->get_v_idxs(), il));
-                ggml_tensor * k = mctx_cur->get_k(ctx0, il);
-                ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+                ggml_tensor * k = box ? mctx_cur->get_k_rows(ctx0, il, inp_attn->self_kv_idx) : mctx_cur->get_k(ctx0, il);
+                ggml_tensor * v = box ? mctx_cur->get_v_rows(ctx0, il, inp_attn->self_kv_idx) : mctx_cur->get_v(ctx0, il);
                 GGML_ASSERT(!(v->nb[1] > v->nb[2]) && "MSA assumes v_trans=false (FA on)");
 
                 const int64_t D   = k->ne[0];

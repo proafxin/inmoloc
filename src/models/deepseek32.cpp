@@ -264,7 +264,7 @@ llama_model_deepseek32::graph::graph(const llama_model & model, const llm_graph_
                 cb(indexer_weights, "indexer_weights", il);
 
                 // get cached indexer keys
-                indexer_k = mctx_lid->get_k(ctx0, il);
+                indexer_k = inp_attn_dsa->get_k_lid(ctx0, il);
 
                 // split the batch into streams if needed
                 const auto n_stream = indexer_k->ne[3];
@@ -277,7 +277,7 @@ llama_model_deepseek32::graph::graph(const llama_model & model, const llm_graph_
 
                 ggml_tensor * indexer_score = nullptr;
                 if (cparams.fused_lid) {
-                    indexer_score = ggml_lightning_indexer(ctx0, indexer_q, indexer_k, indexer_weights, inp_attn_dsa->get_kq_mask_lid());
+                    indexer_score = inp_attn_dsa->build_lid(ctx0, indexer_q, indexer_k, indexer_weights, inp_attn_dsa->get_kq_mask_lid());
                     cb(indexer_score, "indexer_score", il);
                     res->add_fused_node({LLM_FUSED_OP_LIGHTNING_INDEXER, indexer_score, il});
                 } else {
@@ -318,7 +318,7 @@ llama_model_deepseek32::graph::graph(const llama_model & model, const llm_graph_
 
                 // get indices of top k indexer scores
                 uint32_t n_top_k = indexer_score->ne[0] < n_indexer_top_k ? indexer_score->ne[0] : n_indexer_top_k;
-                top_k = ggml_cont(ctx0, ggml_top_k(ctx0, indexer_score, n_top_k));
+                top_k = ggml_cont(ctx0, inp_attn_dsa->build_top_k(ctx0, indexer_score, n_top_k));
                 cb(top_k, "top_k", il);
             }
 

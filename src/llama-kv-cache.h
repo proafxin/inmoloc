@@ -168,6 +168,7 @@ public:
     uint32_t get_size()     const;
     uint32_t get_n_stream() const;
     uint32_t get_n_seq_max() const { return n_seq_max; }
+    uint32_t get_stream(llama_seq_id seq_id) const { return seq_to_stream.at(seq_id); }
 
     //
     // elastic memory, see llama_box
@@ -187,6 +188,9 @@ public:
     bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override;
     void box_finalized() override;
     void box_reserve_drop(llama_seq_id seq_id) override;
+
+    // the cells of seq_id in the order of the lists of rows, with their positions
+    void seq_cells_causal(llama_seq_id seq_id, bool is_2d, std::vector<int32_t> & cells_out, std::vector<llama_pos> & pos_out) const;
 
     // the row of cell c in the K and V tensors
     int64_t cell_row(uint32_t c) const;
@@ -294,6 +298,7 @@ public:
 
     // kv_idx as above, kv_mask: F32 [n_idx, n_tokens], over the rows copied from the list
     void set_input_kv_mask(ggml_tensor * kv_idx, ggml_tensor * kv_mask, const llama_ubatch * ubatch, bool causal_attn) const;
+    void set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * kv_mask, ggml_tensor * q_rng, uint32_t n_top, const llama_ubatch * ubatch, bool causal_attn) const;
 
     // the list of the cells and the range rng [3, n_tokens] of it that each token reads
     void fill_kv_idx(ggml_tensor * kv_idx, int32_t * rng, const llama_ubatch * ubatch, bool causal_attn) const;
@@ -428,7 +433,6 @@ private:
     void fill_kq_mask(ggml_type type, void * data, int64_t n_kv, int64_t n_stream, const llama_ubatch * ubatch, bool causal_attn) const;
 
     // the cells of seq_id sorted by position (then by the 2D position), the order of the causal mask, with their positions
-    void seq_cells_causal(llama_seq_id seq_id, bool is_2d, std::vector<int32_t> & cells_out, std::vector<llama_pos> & pos_out) const;
 
     // the entries of a list from seq_cells_causal() token i of the ubatch sees: [lo, hi)
     void causal_range(const llama_ubatch * ubatch, uint32_t i, bool causal_attn, const int32_t * cid, const llama_pos * pos, int32_t n,
@@ -563,6 +567,7 @@ public:
 
     // the list of the cells, and a mask over the rows copied from it, when the device cannot read the rows in place
     void set_input_kv_mask(ggml_tensor * kv_idx, ggml_tensor * kv_mask, const llama_ubatch * ubatch, bool causal_attn) const;
+    void set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * kv_mask, ggml_tensor * q_rng, uint32_t n_top, const llama_ubatch * ubatch, bool causal_attn) const;
 
     // whether the cells are in the elastic memory, see llama_box
     bool has_box() const;

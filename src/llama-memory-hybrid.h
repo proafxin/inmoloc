@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llama-batch.h"
+#include "llama-box.h"
 #include "llama-graph.h"
 #include "llama-kv-cache.h"
 #include "llama-memory.h"
@@ -9,8 +10,6 @@
 #include <functional>
 #include <memory>
 #include <vector>
-
-class llama_box;
 
 //
 // llama_memory_hybrid
@@ -113,6 +112,12 @@ public:
     void box_reserve_drop(llama_seq_id seq_id) override;
     void box_finalized() override { mem_attn->box_finalized(); }
 
+protected:
+    llama_box * get_box_mut() const { return box.get(); }
+
+    // gives the seqs of the ubatches their states and the blocks their new tokens take
+    bool box_prepare(const std::vector<llama_ubatch> & ubatches);
+
 private:
     const llama_hparams & hparams;
 
@@ -121,9 +126,6 @@ private:
 
     const std::unique_ptr<llama_kv_cache> mem_attn;
     const std::unique_ptr<llama_memory_recurrent> mem_recr;
-
-    // gives the seqs of the ubatches their states and the blocks their new tokens take
-    bool box_prepare(const std::vector<llama_ubatch> & ubatches);
 
     // the blocks of removed seqs go back to the box
     void box_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1);

@@ -45,10 +45,30 @@ static size_t llama_box_block_bytes(const std::vector<llama_box::attn_layer> & a
     return (size + mult - 1)/mult*mult;
 }
 
-llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> recr_in, const attn_layer * draft, size_t bytes, uint32_t n_tokens, uint32_t n_states_in) :
-    attn(std::move(attn_in)), recr(std::move(recr_in)) {
+llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> recr_in, const attn_layer * draft, size_t bytes, uint32_t n_tokens, uint32_t n_states_in,
+        std::vector<attn_layer> lid_in, std::vector<state_piece> pieces_in) :
+    attn(std::move(attn_in)), recr(std::move(recr_in)), lid(std::move(lid_in)), pieces(std::move(pieces_in)) {
     row_bytes      = llama_box_row_stride(attn.data(), attn.size());
     block_bytes    = llama_box_block_bytes(attn, draft);
+
+    // the indexer rows are at the row stride of the K views, on the layers without compressed rows and after the layers
+    // when they run out; a block holds them whatever its kind, so that all blocks are of one size
+    if (!lid.empty()) {
+        row_bytes = std::max(row_bytes, llama_box_row_stride(lid.data(), lid.size()));
+
+        size_t n_free = 0;
+        for (const auto & l : attn) {
+            n_free += l.comp_free ? 1 : 0;
+        }
+
+        const size_t n_extra = lid.size() > n_free ? lid.size() - n_free : 0;
+
+        const size_t mult = std::lcm(row_bytes, unit);
+
+        block_bytes = (attn.size() + n_extra)*n_block_tokens*row_bytes;
+        block_bytes = (block_bytes + mult - 1)/mult*mult;
+    }
+
     rows_per_block = row_bytes > 0 ? block_bytes/row_bytes : 0;
 
     size_t off = 0;
@@ -57,6 +77,19 @@ llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> re
         off += n_block_tokens*row_bytes;
         off_v.push_back(off);
         off += l.has_v ? n_block_tokens*row_bytes : 0;
+    }
+
+    // the free layers in order, then the room after the layers
+    for (size_t i = 0, j = 0, end = off; j < lid.size(); ++j) {
+        while (i < attn.size() && !attn[i].comp_free) {
+            ++i;
+        }
+        if (i < attn.size()) {
+            off_lid.push_back(off_k[i++]);
+        } else {
+            off_lid.push_back(end);
+            end += n_block_tokens*row_bytes;
+        }
     }
 
     // the draft layer after the others
@@ -97,6 +130,17 @@ llama_box::llama_box(std::vector<attn_layer> attn_in, std::vector<recr_layer> re
         // a model without attention has no tokens to hold: a block is a state
         if (block_bytes == 0) {
             block_bytes = state_bytes;
+        }
+
+        state_blocks = states_blocks(1);
+    }
+
+    if (!pieces.empty()) {
+        GGML_ASSERT(recr.empty());
+
+        for (const auto & p : pieces) {
+            off_p.push_back(state_bytes);
+            state_bytes += p.n_rows*GGML_PAD(ggml_row_size(p.type, p.n_embd), unit);
         }
 
         state_blocks = states_blocks(1);
@@ -186,7 +230,7 @@ void llama_box::alloc(ggml_backend_buffer_type_t buft_in, bool no_alloc) {
     buft = buft_in;
 
     ggml_init_params params = {
-        /*.mem_size   =*/ (4 + 2*attn.size())*ggml_tensor_overhead(),
+        /*.mem_size   =*/ (4 + 2*attn.size() + lid.size() + pieces.size())*ggml_tensor_overhead(),
         /*.mem_buffer =*/ NULL,
         /*.no_alloc   =*/ true,
     };
@@ -215,6 +259,16 @@ void llama_box::alloc(ggml_backend_buffer_type_t buft_in, bool no_alloc) {
         if (l.has_v) {
             t_v[l.il] = view(l.type_v, l.n_embd_v, row, off_v[i], "v", l.il);
         }
+    }
+
+    t_lid.assign(il_max + 1, nullptr);
+    for (size_t i = 0; i < lid.size(); ++i) {
+        t_lid[lid[i].il] = view(lid[i].type_k, lid[i].n_embd_k, row_bytes, off_lid[i], "lid", lid[i].il);
+    }
+
+    t_p.resize(pieces.size());
+    for (size_t i = 0; i < pieces.size(); ++i) {
+        t_p[i] = view(pieces[i].type, pieces[i].n_embd, unit, off_p[i], "state", (int32_t) i);
     }
 
     if (!recr.empty()) {
@@ -329,13 +383,98 @@ bool llama_box::block_take(llama_seq_id seq_id) {
 
     seq.blocks.push_back(block_pop());
 
-    // a block after the input of an admitted request is output, taken from its charge
-    if (seq.admitted && seq.blocks.size() > seq.n_input_blocks && seq.reserve > 0) {
+    block_charge(seq);
+
+    return true;
+}
+
+void llama_box::block_charge(seq_info & seq) {
+    size_t n_held = seq.blocks.size();
+    for (const auto & blocks : seq.comp) {
+        n_held += blocks.size();
+    }
+
+    if (seq.admitted && n_held > seq.n_input_blocks && seq.reserve > 0) {
         seq.reserve--;
         reserved--;
     }
+}
+
+bool llama_box::comp_take(llama_seq_id seq_id, block_kind kind, uint32_t n_blocks_kind) {
+    auto & seq = seqs.at(seq_id);
+
+    GGML_ASSERT(kind != BLOCK_RAW);
+
+    while (seq.comp[kind].size() < n_blocks_kind) {
+        if (free_blocks.empty()) {
+            reclaim();
+        }
+        if (free_blocks.empty()) {
+            return false;
+        }
+
+        // a state of the seq covers block 0, under which the row views of the layers would not reach
+        seq.comp[kind].push_back(block_pop());
+        GGML_ASSERT(seq.comp[kind].back() > 0);
+
+        block_charge(seq);
+    }
 
     return true;
+}
+
+void llama_box::comp_get(llama_seq_id seq_id, block_kind kind, uint32_t i, void * data) const {
+    ggml_backend_tensor_get(pool, data, (size_t) seqs.at(seq_id).comp[kind].at(i)*block_bytes, block_bytes);
+}
+
+void llama_box::comp_set(llama_seq_id seq_id, block_kind kind, uint32_t i, const void * data) {
+    ggml_backend_tensor_set(pool, data, (size_t) seqs.at(seq_id).comp[kind].at(i)*block_bytes, block_bytes);
+}
+
+void llama_box::comp_copy(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, block_kind kind) {
+    std::vector<uint8_t> data(block_bytes);
+
+    for (uint32_t i = 0; i < seqs.at(seq_id_src).comp[kind].size(); ++i) {
+        comp_get(seq_id_src, kind, i, data.data());
+        comp_set(seq_id_dst, kind, i, data.data());
+    }
+}
+
+void llama_box::state_get(int32_t s, void * data) const {
+    ggml_backend_tensor_get(pool, data, (size_t) s*state_bytes, state_bytes);
+}
+
+void llama_box::state_set(int32_t s, const void * data) {
+    ggml_backend_tensor_set(pool, data, (size_t) s*state_bytes, state_bytes);
+}
+
+void llama_box::state_copy(int32_t src, int32_t dst) {
+    std::vector<uint8_t> data(state_bytes);
+
+    state_get(src, data.data());
+    state_set(dst, data.data());
+}
+
+void llama_box::seq_evict(llama_seq_id seq_id) {
+    auto & seq = seqs.at(seq_id);
+
+    for (size_t i = 0; i < seq.blocks.size();) {
+        const uint32_t b = seq.blocks[i];
+
+        if (block_used(b)) {
+            ++i;
+            continue;
+        }
+
+        free_blocks.insert(b);
+        seq.blocks.erase(seq.blocks.begin() + i);
+
+        if (seq.admitted) {
+            seq.n_input_blocks -= seq.n_input_blocks > 0 ? 1 : 0;
+            seq.reserve++;
+            reserved++;
+        }
+    }
 }
 
 void llama_box::add_user(const void * user, std::function<bool(uint32_t)> fn) {
@@ -366,6 +505,11 @@ void llama_box::seq_release(llama_seq_id seq_id) {
     }
 
     seq.blocks.clear();
+
+    for (auto & blocks : seq.comp) {
+        free_blocks.insert(blocks.begin(), blocks.end());
+        blocks.clear();
+    }
 }
 
 void llama_box::reclaim() {
@@ -398,6 +542,10 @@ void llama_box::clear() {
 }
 
 uint32_t llama_box::blocks_input(uint32_t n_input) const {
+    if (blocks_fn) {
+        return blocks_fn(n_input);
+    }
+
     return attn.empty() ? 0 : (n_input + n_block_tokens - 1)/n_block_tokens;
 }
 
@@ -408,6 +556,10 @@ uint32_t llama_box::blocks_output(uint32_t n_input, uint32_t n_output) const {
 
     const uint64_t n_all = (uint64_t) n_input + n_output;
 
+    if (blocks_fn) {
+        return blocks_fn((uint32_t) std::min<uint64_t>(n_all, UINT32_MAX)) - blocks_fn(n_input);
+    }
+
     return (uint32_t) ((n_all + n_block_tokens - 1)/n_block_tokens) - blocks_input(n_input);
 }
 
@@ -415,9 +567,16 @@ bool llama_box::reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output
     auto & seq = seqs.at(seq_id);
 
     // the input blocks the seq does not hold yet (it may hold a reused prompt), and the output after them
-    const uint32_t n_held = (uint32_t) seq.blocks.size();
-    const uint32_t n_take = blocks_input(n_input) > n_held ? blocks_input(n_input) - n_held : 0;
-    const uint32_t n_out  = blocks_output(n_input, n_output);
+    uint32_t n_held = (uint32_t) seq.blocks.size();
+    for (const auto & blocks : seq.comp) {
+        n_held += (uint32_t) blocks.size();
+    }
+
+    const uint32_t n_take_input = blocks_input(n_input) > n_held ? blocks_input(n_input) - n_held : 0;
+
+    // blocks of several kinds are taken as the tokens show which ones: all of them are a charge
+    const uint32_t n_take = blocks_fn ? 0 : n_take_input;
+    const uint32_t n_out  = blocks_output(n_input, n_output) + (blocks_fn ? n_take_input : 0);
 
     // a state between the states in use takes no block
     const bool     need_state = state_alloc_fn != nullptr;
@@ -449,7 +608,7 @@ bool llama_box::reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output
     }
 
     seq.admitted       = true;
-    seq.n_input_blocks = (uint32_t) seq.blocks.size();
+    seq.n_input_blocks = n_held + n_take;
     seq.reserve        = n_out;
 
     reserved += n_out;
@@ -543,8 +702,11 @@ std::unique_ptr<llama_box> llama_box_make(
                 ggml_type   box_draft_type_v,
     const std::function<bool(int32_t)> & filter_attn,
     const std::function<bool(int32_t)> & filter_recr,
-    std::vector<llama_box::attn_layer>   extra_attn) {
-    const auto & hparams = model.hparams;
+    std::vector<llama_box::attn_layer>   extra_attn,
+    std::vector<llama_box::attn_layer>   lid,
+    std::vector<llama_box::state_piece>  pieces,
+    const llama_hparams * hparams_attn) {
+    const auto & hparams = hparams_attn ? *hparams_attn : model.hparams;
 
     const bool has_recr = filter_recr != nullptr;
 
@@ -589,6 +751,11 @@ std::unique_ptr<llama_box> llama_box_make(
         has_draft = true;
     }
 
+    // the indexer rows take the blocks of the layers without CSA rows
+    for (auto & l : attn) {
+        l.comp_free = !lid.empty() && std::none_of(lid.begin(), lid.end(), [&](const auto & li) { return li.il == l.il; });
+    }
+
     // append extra attention layers (e.g. indexer cache with different head dimensions)
     for (auto & l : extra_attn) {
         attn.push_back(std::move(l));
@@ -604,7 +771,7 @@ std::unique_ptr<llama_box> llama_box_make(
     row_lists = row_lists && !row_copies;
 
     // the memory of box_bytes bytes, or of kv_size cells and rs_size states, elastic
-    auto box = std::make_unique<llama_box>(std::move(attn), std::move(recr), has_draft ? &draft : nullptr, box_bytes, kv_size, rs_size);
+    auto box = std::make_unique<llama_box>(std::move(attn), std::move(recr), has_draft ? &draft : nullptr, box_bytes, kv_size, rs_size, std::move(lid), std::move(pieces));
     box->set_row_lists(row_lists);
     box->set_row_copies(row_copies);
     box->alloc(buft, hparams.no_alloc || box_deferred);

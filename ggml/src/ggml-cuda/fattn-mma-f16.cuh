@@ -659,11 +659,15 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_mask(
                     // mask_mode: 0 - per query lists compacted from the mask read it at their rows
                     //            1 - a list of rows shared by all queries has a mask laid out like the list
                     //            2 - the same list, each query sees a prefix of it: mask_h holds the I32 prefix lengths
+                    //            3 - per query lists (ne32 == -2): mask_h holds the I32 ranges, indices starts at lo
                     const int32_t index = i < i_sup ? indices[k_VKQ_0 + i] : -1;
                     half val = half(-INFINITY);
                     if (index >= 0) {
                         if (mask_mode == 2) {
                             val = k_VKQ_0 + i < ((const int32_t *) mask_h)[j_vram] ? half(0.0f) : half(-INFINITY);
+                        } else if (mask_mode == 3) {
+                            const int32_t * rng = (const int32_t *) mask_h + 3*j_vram;
+                            val = k_VKQ_0 + i < rng[2] - rng[1] ? half(0.0f) : half(-INFINITY);
                         } else {
                             val = mask_h[int64_t(j_vram)*stride_mask + (mask_mode == 1 ? k_VKQ_0 + i : index)];
                         }
@@ -1913,6 +1917,14 @@ static constexpr __host__ __device__ bool ggml_cuda_flash_attn_ext_mma_f16_may_u
            (DKQ == 576 && DV == 512 && ncols1 == 1 && ncols2 == 16);
 }
 
+// the heads above 256, which the vector kernel has no instance for, read per query lists in place (ggml_flash_attn_ext_set_kv_idx)
+static constexpr __host__ __device__ bool ggml_cuda_flash_attn_ext_mma_f16_may_use_kv_idx(
+        const int DKQ, const int DV, const int ncols1, const int ncols2) {
+    return (DKQ == 512 && DV == 512 && ncols1 == 1 && ncols2 ==  8) ||
+           (DKQ == 576 && DV == 512 && ncols1 == 1 && (ncols2 == 16 || ncols2 == 32)) ||
+           (DKQ == 320 && DV == 256 && ncols1 == 1 && ncols2 == 32);
+}
+
 // sparse_shared: the K/V rows of all queries come from one index list (ggml_flash_attn_ext_set_kv_rows), so a tile can
 // hold many queries; otherwise each query row has its own list, compacted from the mask
 // type_K, type_V: the K/V cache types, loaded with conversion to f16 when they are not f16 (only with sparse_shared)
@@ -1967,11 +1979,12 @@ static __global__ void flash_attn_ext_f16(
         NO_DEVICE_CODE;
         return;
     }
-    if (sparse_shared && (!use_sparse || use_logit_softcap || DKQ != DV || DKQ > 256)) {
+    if (sparse_shared && (!use_sparse || use_logit_softcap ||
+            !((DKQ == DV && DKQ <= 256) || ggml_cuda_flash_attn_ext_mma_f16_may_use_kv_idx(DKQ, DV, ncols1, ncols2)))) {
         NO_DEVICE_CODE;
         return;
     }
-    if ((type_K != GGML_TYPE_F16 || type_V != GGML_TYPE_F16) && (!sparse_shared || V_is_K_view)) {
+    if ((type_K != GGML_TYPE_F16 || type_V != GGML_TYPE_F16) && (!sparse_shared || (V_is_K_view && type_K != type_V))) {
         NO_DEVICE_CODE;
         return;
     }
@@ -2011,9 +2024,21 @@ static __global__ void flash_attn_ext_f16(
 
     const int gqa_ratio = ne02 / ne12; // With grouped query attention there are > 1 Q matrices per K, V matrix.
 
-    // how the mask of a list of rows is read, see flash_attn_ext_f16_load_mask(): ne32 < 0 flags the prefix lengths of
-    // ggml_flash_attn_ext_set_kv_rows_hi() (launch_fattn)
-    const int mask_mode = !sparse_shared ? 0 : ne32 < 0 ? 2 : 1;
+    // how the mask of a list of rows is read, see flash_attn_ext_f16_load_mask(): ne32 == -1 flags the prefix lengths of
+    // ggml_flash_attn_ext_set_kv_rows_hi(), ne32 == -2 the ranges of ggml_flash_attn_ext_set_kv_idx() (launch_fattn)
+    const int mask_mode = !sparse_shared ? 0 : ne32 == -2 ? 3 : ne32 < 0 ? 2 : 1;
+
+    // the list of a query: its own with per query ranges, else the shared one or the one of its sequence
+    const auto list_of = [&] __device__ (const int sequence, const int jt) -> const int32_t * {
+        if (!use_sparse) {
+            return nullptr;
+        }
+        if (mask_mode == 3) {
+            const int32_t * rng = (const int32_t *) mask_ptr + 3*jt;
+            return sparse_indices + int64_t(rng[0])*ne31 + rng[1];
+        }
+        return sparse_shared ? sparse_indices : sparse_indices + (int64_t(sequence % ne33)*ne31 + jt*ncols1)*ne11;
+    };
 
     const int stride_Q1   = nb01 / sizeof(float2);
     const int stride_Q2   = nb02 / sizeof(float2);
@@ -2056,8 +2081,7 @@ static __global__ void flash_attn_ext_f16(
 
         const half2 * V_h2 = V_is_K_view ? K_h2 : (const half2 *) (V + nb23*sequence + nb22*z_KV);
         const float * sinks_f = sinks ? (const float *) sinks + zt_Q : nullptr;
-        const int32_t * indices = !use_sparse ? nullptr : sparse_shared ? sparse_indices :
-            sparse_indices + (int64_t(sequence % ne33)*ne31 + jt*ncols1)*ne11;
+        const int32_t * indices = list_of(sequence, jt);
 
         const float slope = ncols2 == 1 ? get_alibi_slope(max_bias, zt_Q, n_head_log2, m0, m1) : 1.0f;
 
@@ -2104,8 +2128,7 @@ static __global__ void flash_attn_ext_f16(
 
     const half2 * V_h2 = V_is_K_view ? K_h2 : (const half2 *) (V + nb23*sequence + nb22*z_KV);
     const float * sinks_f = sinks ? (const float *) sinks + zt_Q : nullptr;
-    const int32_t * indices = !use_sparse ? nullptr : sparse_shared ? sparse_indices :
-        sparse_indices + (int64_t(sequence % ne33)*ne31 + jt*ncols1)*ne11;
+    const int32_t * indices = list_of(sequence, jt);
 
     const float slope = ncols2 == 1 ? get_alibi_slope(max_bias, zt_Q, n_head_log2, m0, m1) : 1.0f;
 
@@ -2205,11 +2228,11 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
     fattn_kernel_t fattn_kernel;
     bool use_sparse = false;
 
-    // the K/V rows come from one list for all queries, see ggml_flash_attn_ext_set_kv_rows()
-    const bool kv_rows = KQV->src[5] != nullptr && KQV->src[6] == nullptr;
+    // the K/V rows come from lists, see ggml_flash_attn_ext_set_kv_rows() and ggml_flash_attn_ext_set_kv_idx()
+    const bool kv_rows = KQV->src[5] != nullptr;
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
-    if constexpr (DKQ == DV && DKQ <= 256) {
+    if constexpr ((DKQ == DV && DKQ <= 256) || ggml_cuda_flash_attn_ext_mma_f16_may_use_kv_idx(DKQ, DV, ncols1, ncols2)) {
         if (kv_rows) {
             GGML_ASSERT(logit_softcap == 0.0f);
             const ggml_type type_K = KQV->src[1]->type;
@@ -2219,7 +2242,8 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
             if constexpr ((GGML_TYPE_##type_K_case == GGML_TYPE_F16 && GGML_TYPE_##type_V_case == GGML_TYPE_F16) ||          \
                           (GGML_CUDA_FA_##type_K_case##_##type_V_case &&                                                      \
                            ggml_cuda_fattn_mma_kv_type_ok(GGML_TYPE_##type_K_case, DKQ) &&                                   \
-                           ggml_cuda_fattn_mma_kv_type_ok(GGML_TYPE_##type_V_case, DKQ) && !V_is_K_view)) {                 \
+                           ggml_cuda_fattn_mma_kv_type_ok(GGML_TYPE_##type_V_case, DKQ) &&             \
+                           (!V_is_K_view || GGML_TYPE_##type_K_case == GGML_TYPE_##type_V_case))) {                 \
                 if (type_K == GGML_TYPE_##type_K_case && type_V == GGML_TYPE_##type_V_case) {                                \
                     ggml_cuda_flash_attn_ext_mma_f16_kv_rows<DKQ, DV, ncols1, ncols2, V_is_K_view,                           \
                         GGML_TYPE_##type_K_case, GGML_TYPE_##type_V_case>(ctx, dst, nwarps, nbytes_shared_total, nbatch_fa, warp_size_host); \

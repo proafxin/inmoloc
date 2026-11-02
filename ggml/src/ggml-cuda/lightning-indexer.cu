@@ -17,7 +17,7 @@ namespace wmma = nvcuda::wmma;
 
 template <int WARPS_PER_BLOCK, int K_VECS_PER_BLOCK, int64_t N_EMBD, int64_t N_HEAD, ggml_type TYPE_K>
 static __global__ void lightning_indexer_kernel_wmma(
-        const float * Q, const char * K, const float * W, const half * M, float * dst,
+        const float * Q, const char * K, const float * W, const half * M, const int32_t * rows, float * dst,
         int64_t n_stream, int64_t n_batch, int64_t n_kv,
         size_t nb1, size_t nb2, size_t nb3,
         size_t nbq1, size_t nbq2, size_t nbq3,
@@ -82,7 +82,7 @@ static __global__ void lightning_indexer_kernel_wmma(
             const int i_embd = i_k % (N_EMBD / 4);
             const int i_kv = start_kv + i_k_vec;
             if (i_kv < n_kv) {
-                const int2 * k_base = (const int2 *) ((const char *) K + i_kv*nbk2 + i_stream*nbk3);
+                const int2 * k_base = (const int2 *) ((const char *) K + size_t(rows ? rows[i_kv] : i_kv)*nbk2 + i_stream*nbk3);
                 *(int2*) &k_shared_h[i_k_vec][i_embd] = k_base[i_embd];
             } else {
                 *(int2*) &k_shared_h[i_k_vec][i_embd] = make_int2(0, 0);
@@ -96,7 +96,7 @@ static __global__ void lightning_indexer_kernel_wmma(
             const int i_embd = i_k % (N_EMBD / 4);
             const int i_kv = start_kv + i_k_vec;
             if (i_kv < n_kv) {
-                const void * k_base = (const void *) ((const char *) K + i_kv*nbk2 + i_stream*nbk3);
+                const void * k_base = (const void *) ((const char *) K + size_t(rows ? rows[i_kv] : i_kv)*nbk2 + i_stream*nbk3);
                 dequantize_k(k_base, &k_shared_h[i_k_vec][i_embd][0], i_embd * 4);
             } else {
                 *(int2*) &k_shared_h[i_k_vec][i_embd] = make_int2(0, 0);
@@ -214,7 +214,7 @@ static __global__ void lightning_indexer_kernel_wmma(
 
 template <int WARPS_PER_BLOCK, int K_VECS_PER_BLOCK, int64_t N_EMBD, int64_t N_HEAD, ggml_type TYPE_K>
 static __global__ void lightning_indexer_kernel_wmma(
-        const float * Q, const char * K, const float * W, const half * M, float * dst,
+        const float * Q, const char * K, const float * W, const half * M, const int32_t * rows, float * dst,
         int64_t n_stream, int64_t n_batch, int64_t n_kv,
         size_t nb1, size_t nb2, size_t nb3,
         size_t nbq1, size_t nbq2, size_t nbq3,
@@ -223,7 +223,7 @@ static __global__ void lightning_indexer_kernel_wmma(
         size_t nbm1, size_t nbm2, size_t nbm3,
         int64_t nem3
     ) {
-    GGML_UNUSED_VARS(Q, K, W, M, dst,
+    GGML_UNUSED_VARS(Q, K, W, M, rows, dst,
         n_stream, n_batch, n_kv,
         nb1, nb2, nb3,
         nbq1, nbq2, nbq3,
@@ -242,7 +242,7 @@ static __global__ void lightning_indexer_kernel_wmma(
 
 template <int WARPS_PER_BLOCK, int K_VECS_PER_BLOCK, int64_t N_EMBD, int64_t N_HEAD, ggml_type TYPE_K>
 static __global__ void lightning_indexer_kernel_vec(
-        const float * Q, const char * K, const float * W, const half * M, float * dst,
+        const float * Q, const char * K, const float * W, const half * M, const int32_t * rows, float * dst,
         int64_t n_stream, int64_t n_batch, int64_t n_kv,
         size_t nb1, size_t nb2, size_t nb3,
         size_t nbq1, size_t nbq2, size_t nbq3,
@@ -278,7 +278,7 @@ static __global__ void lightning_indexer_kernel_vec(
         for (int k = 0; k < K_VECS_PER_WARP; ++k) {
             int i_kv = start_kv + k;
             if (i_kv < n_kv) {
-                const float4 * k_base = (const float4 *) ((const char *) K + i_kv*nbk2 + i_stream*nbk3);
+                const float4 * k_base = (const float4 *) ((const char *) K + size_t(rows ? rows[i_kv] : i_kv)*nbk2 + i_stream*nbk3);
                 k_reg_f[k] = k_base[i_lane];
             } else {
                 k_reg_f[k] = make_float4(0, 0, 0, 0);
@@ -291,7 +291,7 @@ static __global__ void lightning_indexer_kernel_vec(
         for (int k = 0; k < K_VECS_PER_WARP; ++k) {
             int i_kv = start_kv + k;
             if (i_kv < n_kv) {
-                const void * k_base = (const void *) ((const char *) K + i_kv*nbk2 + i_stream*nbk3);
+                const void * k_base = (const void *) ((const char *) K + size_t(rows ? rows[i_kv] : i_kv)*nbk2 + i_stream*nbk3);
                 dequantize_k(k_base, &k_reg_f[k], i_lane * 4);
             } else {
                 k_reg_f[k] = make_float4(0, 0, 0, 0);
@@ -386,7 +386,7 @@ static __global__ void lightning_indexer_kernel_vec(
     if (K->type == (type_K)) {                                                              \
         lightning_indexer_kernel<WARPS_PER_BLOCK, K_VECS_PER_BLOCK, n_embd, n_head, type_K> \
             <<<grid, block, 0, ctx.stream()>>>(                                             \
-            q_d, k_d, w_d, m_d, dst_d,                                                      \
+            q_d, k_d, w_d, m_d, rows_d, dst_d,                                                      \
             n_stream, n_batch, n_kv,                                                        \
             nb1, nb2, nb3,                                                                  \
             nbq1, nbq2, nbq3,                                                               \
@@ -435,12 +435,16 @@ void ggml_cuda_lightning_indexer(ggml_backend_cuda_context & ctx, ggml_tensor * 
     const int n_head   = q->ne[1];
     const int n_batch  = q->ne[2];
     const int n_stream = q->ne[3];
-    const int n_kv     = k->ne[2];
+    // the rows of k read through a list, see ggml_lightning_indexer_rows()
+    const ggml_tensor * rows = dst->src[4];
+
+    const int n_kv     = rows ? rows->ne[0] : k->ne[2];
 
     const float *   q_d = (const float *)   q->data;
     const char  *   k_d = (const char  *)   k->data;
     const float *   w_d = (const float *)   w->data;
     const half  *   m_d = (const half  *)   m->data;
+    const int32_t * rows_d = rows ? (const int32_t *) rows->data : nullptr;
     float       * dst_d = (      float *) dst->data;
 
     const int device = ggml_cuda_get_device();
