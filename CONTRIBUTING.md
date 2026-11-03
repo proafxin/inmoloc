@@ -5,7 +5,7 @@ Issues and pull requests are welcome at https://github.com/proafxin/inmoloc.
 ## Before you start
 
 - For anything larger than a fix, open an issue first to discuss the design. Changes to the scheduler, the KV cache, the memory projection or the attention paths affect each other, and are easier to get right before code is written.
-- inmoloc is built for serving many requests at once on GPUs, from one consumer GPU to multi-GPU production (see [README.md](README.md) and [docs/differences-from-llama.cpp.md](docs/differences-from-llama.cpp.md)). Judge a change by what it does for concurrent serving, and by what it costs in startup time and memory.
+- inmoloc is built for serving many requests at once on GPUs, from one consumer GPU to multi-GPU production (see [README.md](README.md)). Judge a change by what it does for concurrent serving, and by what it costs in startup time and memory.
 - Model support comes from llama.cpp. To add a model that llama.cpp supports, port its commits from the `upstream` remote rather than writing it anew.
 
 ## Pull requests

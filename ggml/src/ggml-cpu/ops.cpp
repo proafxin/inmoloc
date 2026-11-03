@@ -8527,6 +8527,9 @@ static void ggml_compute_forward_argsort_f32(
 
     ggml_sort_order order = (ggml_sort_order) ggml_get_op_params_i32(dst, 0);
 
+    // see ggml_argsort_top_k_off()
+    const ggml_tensor * off = dst->src[1];
+
     for (int64_t i = ith; i < nr; i += nth) {
         const float * src_data = (float *)((char *) src0->data + i*nb01);
 
@@ -8547,6 +8550,19 @@ static void ggml_compute_forward_argsort_f32(
 
             default:
                 GGML_ABORT("invalid sort order");
+        }
+
+        if (off) {
+            const int64_t i1 = i%ne01;
+            const int64_t i2 = (i/ne01)%ne02;
+            const int64_t i3 = i/(ne01*ne02);
+
+            const int32_t o = *(const int32_t *) ((const char *) off->data +
+                    (i1%off->ne[1])*off->nb[1] + (i2%off->ne[2])*off->nb[2] + (i3%off->ne[3])*off->nb[3]);
+
+            for (int64_t j = 0; j < ne0; j++) {
+                dst_data[j] += o;
+            }
         }
     }
 }
@@ -12173,15 +12189,98 @@ void ggml_compute_forward_fwht(const ggml_compute_params * params, ggml_tensor *
 
 // ggml_compute_forward_lightning_indexer
 
-void ggml_compute_forward_lightning_indexer(
+// the windows of the list of rows, see ggml_lightning_indexer_rows(): token t scores the entries w + j of the list for j
+// in [0, n_win), only those in [lo, hi), the others are -INFINITY; one call per head (n_head = 1 sums the heads)
+static void ggml_compute_forward_lightning_indexer_win(
         const ggml_compute_params * params,
         ggml_tensor * dst) {
 
     const ggml_tensor * q = dst->src[0];
     const ggml_tensor * k = dst->src[1];
+    const ggml_tensor * w = dst->src[2]; // weights, nullptr for the scores of each head
+    const ggml_tensor * r = dst->src[4];
+    const ggml_tensor * g = dst->src[5];
+
+    const int64_t n_embd   = q->ne[0];
+    const int64_t n_head   = q->ne[1];
+    const int64_t n_tokens = q->ne[2];
+    const int64_t n_win    = dst->ne[0];
+    const int64_t n_list   = r->ne[0];
+
+    const int32_t * rows = (const int32_t *) r->data;
+    const int32_t * rng  = (const int32_t *) g->data;
+
+    ggml_to_float_t const k_to_float = ggml_get_type_traits(k->type)->to_float;
+    GGML_ASSERT((k->type == GGML_TYPE_F32 || k_to_float) && "lightning indexer: unsupported K-type");
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    float * k_row_f32 = (float *) params->wdata + ith*(1*n_embd + CACHE_LINE_SIZE_F32);
+
+    const int64_t nr  = n_win*n_tokens;
+    const int64_t dr  = (nr + nth - 1)/nth;
+    const int64_t ir0 = dr*ith;
+    const int64_t ir1 = MIN(ir0 + dr, nr);
+
+    for (int64_t ir = ir0; ir < ir1; ++ir) {
+        const int64_t t = ir/n_win;
+        const int64_t j = ir%n_win;
+
+        const int64_t e  = (int64_t) rng[3*t + 0] + j;
+        const bool    in = e >= rng[3*t + 1] && e < rng[3*t + 2] && rows[e] >= 0;
+
+        GGML_ASSERT(!(e >= rng[3*t + 1] && e < rng[3*t + 2]) || (e >= 0 && e < n_list));
+
+        if (in) {
+            const char * k_row = (const char *) k->data + (size_t) rows[e]*k->nb[2];
+
+            if (k_to_float) {
+                k_to_float(k_row, k_row_f32, n_embd);
+            } else {
+                k_row_f32 = (float *) k_row;
+            }
+        }
+
+        float score = 0.0f;
+
+        for (int64_t h = 0; h < n_head; ++h) {
+            float qk = -INFINITY;
+
+            if (in) {
+                const float * q_row = (const float *) ((const char *) q->data + h*q->nb[1] + t*q->nb[2]);
+                ggml_vec_dot_f32(n_embd, &qk, 0, q_row, 0, k_row_f32, 0, 1);
+            }
+
+            if (w) {
+                const float * w_row = (const float *) ((const char *) w->data + t*w->nb[1]);
+                score += MAX(qk, 0.0f)*w_row[h];
+            } else {
+                float * dst_row = (float *) ((char *) dst->data + h*dst->nb[1] + t*dst->nb[2]);
+                dst_row[j] = qk;
+            }
+        }
+
+        if (w) {
+            float * dst_row = (float *) ((char *) dst->data + t*dst->nb[1]);
+            dst_row[j] = in ? score : -INFINITY;
+        }
+    }
+}
+
+void ggml_compute_forward_lightning_indexer(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+
+    if (dst->src[5] != nullptr) {
+        ggml_compute_forward_lightning_indexer_win(params, dst);
+        return;
+    }
+
+    const ggml_tensor * q = dst->src[0];
+    const ggml_tensor * k = dst->src[1];
     const ggml_tensor * w = dst->src[2]; // weights
     const ggml_tensor * m = dst->src[3]; // mask
-    const ggml_tensor * r = dst->src[4]; // the rows of k read through a list, see ggml_lightning_indexer_rows()
 
     GGML_ASSERT(dst->type  == GGML_TYPE_F32);
     GGML_ASSERT(   q->type == GGML_TYPE_F32);
@@ -12209,9 +12308,7 @@ void ggml_compute_forward_lightning_indexer(
     const int n_head    = q->ne[1];
     const int n_tokens  = q->ne[2];
     const int n_stream  = q->ne[3];
-    const int n_kv      = r ? r->ne[0] : k->ne[2];
-
-    const int32_t * rows = r ? (const int32_t *) r->data : nullptr;
+    const int n_kv      = k->ne[2];
 
     ggml_to_float_t const k_to_float = ggml_get_type_traits(k->type)->to_float;
     GGML_ASSERT((k->type == GGML_TYPE_F32 || k_to_float) && "lightning indexer: unsupported K-type");
@@ -12236,7 +12333,7 @@ void ggml_compute_forward_lightning_indexer(
             const ggml_fp16_t *   m_row = (ggml_fp16_t *) ((char *)   m->data + t*nbm1 + (s%nem3)*nbm3);
             float             * dst_row =       (float *) ((char *) dst->data + t*nb1  +        s*nb3 );
             for (int ik = ir0; ik < ir1; ++ik) {
-                char * k_row = (char *) k->data + (size_t) (rows ? rows[ik] : ik)*nbk2 + s*nbk3;
+                char * k_row = (char *) k->data + (size_t) ik*nbk2 + s*nbk3;
                 if (k_to_float) {
                     k_to_float(k_row, k_row_f32, n_embd);
                 } else {

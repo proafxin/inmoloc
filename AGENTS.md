@@ -1,6 +1,6 @@
 # Instructions for inmoloc
 
-inmoloc serves many requests at once from one GPU, with a local runtime's startup time and memory footprint. It is based on llama.cpp and maintained as its own project (see [README.md](README.md), [docs/differences-from-llama.cpp.md](docs/differences-from-llama.cpp.md) and [CONTRIBUTING.md](CONTRIBUTING.md)).
+inmoloc serves many requests at once from one GPU, with a local runtime's startup time and memory footprint. It is based on llama.cpp and maintained as its own project (see [README.md](README.md) and [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## Working on this codebase
 

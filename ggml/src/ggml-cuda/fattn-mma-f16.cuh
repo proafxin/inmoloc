@@ -1917,12 +1917,20 @@ static constexpr __host__ __device__ bool ggml_cuda_flash_attn_ext_mma_f16_may_u
            (DKQ == 576 && DV == 512 && ncols1 == 1 && ncols2 == 16);
 }
 
-// the heads above 256, which the vector kernel has no instance for, read per query lists in place (ggml_flash_attn_ext_set_kv_idx)
+// the heads the vector kernel has no instance for (not a multiple of 64, K and V of different sizes, above 256) read per
+// query lists in place (ggml_flash_attn_ext_set_kv_idx), one query per tile
 static constexpr __host__ __device__ bool ggml_cuda_flash_attn_ext_mma_f16_may_use_kv_idx(
         const int DKQ, const int DV, const int ncols1, const int ncols2) {
-    return (DKQ == 512 && DV == 512 && ncols1 == 1 && ncols2 ==  8) ||
+    return (DKQ == DV  && DKQ <= 256 && ncols1 == 1 && ncols2 ==  8) ||
+           (DKQ == 192 && DV == 128 && ncols1 == 1 && (ncols2 == 8 || ncols2 == 16)) ||
+           (DKQ == 512 && DV == 512 && ncols1 == 1 && ncols2 ==  8) ||
            (DKQ == 576 && DV == 512 && ncols1 == 1 && (ncols2 == 16 || ncols2 == 32)) ||
            (DKQ == 320 && DV == 256 && ncols1 == 1 && ncols2 == 32);
+}
+
+// the heads that read one list of K/V rows shared by the queries of a tile (ggml_flash_attn_ext_set_kv_rows)
+static constexpr __host__ __device__ bool ggml_cuda_flash_attn_ext_mma_f16_may_use_kv_rows(const int DKQ, const int DV) {
+    return (DKQ == DV && DKQ <= 256) || (DKQ == 192 && DV == 128);
 }
 
 // sparse_shared: the K/V rows of all queries come from one index list (ggml_flash_attn_ext_set_kv_rows), so a tile can
@@ -1980,7 +1988,7 @@ static __global__ void flash_attn_ext_f16(
         return;
     }
     if (sparse_shared && (!use_sparse || use_logit_softcap ||
-            !((DKQ == DV && DKQ <= 256) || ggml_cuda_flash_attn_ext_mma_f16_may_use_kv_idx(DKQ, DV, ncols1, ncols2)))) {
+            !(ggml_cuda_flash_attn_ext_mma_f16_may_use_kv_rows(DKQ, DV) || ggml_cuda_flash_attn_ext_mma_f16_may_use_kv_idx(DKQ, DV, ncols1, ncols2)))) {
         NO_DEVICE_CODE;
         return;
     }
@@ -2232,7 +2240,7 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
     const bool kv_rows = KQV->src[5] != nullptr;
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
-    if constexpr ((DKQ == DV && DKQ <= 256) || ggml_cuda_flash_attn_ext_mma_f16_may_use_kv_idx(DKQ, DV, ncols1, ncols2)) {
+    if constexpr (ggml_cuda_flash_attn_ext_mma_f16_may_use_kv_rows(DKQ, DV) || ggml_cuda_flash_attn_ext_mma_f16_may_use_kv_idx(DKQ, DV, ncols1, ncols2)) {
         if (kv_rows) {
             GGML_ASSERT(logit_softcap == 0.0f);
             const ggml_type type_K = KQV->src[1]->type;

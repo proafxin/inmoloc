@@ -36,6 +36,7 @@ public:
                          bool   box_draft = false,
                     ggml_type   box_draft_type_k = GGML_TYPE_F16,
                     ggml_type   box_draft_type_v = GGML_TYPE_F16,
+          const llama_hparams * box_draft_hparams = nullptr,
                          bool   box_swa = false);
 
     ~llama_kv_cache_dsa() = default;

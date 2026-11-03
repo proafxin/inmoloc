@@ -2268,6 +2268,21 @@ struct llama_model_minimax_m3 : public llama_model_base {
                 ggml_tensor * v,       // [D, n_keys, 1, C]
                 ggml_tensor * mask,    // [n_keys, R, 1, C] f16, R = HQ*T/(Gp*C)
                 int64_t Gp, float kq_scale, int il) const;
+
+        // the elastic memory: scores the indexer rows of the window of each token and reads the selected K/V rows of each
+        // head group in place
+        ggml_tensor * build_attn_msa_box(
+                ggml_tensor * q_cur,   // [D, HQ, T] f32
+                ggml_tensor * k,       // [D, HKV, n_rows, 1]
+                ggml_tensor * v,       // [D, HKV, n_rows, 1]
+                ggml_tensor * iq,      // [n_idx, Hd, T]
+                ggml_tensor * ik,      // [n_idx, 1, n_rows, 1]
+                ggml_tensor * rows,    // I32 [n_list, 1]
+                ggml_tensor * win,     // I32 [3, T]
+                ggml_tensor * off,     // I32 [1, 1, T]
+                ggml_tensor * bias,    // F32 [n_win/blk, T]
+                ggml_tensor * q_base,  // I32 [2, T]
+                int64_t n_win, int64_t blk, int64_t K, float kq_scale, int il) const;
     };
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
 };

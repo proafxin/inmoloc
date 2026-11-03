@@ -1417,7 +1417,8 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
                  uint32_t   n_batch,
                      bool   box_draft,
                 ggml_type   box_draft_type_k,
-                ggml_type   box_draft_type_v) :
+                ggml_type   box_draft_type_v,
+      const llama_hparams * box_draft_hparams) :
     hparams_raw(model.hparams),
     hparams_csa(model.hparams),
     hparams_hca(model.hparams),
@@ -1497,8 +1498,11 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
 
         const uint32_t n_comp = kv_size/(DSV4_CSA_RATIO*n_block) + kv_size/(DSV4_HCA_RATIO*n_block) + 3;
 
+        // the MTP layers have the K-only rows of the draft cache, see llama_kv_cache_dsv4_draft
+        const llama_dsv4_draft_hparams hparams_draft(box_draft_hparams ? *box_draft_hparams : model.hparams);
+
         box = llama_box_make(model, type_k, type_v, kv_size + n_seq_max*n_comp*n_block, GGML_TYPE_F32, GGML_TYPE_F32, n_seq_max, 0, false, offload,
-                box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v,
+                box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v, &hparams_draft.hparams_draft,
                 [&](int32_t il) { return filter_raw(il); }, nullptr, {}, std::move(lid), std::move(pieces), &hparams_raw);
 
         kv_size   = box->get_n_cells();
@@ -2886,8 +2890,29 @@ int64_t llama_kv_cache_dsv4_context::get_n_hca(const llama_ubatch & ubatch) cons
     return std::max<int64_t>(GGML_PAD(n, 256u), 256);
 }
 
+int64_t llama_kv_cache_dsv4_context::get_n_win_lid(const llama_ubatch & ubatch) const {
+    // a request holds at most the context window of the model
+    const int64_t n_max = std::max<int64_t>(256, GGML_PAD((int64_t) kv_dsv4->get_n_cells_max()/DSV4_CSA_RATIO + 1, 256));
+
+    if (reserve_plans) {
+        return n_max;
+    }
+
+    const auto & plan = get_lid_plan(ubatch);
+
+    int64_t n = 0;
+    for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+        n = std::max<int64_t>(n, plan.n_visible[i] - plan.n_skip[i]);
+    }
+
+    // the window of a token covers what it sees of its sequence
+    GGML_ASSERT(n <= n_max);
+
+    return std::min(n_max, std::max<int64_t>(256, GGML_PAD(n, 256)));
+}
+
 void llama_kv_cache_dsv4_context::set_input_box(ggml_tensor * raw, ggml_tensor * hca, ggml_tensor * lid, ggml_tensor * rng_raw, ggml_tensor * rng_hca, ggml_tensor * rng_csa,
-        uint32_t n_top, const llama_ubatch * ubatch) const {
+        ggml_tensor * win_lid, uint32_t n_top, const llama_ubatch * ubatch) const {
     GGML_ASSERT(ggml_backend_buffer_is_host(raw->buffer));
     GGML_ASSERT(ggml_backend_buffer_is_host(hca->buffer));
     GGML_ASSERT(ggml_backend_buffer_is_host(lid->buffer));
@@ -2957,6 +2982,15 @@ void llama_kv_cache_dsv4_context::set_input_box(ggml_tensor * raw, ggml_tensor *
         }
 
         const int32_t n_csa_i = plan_csa.n_visible[i];
+
+        // the indexer scores the CSA rows of the sequence the token sees: one range of lid
+        if (win_lid) {
+            auto * w_lid = (int32_t *) win_lid->data;
+
+            w_lid[3*i + 0] = plan_lid.n_skip[i];
+            w_lid[3*i + 1] = plan_lid.n_skip[i];
+            w_lid[3*i + 2] = plan_lid.n_visible[i];
+        }
 
         r_raw[3*i + 0] = (int32_t) i;
         r_raw[3*i + 1] = (int32_t) (n_raw - n_read);

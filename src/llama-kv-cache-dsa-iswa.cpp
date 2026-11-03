@@ -31,7 +31,8 @@ llama_kv_cache_dsa_iswa::llama_kv_cache_dsa_iswa(
                      bool   box_deferred,
                      bool   box_draft,
                 ggml_type   box_draft_type_k,
-                ggml_type   box_draft_type_v) : unified(unified) {
+                ggml_type   box_draft_type_v,
+      const llama_hparams * box_draft_hparams) : unified(unified) {
 
     const auto & hparams = model.hparams;
 
@@ -72,7 +73,7 @@ llama_kv_cache_dsa_iswa::llama_kv_cache_dsa_iswa(
             model, type_k, type_v,
             v_trans, offload, unified, size_dsa, n_seq_max, n_pad,
             0, LLAMA_SWA_TYPE_NONE, filter_dsa, filter_lid, reuse,
-            use_box, box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v, true);
+            use_box, box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v, box_draft_hparams, true);
 
     const auto box = kv_dsa->get_box_shared();
 
@@ -160,7 +161,7 @@ llama_memory_context_ptr llama_kv_cache_dsa_iswa::init_batch(llama_batch_allocr 
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = kv_dsa->get_mla()->box_row_copies() ? balloc.split_seq(n_ubatch) : balloc.split_simple(n_ubatch);
+            auto ubatch = balloc.split_simple(n_ubatch);
 
             if (ubatch.n_tokens == 0) {
                 break;

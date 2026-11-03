@@ -2512,6 +2512,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             ggml_cuda_op_top_k(ctx, dst);
             break;
         case GGML_OP_ARGSORT:
+        case GGML_OP_ARGSORT_OFF:
             ggml_cuda_op_argsort(ctx, dst);
             break;
         case GGML_OP_FLASH_ATTN_EXT:
@@ -5957,6 +5958,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_TOP_K:
             return op->src[0]->ne[0] <= INT_MAX;
         case GGML_OP_ARGSORT:
+        case GGML_OP_ARGSORT_OFF:
 #ifndef GGML_CUDA_USE_CUB
             {
                 // bitonic path: the padded row must fit in shared memory

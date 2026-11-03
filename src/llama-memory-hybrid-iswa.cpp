@@ -100,7 +100,7 @@ llama_memory_context_ptr llama_memory_hybrid_iswa::init_batch(llama_batch_allocr
         while (true) {
             llama_ubatch ubatch;
 
-            if (embd_all || mem_attn->get_base()->box_row_copies()) {
+            if (embd_all) {
                 // if all tokens are output, split by sequence
                 ubatch = balloc.split_seq(n_ubatch);
             } else {

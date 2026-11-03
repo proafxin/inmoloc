@@ -449,6 +449,9 @@ extern "C" {
         bool box_draft;
         enum ggml_type box_draft_type_k;
         enum ggml_type box_draft_type_v;
+
+        // the MTP head in a GGUF of its own, whose layers the blocks hold; NULL for the MTP layers of this model
+        const struct llama_model * box_draft_model;
     };
 
     struct llama_model_tensor_override {

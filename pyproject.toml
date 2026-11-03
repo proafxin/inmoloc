@@ -5,7 +5,10 @@ keywords = ["ggml", "gguf", "llama.cpp"]
 version = "0.0.0"
 dynamic = ["classifiers"]
 readme = "README.md"
-authors = [{name = "GGML", email = "ggml@ggml.ai"}]
+authors = [
+    {name = "Masum Billal", email = "billalmasum93@gmail.com"},
+    {name = "GGML", email = "ggml@ggml.ai"}
+]
 requires-python = '>=3.10,<3.15'
 dependencies = [
     'numpy (>=2.2.6,<3.0.0)',

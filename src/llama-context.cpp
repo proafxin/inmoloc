@@ -258,7 +258,6 @@ llama_context::llama_context(
     cparams.kv_rows     = false;
     cparams.auto_kv_rows = true;
     cparams.kv_idx_rest = false;
-    cparams.box_gather  = false;
 
     cparams.fused_gdn_ar = true;
     cparams.fused_gdn_ch = true;
@@ -308,6 +307,7 @@ llama_context::llama_context(
     cparams.box_draft  = params.box_draft;
     cparams.box_draft_type_k = params.box_draft_type_k;
     cparams.box_draft_type_v = params.box_draft_type_v;
+    cparams.box_draft_hparams = params.box_draft_model ? &params.box_draft_model->hparams : nullptr;
 
     // a non-unified KV cache keeps one stream per seq and reserves graphs with one seq per stream,
     // which a recurrent-state pool smaller than n_seq_max cannot back
@@ -469,12 +469,10 @@ llama_context::llama_context(
             cparams.kv_rows      = box->has_row_lists();
             cparams.auto_kv_rows = false;
             cparams.kv_idx_rest  = box->has_row_lists();
-            cparams.kv_idx       = !box->has_row_lists() && !box->has_row_copies();
+            cparams.kv_idx       = !box->has_row_lists();
             cparams.auto_kv_idx  = false;
-            cparams.box_gather   = box->has_row_copies();
 
-            LLAMA_LOG_INFO("%s: elastic memory: %s\n", __func__, box->has_row_copies() ?
-                    "attention reads copies of the rows of the sequences" : box->has_row_lists() ?
+            LLAMA_LOG_INFO("%s: elastic memory: %s\n", __func__, box->has_row_lists() ?
                     "prompts read through row lists, generation through ranges" : "all tokens read through ranges");
         }
     }
@@ -702,6 +700,11 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
         LLAMA_LOG_INFO("%s: resolving fused Lightning Indexer support:\n", func);
         resolve(llm_fused_op_lid_probe, cparams.fused_lid);
         cparams.auto_flid = false;
+    }
+
+    // the elastic memory reads the indexer rows in place, with the indexer kernel only
+    if (!cparams.fused_lid && memory && memory->get_box_shared() && model.hparams.indexer_head_size > 0) {
+        throw std::runtime_error("the elastic memory needs the lightning indexer kernel on the device that holds it");
     }
 
     if (cparams.auto_fhc) {
@@ -4001,6 +4004,7 @@ llama_context_params llama_context_default_params() {
         /*.box_draft                   =*/ false,
         /*.box_draft_type_k            =*/ GGML_TYPE_F16,
         /*.box_draft_type_v            =*/ GGML_TYPE_F16,
+        /*.box_draft_model             =*/ nullptr,
     };
 
     return result;

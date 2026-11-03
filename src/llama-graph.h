@@ -418,7 +418,6 @@ public:
     // the mask tensor still exists for graphs that need it; tensors that no node reads are not allocated
     ggml_tensor * self_kv_idx  = nullptr; // I32 [n_idx, n_group]
     ggml_tensor * self_q_rng   = nullptr; // I32 [3, n_batch]
-    ggml_tensor * self_kv_mask = nullptr; // F32 [n_idx, n_batch], over rows copied from the list, see llama_cparams::box_gather
 
     // attention runs, empty when the whole ubatch attends the full view, see llama_kv_attn_run
     // per run: the cell indices (I32 [n_idx]) and the mask (F16 [n_idx, t1 - t0, 1, 1]) of a copied gather run,
@@ -476,7 +475,6 @@ public:
     // the elastic memory: each token reads a range of the cells of its sequence
     ggml_tensor * self_kv_idx  = nullptr; // I32 [n_idx, n_group]
     ggml_tensor * self_q_rng   = nullptr; // I32 [3, n_batch]
-    ggml_tensor * self_kv_mask = nullptr; // F32 [n_idx, n_batch], over rows copied from the list, see llama_cparams::box_gather
 
     const llama_hparams hparams;
     const llama_cparams cparams;
@@ -515,8 +513,10 @@ public:
     ggml_tensor * build_top_k(ggml_context * ctx, ggml_tensor * score, int n_top_k) const;
 
     ggml_tensor * self_kv_idx  = nullptr; // I32 [n_kv, 1]         elastic memory: the rows of the sequences of the ubatch
-    ggml_tensor * self_kv_mask = nullptr; // F32 [n_kv, n_batch]   elastic memory: what each token sees of them
     ggml_tensor * self_q_rng   = nullptr; // I32 [3, n_batch]      elastic memory: the live entries of the top-k of each token
+    ggml_tensor * self_win_rng = nullptr; // I32 [3, n_batch]      elastic memory: the window of each token in the list, for the
+                                          //                       indexer kernel, see ggml_lightning_indexer_rows()
+    int64_t       n_win        = 0;       //                       elastic memory: the entries of a window
 
     ggml_tensor * self_k_idxs_mla = nullptr; // I64 [n_batch]
     ggml_tensor * self_k_idxs_lid = nullptr; // I64 [n_batch]
@@ -620,9 +620,6 @@ public:
     ggml_tensor * self_kv_idx_swa = nullptr; // I32 [n_idx, n_group]
     ggml_tensor * self_q_rng_swa  = nullptr; // I32 [3, n_batch]
 
-    // over rows copied from the lists, see llama_cparams::box_gather
-    ggml_tensor * self_kv_mask     = nullptr; // F32 [n_idx, n_batch]
-    ggml_tensor * self_kv_mask_swa = nullptr; // F32 [n_idx, n_batch]
 
     ggml_tensor * self_k_rot = nullptr;
     ggml_tensor * self_v_rot = nullptr;
@@ -672,9 +669,6 @@ public:
     ggml_tensor * self_kv_idx_swa = nullptr; // I32 [n_idx, n_group]
     ggml_tensor * self_q_rng_swa  = nullptr; // I32 [3, n_batch]
 
-    // over rows copied from the lists, see llama_cparams::box_gather
-    ggml_tensor * self_kv_mask     = nullptr; // F32 [n_idx, n_batch]
-    ggml_tensor * self_kv_mask_swa = nullptr; // F32 [n_idx, n_batch]
 
     ggml_tensor * self_k_rot = nullptr;
     ggml_tensor * self_k_rot_swa = nullptr;
@@ -743,6 +737,10 @@ public:
         ggml_tensor * rng_raw = nullptr; // I32 [3, n_batch]
         ggml_tensor * rng_hca = nullptr; // I32 [3, n_batch]
         ggml_tensor * rng_csa = nullptr; // I32 [3, n_batch]
+
+        // the window of each token in lid for the indexer kernel, see ggml_lightning_indexer_rows(), and its entries
+        ggml_tensor * win_lid = nullptr; // I32 [3, n_batch]
+        int64_t       n_win   = 0;
     };
 
     llm_graph_input_dsv4(

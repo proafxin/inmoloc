@@ -23,9 +23,9 @@ struct llama_hparams;
 //
 // the states sit on the left of the box, one after the other, each exactly as large as a state is; the rest is a row of
 // blocks of the same size, taken from the right: a block holds n_block_tokens tokens of every attention layer, laid out
-// by layer inside the block (the K rows of the first layer, its V rows, then the next layer); with an MTP draft on the
-// same model, the rows of its layer follow: a draft context reads and writes them for the same sequences, so its tokens
-// take no memory of their own, see llama_kv_cache::box_ref
+// by layer inside the block (the K rows of the first layer, its V rows, then the next layer); with an MTP draft, the rows
+// of its layers follow: a draft context reads and writes them for the same sequences, so its tokens take no memory of
+// their own, see llama_kv_cache::box_ref
 //
 // what a request is known to take, its state and its input, is taken when it is admitted; the most it may generate is
 // charged as a count, and its blocks are taken as the tokens appear (see reserve()); blocks and states go back to their
@@ -88,9 +88,9 @@ public:
     static constexpr size_t unit = 256;
 
     // a box of `bytes` bytes, or with the memory of a cache of n_tokens cells and n_states states when bytes is 0; draft
-    // is the layer of an MTP draft that keeps its tokens in the blocks, nullptr for none; no memory is taken until alloc()
+    // are the layers of an MTP draft that keeps its tokens in the blocks, empty for none; no memory is taken until alloc()
     // lid are the indexer layers on the blocks of BLOCK_CSA, pieces the rest of a state
-    llama_box(std::vector<attn_layer> attn, std::vector<recr_layer> recr, const attn_layer * draft, size_t bytes, uint32_t n_tokens, uint32_t n_states,
+    llama_box(std::vector<attn_layer> attn, std::vector<recr_layer> recr, const std::vector<attn_layer> & draft, size_t bytes, uint32_t n_tokens, uint32_t n_states,
             std::vector<attn_layer> lid = {}, std::vector<state_piece> pieces = {});
 
     // takes the buffer from buft and creates the views; a dry run (no_alloc) takes none
@@ -130,20 +130,20 @@ public:
         return (int64_t) (c/n_block_tokens)*rows_per_block + c%n_block_tokens;
     }
 
-    // row of KV cell c in the K and V views of the draft layer
+    // row of KV cell c in the K and V views of the draft layers
     int64_t kv_row_draft(uint32_t c) const {
         return (int64_t) (c/n_block_tokens)*rows_per_block_draft + c%n_block_tokens;
     }
 
     bool has_draft() const { return row_bytes_draft > 0; }
 
+    // whether model layer il is a draft layer of the box
+    bool is_draft(int32_t il) const;
+
     // whether the device reads the rows of a prompt through one list, else every token reads through ranges of its cells
     void set_row_lists(bool value) { row_lists = value; }
     bool has_row_lists() const { return row_lists; }
 
-    // whether the device has no kernel that reads the rows of these layers in place: attention copies them
-    void set_row_copies(bool value) { row_copies = value; }
-    bool has_row_copies() const { return row_copies; }
 
     // unit index of a row of the state s, recurrent layer l (recr_index()): conv row k, the scan row, replay input half h
     int64_t r_row(int32_t s, uint32_t l, uint32_t k) const;
@@ -265,11 +265,12 @@ private:
 
     uint32_t n_blocks_max = 0; // what the box was created with, the most finalize() takes it to
 
-    bool row_lists  = false;
-    bool row_copies = false;
+    bool row_lists = false;
 
-    size_t row_bytes_draft      = 0; // one K or V row of the draft layer, 0 without one
+    size_t row_bytes_draft      = 0; // one K or V row of the draft layers, the longest of them, 0 without them
     size_t rows_per_block_draft = 0;
+
+    size_t n_attn_main = 0; // the attention layers before the draft layers
 
     size_t r_row_bytes = 0; // padded to unit
     size_t s_row_bytes = 0;
@@ -358,7 +359,8 @@ private:
 
 // the elastic memory of a model; filter_attn selects the attention layers, and filter_recr the recurrent ones (nullptr
 // for a model without them, which ignores the state parameters); kv_size cells and rs_size states size it when box_bytes
-// is 0; extra_attn holds pre-built layer descriptors for layers whose dimensions differ from the main hparams (e.g. an
+// is 0; with box_draft, the blocks hold the MTP layers of box_draft_hparams (an MTP head in a GGUF of its own), or of the
+// model when it is nullptr; extra_attn holds pre-built layer descriptors for layers whose dimensions differ from the main hparams (e.g. an
 // indexer cache with a different head size), appended after the main attention layers
 std::unique_ptr<llama_box> llama_box_make(
         const llama_model & model,
@@ -376,6 +378,7 @@ std::unique_ptr<llama_box> llama_box_make(
                      bool   box_draft,
                 ggml_type   box_draft_type_k,
                 ggml_type   box_draft_type_v,
+      const llama_hparams * box_draft_hparams,
     const std::function<bool(int32_t)> & filter_attn,
     const std::function<bool(int32_t)> & filter_recr,
     std::vector<llama_box::attn_layer>   extra_attn = {},

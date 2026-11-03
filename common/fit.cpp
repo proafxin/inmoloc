@@ -1129,7 +1129,10 @@ bool common_budget_box(
         llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
         llama_context_reserve(ctx_dft);
 
-        dft = common_budget_device_mem(ctx_dft, false).compute;
+        // a draft model of its own brings its weights
+        const auto dft_mem = common_budget_device_mem(ctx_dft, llama_get_model(ctx_dft) != model);
+
+        dft = dft_mem.model + dft_mem.compute;
 
         // speculative decoding sets its own
         if (chain) {

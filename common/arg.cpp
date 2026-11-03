@@ -1797,7 +1797,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                                throw std::runtime_error(
                                    string_format("error: unknown value for --flash-attn: '%s'\n", value.c_str()));
                            }
-                       }).set_env("LOCAL_INFERENCE_ARG_FLASH_ATTN"));
+                       }).set_env("LOCAL_INFERENCE_ARG_FLASH_ATTN").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-p", "--prompt"}, "PROMPT",
         "prompt to start generation with; for system message, use -sys",

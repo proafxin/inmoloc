@@ -33,6 +33,7 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
                      bool   box_draft,
                 ggml_type   box_draft_type_k,
                 ggml_type   box_draft_type_v,
+      const llama_hparams * box_draft_hparams,
                      bool   box_swa) :
     hparams_lid(model.hparams), n_stream(unified ? 1 : n_seq_max) {
 
@@ -40,7 +41,7 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
     if (use_box) {
         // with a SWA cache next to it, the layers it does not filter are the layers of both
         box_own = llama_box_make(model, type_k, type_v, kv_size, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
-                box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v,
+                box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v, box_draft_hparams,
                 [&](int32_t il) { return box_swa || filter_mla == nullptr || filter_mla(il); }, nullptr,
                 box_layers_lid(model, type_k, filter_lid));
 
@@ -149,8 +150,7 @@ llama_memory_context_ptr llama_kv_cache_dsa::init_batch(
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = kv_mla->box_row_copies() ? balloc.split_seq(n_ubatch) :
-                n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
+            auto ubatch = n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
 
             if (ubatch.n_tokens == 0) {
                 break;

@@ -130,7 +130,8 @@ public:
                      uint32_t   n_batch = 0,
                          bool   box_draft = false,
                     ggml_type   box_draft_type_k = GGML_TYPE_F16,
-                    ggml_type   box_draft_type_v = GGML_TYPE_F16);
+                    ggml_type   box_draft_type_v = GGML_TYPE_F16,
+          const llama_hparams * box_draft_hparams = nullptr);
 
     ~llama_kv_cache_dsv4() = default;
 
@@ -484,8 +485,13 @@ public:
     //   hca:     I32 [n_hca, n_tokens], the HCA rows a token reads, the live ones first
     //   lid:     I32 [n_lid, 1], the CSA and indexer rows of the sequences, one after the other
     //   rng_*:   I32 [3, n_tokens], the ranges of a token in its lists [raw|hca] and [raw|top-k]
+    //   win_lid: I32 [3, n_tokens], the window of a token in lid, see ggml_lightning_indexer_rows(), nullptr without one
     void set_input_box(ggml_tensor * raw, ggml_tensor * hca, ggml_tensor * lid, ggml_tensor * rng_raw, ggml_tensor * rng_hca, ggml_tensor * rng_csa,
-            uint32_t n_top, const llama_ubatch * ubatch) const;
+            ggml_tensor * win_lid, uint32_t n_top, const llama_ubatch * ubatch) const;
+
+    // the entries of the window of a token in lid: the most CSA rows a token of the ubatch sees, padded so that graphs can
+    // be reused; a reserve takes the most a sequence holds
+    int64_t get_n_win_lid(const llama_ubatch & ubatch) const;
 
 private:
     llama_kv_cache_dsv4 * kv_dsv4 = nullptr;

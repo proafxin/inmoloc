@@ -41,10 +41,11 @@ llama_memory_hybrid::llama_memory_hybrid(
                      bool   box_draft,
                 ggml_type   box_draft_type_k,
                 ggml_type   box_draft_type_v,
+      const llama_hparams * box_draft_hparams,
     std::vector<llama_box::attn_layer>   box_extra_attn) :
     hparams(model.hparams),
     box(use_box ? llama_box_make(model, type_k, type_v, kv_size, type_r, type_s, rs_size, n_rs_seq,
-                rs_replay, offload, box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v,
+                rs_replay, offload, box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v, box_draft_hparams,
                 filter_attn == nullptr ? [&](int32_t il) { return !model.hparams.is_recr(il); } : filter_attn,
                 filter_recr == nullptr ? [&](int32_t il) { return  model.hparams.is_recr(il); } : filter_recr,
                 std::move(box_extra_attn)) : nullptr),
@@ -171,7 +172,7 @@ llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & ba
         while (true) {
             llama_ubatch ubatch;
 
-            if (embd_all || mem_attn->box_row_copies()) {
+            if (embd_all) {
                 // if all tokens are output, split by sequence
                 ubatch = balloc.split_seq(n_ubatch);
             } else {

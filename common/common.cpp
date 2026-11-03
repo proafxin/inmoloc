@@ -1291,6 +1291,7 @@ struct common_init_result::impl {
 
     llama_model_ptr   model;
     llama_context_ptr context;
+    llama_model_ptr   model_dft;   // an MTP head in a GGUF of its own, until the caller takes it
     llama_context_ptr context_dft; // an MTP draft on the elastic memory of the context, until the caller takes it
 
     std::vector<llama_adapter_lora_ptr> lora;
@@ -1338,8 +1339,8 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     const bool fit_layers_only = params.vram_budget_ctx && !model_only;
 
     // the elastic memory needs no dry run: all layers go on the device, and it is what the real context leaves of the
-    // budget, allocated last
-    const bool box_direct = !model_only && params.elastic && !has_draft;
+    // budget, allocated last; an MTP head keeps its tokens in it, also from a GGUF of its own
+    const bool box_direct = !model_only && params.elastic && (!has_draft || spec_mtp);
 
     if (params.fit_params && !(params.elastic && !model_only)) {
         COM_TRC("%s", "fitting params to device memory ...\n");
@@ -1427,6 +1428,19 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     pimpl->model.reset(model);
 
     if (box_direct) {
+        // an MTP head in a GGUF of its own: the blocks of the elastic memory hold its layers
+        if (spec_mtp && has_draft) {
+            COM_INF("%s: loading the MTP draft model '%s'\n", __func__, params_dft.model.path.c_str());
+
+            pimpl->model_dft.reset(llama_model_load_from_file(params_dft.model.path.c_str(), mparams_dft));
+            if (pimpl->model_dft == nullptr) {
+                COM_ERR("failed to load the MTP draft model '%s'\n", params_dft.model.path.c_str());
+                return;
+            }
+
+            cparams.box_draft_model = pimpl->model_dft.get();
+        }
+
         // the sequences follow the memory, and the outputs of a ubatch its tokens
         cparams.n_ctx         = llama_model_n_ctx_train(model);
         cparams.n_seq_max     = 1;
@@ -1516,12 +1530,14 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             // the draft is created once, here: what it takes is known before the elastic memory is allocated
             llama_context * ctx_dft = nullptr;
             if (spec_mtp) {
+                llama_model * model_dft = pimpl->model_dft ? pimpl->model_dft.get() : model;
+
                 cparams_dft.n_ctx         = llama_n_ctx(lctx);
                 cparams_dft.n_seq_max     = llama_n_seq_max(lctx);
                 cparams_dft.n_outputs_max = cparams_dft.n_ubatch;
                 cparams_dft.ctx_other     = lctx;
 
-                ctx_dft = llama_init_from_model(model, cparams_dft);
+                ctx_dft = llama_init_from_model(model_dft, cparams_dft);
                 if (ctx_dft == nullptr) {
                     COM_ERR("%s", "failed to create the MTP draft context\n");
                     llama_free(lctx);
@@ -1546,8 +1562,9 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
 
             params.box_bytes = box_bytes;
         } else {
-            // a memory that is not elastic: sized by dry runs
+            // a memory that is not elastic: sized by dry runs, a draft is loaded with it
             llama_free(lctx);
+            pimpl->model_dft.reset();
 
             const auto samplers_user = cparams.samplers;
 
@@ -1594,6 +1611,10 @@ llama_context * common_init_result::context() {
 
 llama_context * common_init_result::release_context_dft() {
     return pimpl->context_dft.release();
+}
+
+llama_model * common_init_result::release_model_dft() {
+    return pimpl->model_dft.release();
 }
 
 common_sampler * common_init_result::sampler(llama_seq_id seq_id) {
@@ -1936,7 +1957,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.kv_unified        = params.kv_unified;
     cparams.elastic           = params.elastic;
     cparams.box_bytes         = params.box_bytes;
-    cparams.box_draft         = !params.speculative.has_dft() && std::find(params.speculative.types.begin(), params.speculative.types.end(),
+    cparams.box_draft         = std::find(params.speculative.types.begin(), params.speculative.types.end(),
                                     COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
     cparams.box_draft_type_k  = params.speculative.draft.cache_type_k;
     cparams.box_draft_type_v  = params.speculative.draft.cache_type_v;

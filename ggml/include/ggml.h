@@ -585,6 +585,7 @@ extern "C" {
         GGML_OP_DSV4_HC_COMB,
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
+        GGML_OP_ARGSORT_OFF,
 
         GGML_OP_UNARY,
 
@@ -2462,6 +2463,17 @@ extern "C" {
             struct ggml_tensor  * a,
             int                   k);
 
+    // ggml_argsort_top_k with each index plus the offset of its row: for the windows of a list (see
+    // ggml_lightning_indexer_rows()), the indices are entries of the list
+    //
+    // a:   F32 [ne0, ne1, ne2, ne3]
+    // off: I32 [1, ne1/r1, ne2/r2, ne3/r3], broadcast over the rows of a
+    GGML_API struct ggml_tensor * ggml_argsort_top_k_off(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int                   k,
+            struct ggml_tensor  * off);
+
     // top k elements per row
     // note: the resulting top k indices are in no particular order
     GGML_API struct ggml_tensor * ggml_top_k(
@@ -2740,18 +2752,40 @@ extern "C" {
         struct ggml_tensor  * weights,
         struct ggml_tensor  * mask);
 
-    // the same over a list of rows of k read in place, for keys that are not contiguous: entry i of the list is column i
-    // of mask and res
+    // the same over the keys of a list of rows of k read in place, for keys that are not contiguous: each token scores a
+    // window of n_win entries of the list, entry w + j in column j of res, and only the entries lo .. hi-1 of it with a
+    // row (not -1), the others are -INFINITY; no mask
     //
-    // k:    [n_embd_idx, 1, n_rows_k, ne3]
-    // rows: I32 [n_kv]
+    // q:       [n_embd_idx, n_head, n_tokens]
+    // k:       [n_embd_idx, 1, n_rows_k]
+    // weights: [n_head, n_tokens] !! prescaled !!
+    // rows:    I32 [n_list]
+    // rng:     I32 [3, n_tokens], (w, lo, hi) of each token, entries of the list
+    // res:     F32 [n_win, n_tokens]
     GGML_API struct ggml_tensor * ggml_lightning_indexer_rows(
         struct ggml_context * ctx,
         struct ggml_tensor  * q,
         struct ggml_tensor  * k,
         struct ggml_tensor  * weights,
-        struct ggml_tensor  * mask,
-        struct ggml_tensor  * rows);
+        struct ggml_tensor  * rows,
+        struct ggml_tensor  * rng,
+        int64_t               n_win);
+
+    // the keys scored against each head instead of summed over them: the dot products of q with the rows of k, over the
+    // windows of ggml_lightning_indexer_rows(), with no ReLU and no weights
+    //
+    // q:    [n_embd_idx, n_head, n_tokens]
+    // k:    [n_embd_idx, 1, n_rows_k]
+    // rows: I32 [n_list]
+    // rng:  I32 [3, n_tokens]
+    // res:  F32 [n_win, n_head, n_tokens]
+    GGML_API struct ggml_tensor * ggml_lightning_indexer_heads(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * rows,
+        struct ggml_tensor  * rng,
+        int64_t               n_win);
 
     // DeepSeek V4 hyper-connections (ref. https://arxiv.org/pdf/2512.24880)
     // In short these operations are replacements for the original residual connection (x = transformer(x) + x)

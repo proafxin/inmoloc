@@ -957,8 +957,10 @@ struct common_init_result {
     llama_model * model();
     llama_context * context();
 
-    // the MTP draft context created with the elastic memory, if any: the caller owns it
+    // the MTP draft context created with the elastic memory, if any, and the model of a draft in a GGUF of its own: the
+    // caller owns them
     llama_context * release_context_dft();
+    llama_model   * release_model_dft();
 
     common_sampler * sampler(llama_seq_id seq_id);
     void reset_samplers();

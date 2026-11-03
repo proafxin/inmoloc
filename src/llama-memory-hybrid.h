@@ -52,6 +52,7 @@ public:
                      bool   box_draft = false,
                 ggml_type   box_draft_type_k = GGML_TYPE_F16,
                 ggml_type   box_draft_type_v = GGML_TYPE_F16,
+      const llama_hparams * box_draft_hparams = nullptr,
         // extra attention layers for the box with dimensions that differ from the main hparams (e.g. indexer cache)
         std::vector<llama_box::attn_layer> box_extra_attn = {});
 

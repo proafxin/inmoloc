@@ -176,9 +176,6 @@ public:
 
     llama_box * get_box() const { return box; }
 
-    // whether attention copies the rows of the cells, see llama_cparams::box_gather: a ubatch holds one sequence then, so
-    // that what is copied is bounded by the context window of the model
-    bool box_row_copies() const;
 
     // a draft keeps the cells of the last n positions before the batch of a sequence, the others leave the raw blocks of
     // its target, which go back with no cell in them; 0 keeps all
@@ -300,9 +297,15 @@ public:
     // kv_idx: I32 [n_idx, n_group], q_rng: I32 [3, n_tokens]
     void set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const;
 
-    // kv_idx as above, kv_mask: F32 [n_idx, n_tokens], over the rows copied from the list
-    void set_input_kv_mask(ggml_tensor * kv_idx, ggml_tensor * kv_mask, const llama_ubatch * ubatch, bool causal_attn) const;
-    void set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * kv_mask, ggml_tensor * q_rng, uint32_t n_top, const llama_ubatch * ubatch, bool causal_attn) const;
+    // a selection over the list: win_rng (I32 [3, n_tokens], the windows of ggml_lightning_indexer_rows()) says what a
+    // token sees of the list, q_rng the live entries of the n_top best entries of each token
+    void set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * q_rng, ggml_tensor * win_rng, uint32_t n_top,
+            const llama_ubatch * ubatch, bool causal_attn) const;
+
+    // the entries of the window of a token in the list, see ggml_lightning_indexer_rows(): the most cells of a sequence of
+    // the ubatch, padded so that graphs can be reused, at most n_win_max(), what a reserve takes
+    uint32_t get_n_win(const llama_ubatch & ubatch) const;
+    uint32_t n_win_max() const;
 
     // the list of the cells and the range rng [3, n_tokens] of it that each token reads
     void fill_kv_idx(ggml_tensor * kv_idx, int32_t * rng, const llama_ubatch * ubatch, bool causal_attn) const;
@@ -571,9 +574,11 @@ public:
     void get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const;
     void set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const;
 
-    // the list of the cells, and a mask over the rows copied from it, when the device cannot read the rows in place
-    void set_input_kv_mask(ggml_tensor * kv_idx, ggml_tensor * kv_mask, const llama_ubatch * ubatch, bool causal_attn) const;
-    void set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * kv_mask, ggml_tensor * q_rng, uint32_t n_top, const llama_ubatch * ubatch, bool causal_attn) const;
+    void set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * q_rng, ggml_tensor * win_rng, uint32_t n_top,
+            const llama_ubatch * ubatch, bool causal_attn) const;
+
+    // see llama_kv_cache::get_n_win(); a reserve takes the most a sequence holds
+    uint32_t get_n_win(const llama_ubatch & ubatch) const;
 
     // whether the cells are in the elastic memory, see llama_box
     bool has_box() const;

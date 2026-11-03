@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <map>
+#include <numeric>
 
 // llama_kv_cache_msa
 
@@ -46,12 +48,11 @@ llama_kv_cache_msa::llama_kv_cache_msa(
         }
 
         box_own = llama_box_make(model, type_k, type_v, kv_size, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
-                box_bytes, box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16,
+                box_bytes, box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16, nullptr,
                 [&](int32_t il) { return filter == nullptr || filter(il); }, nullptr, std::move(layers_idx));
 
         // the blocks of a sequence are chosen in the rows of that sequence: attention reads copies of them
         box_own->set_row_lists(false);
-        box_own->set_row_copies(true);
 
         kv_size = box_own->get_n_cells();
 
@@ -112,6 +113,11 @@ void llama_kv_cache_msa::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1
 }
 
 void llama_kv_cache_msa::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, int d) {
+    // the elastic memory reads a sequence through slots of its positions, one cell each
+    if (kv_base->get_box() && d > 1) {
+        throw std::runtime_error("MSA: the elastic memory keeps one cell per position, positions cannot be divided (group attention)");
+    }
+
     kv_base->seq_div(seq_id, p0, p1, d);
     kv_idx ->seq_div(seq_id, p0, p1, d);
 }
@@ -143,8 +149,7 @@ llama_memory_context_ptr llama_kv_cache_msa::init_batch(
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = kv_base->box_row_copies() ? balloc.split_seq(n_ubatch) :
-                n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
+            auto ubatch = n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
 
             if (ubatch.n_tokens == 0) {
                 break;
@@ -300,13 +305,6 @@ uint32_t llama_kv_cache_msa_context::get_n_pos() const {
 
     llama_pos pos_max = -1;
 
-    // the elastic memory has the one sequence of the ubatch, and the longest there can be when graphs are reserved
-    if (kv->get_base()->get_box()) {
-        pos_max = i_next < ubatches.size() ? kv->seq_pos_max(ubatches[i_next].seq_id[0][0]) : (llama_pos) kv->get_base()->attn_n_cells_max() - 1;
-
-        return std::max(n_pad_cur, GGML_PAD((uint32_t) (pos_max + 1), n_pad_cur));
-    }
-
     for (llama_seq_id seq_id = 0; seq_id < (llama_seq_id) kv->get_n_seq_max(); ++seq_id) {
         pos_max = std::max(pos_max, kv->seq_pos_max(seq_id));
     }
@@ -354,6 +352,153 @@ void llama_kv_cache_msa_context::set_input_cell_pos(ggml_tensor * dst, const lla
                     ? 0
                     : (int32_t) (cells.pos_get(j)/div);
         }
+    }
+}
+
+// the slots of the sequences start at whole blocks and are padded like the cells, see box_layout()
+static int64_t msa_box_pad(const llama_kv_cache_msa * kv, int blk) {
+    return std::lcm<int64_t>(std::max(kv->get_n_pad(), 256u), blk);
+}
+
+void llama_kv_cache_msa_context::box_layout(const llama_ubatch & ubatch, int blk, int64_t & n_list, int64_t & n_win) const {
+    const auto * base = kv->get_base();
+
+    const int64_t pad = msa_box_pad(kv, blk);
+
+    // a request holds at most the context window of the model, from the block of its first position
+    const int64_t n_win_max = GGML_PAD((int64_t) kv->get_n_ctx_train() + blk, pad);
+
+    // the sequences of a ubatch hold at most the cells, each padded, and the window of the last one reaches past it
+    const int64_t n_seqs     = std::min<int64_t>(ubatch.n_tokens, base->get_n_seq_max());
+    const int64_t n_list_max = GGML_PAD((int64_t) base->get_size() + n_seqs*(pad + blk), pad) + n_win_max;
+
+    if (i_next >= ubatches.size()) {
+        n_list = n_list_max;
+        n_win  = n_win_max;
+        return;
+    }
+
+    n_list = 0;
+    n_win  = pad;
+
+    for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+        const llama_seq_id seq_id = ubatch.seq_id_unq[s];
+
+        const llama_pos p0  = kv->seq_pos_min(seq_id)/blk*blk;
+        const int64_t   len = GGML_PAD((int64_t) (kv->seq_pos_max(seq_id) + 1 - p0), pad);
+
+        n_list += len;
+        n_win   = std::max(n_win, len);
+    }
+
+    GGML_ASSERT(n_win <= n_win_max);
+
+    n_list += n_win;
+
+    GGML_ASSERT(n_list <= n_list_max);
+}
+
+void llama_kv_cache_msa_context::set_input_box(ggml_tensor * rows, ggml_tensor * win, ggml_tensor * off, ggml_tensor * bias, ggml_tensor * q_base,
+        const llama_ubatch * ubatch, int blk, int local) const {
+    const auto * base = kv->get_base();
+
+    GGML_ASSERT(!ubatch->is_pos_2d());
+
+    const int64_t pad = msa_box_pad(kv, blk);
+
+    const int64_t n_list   = rows->ne[0];
+    const int64_t nblk     = bias->ne[0];
+    const int64_t n_tokens = ubatch->n_tokens;
+
+    // the graph counts the blocks of the list in F32
+    GGML_ASSERT(n_list/blk < (1 << 24));
+
+    const uint32_t       n_swa    = kv->get_n_swa();
+    const llama_swa_type swa_type = kv->get_swa_type();
+
+    auto * d_rows = (int32_t *) rows->data;
+    auto * d_win  = (int32_t *) win->data;
+    auto * d_off  = (int32_t *) off->data;
+    auto * d_bias = (float *)   bias->data;
+    auto * d_base = (int32_t *) q_base->data;
+
+    std::fill(d_bias, d_bias + nblk*n_tokens, 0.0f);
+
+    struct seq_slots {
+        int64_t   base = 0;
+        llama_pos p0   = 0;
+        llama_pos pos_min = 0;
+    };
+
+    std::map<llama_seq_id, seq_slots> seqs;
+
+    std::vector<int32_t>   cells;
+    std::vector<llama_pos> pos;
+
+    int64_t n_used = 0;
+    for (uint32_t s = 0; s < ubatch->n_seqs_unq; ++s) {
+        const llama_seq_id seq_id = ubatch->seq_id_unq[s];
+
+        auto & seq = seqs[seq_id];
+
+        base->seq_cells_causal(seq_id, false, cells, pos);
+        GGML_ASSERT(!cells.empty());
+
+        seq.base    = n_used;
+        seq.pos_min = pos.front();
+        seq.p0      = pos.front()/blk*blk;
+
+        n_used += GGML_PAD((int64_t) (pos.back() + 1 - seq.p0), pad);
+
+        GGML_ASSERT(n_used <= n_list);
+
+        // a position without a cell (before the first one, or removed from the middle) has no row: it is not scored, see
+        // ggml_lightning_indexer_heads(), and never seen
+        std::fill(d_rows + seq.base, d_rows + n_used, -1);
+
+        for (size_t c = 0; c < cells.size(); ++c) {
+            GGML_ASSERT((c == 0 || pos[c] > pos[c - 1]) && "MSA: one cell per position");
+
+            d_rows[seq.base + pos[c] - seq.p0] = (int32_t) base->cell_row(cells[c]);
+        }
+    }
+
+    // the windows of the last sequence reach past the list
+    std::fill(d_rows + n_used, d_rows + n_list, -1);
+
+    for (int64_t i = 0; i < n_tokens; ++i) {
+        const auto &    seq = seqs.at(ubatch->seq_id[i][0]);
+        const llama_pos p1  = ubatch->pos[i];
+
+        // the masked positions before p1 are a prefix, see llama_kv_cache::causal_range()
+        llama_pos lo = seq.pos_min;
+        llama_pos hi = p1;
+        while (lo < hi) {
+            const llama_pos m = lo + (hi - lo)/2;
+            if (llama_hparams::is_masked_swa(n_swa, swa_type, m, p1)) {
+                lo = m + 1;
+            } else {
+                hi = m;
+            }
+        }
+
+        GGML_ASSERT(p1 + 1 - seq.p0 <= (llama_pos) (nblk*blk));
+
+        d_win[3*i + 0] = (int32_t) seq.base;
+        d_win[3*i + 1] = (int32_t) (seq.base + lo - seq.p0);
+        d_win[3*i + 2] = (int32_t) (seq.base + p1 + 1 - seq.p0);
+
+        d_off[i] = (int32_t) (seq.base/blk);
+
+        // the blocks of the window around the token
+        const int64_t L = (p1 - seq.p0)/blk;
+
+        for (int l = 0; l < local && L - l >= 0; ++l) {
+            d_bias[i*nblk + L - l] = 1e30f;
+        }
+
+        d_base[2*i + 0] = (int32_t) i;
+        d_base[2*i + 1] = 0;
     }
 }
 

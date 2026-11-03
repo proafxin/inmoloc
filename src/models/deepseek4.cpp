@@ -664,16 +664,18 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
 
     ggml_tensor * rows = inp_dsv4->get_box().lid;
 
+    // the indexer kernel scores the window of each token in rows, with no mask
+    ggml_tensor * win = inp_dsv4->get_box().win_lid;
+
     ggml_tensor * indexer_k = inp_dsv4->mctx->get_lid()->get_k(ctx0, il);
     const int64_t n_lid = inp_lid.kq_mask->ne[0];
     GGML_ASSERT(n_lid > 0);
-    GGML_ASSERT(n_lid <= indexer_k->ne[2]);
+    GGML_ASSERT(win || n_lid <= indexer_k->ne[2]);
 
-    if (box && !cparams.fused_lid) {
-        // no kernel reads the rows of the box in place, the plain ops work on a copy
-        indexer_k = ggml_get_rows(ctx0, inp_dsv4->mctx->get_box()->get_lid(il), ggml_reshape_1d(ctx0, rows, n_lid));
-        indexer_k = ggml_reshape_4d(ctx0, indexer_k, indexer_k->ne[0], 1, n_lid, 1);
-    } else if (!box) {
+    // the elastic memory reads the rows in place, with the indexer kernel (see llama_context)
+    GGML_ASSERT(!box || win);
+
+    if (!box) {
         indexer_k = ggml_view_4d(ctx0, indexer_k,
                 indexer_k->ne[0], indexer_k->ne[1], n_lid, indexer_k->ne[3],
                 indexer_k->nb[1], indexer_k->nb[2], indexer_k->nb[3], 0);
@@ -690,7 +692,7 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
 
     ggml_tensor * indexer_score = nullptr;
     if (cparams.fused_lid) {
-        indexer_score = box ? ggml_lightning_indexer_rows(ctx0, indexer_q, indexer_k, indexer_weights, inp_lid.kq_mask, rows) :
+        indexer_score = win ? ggml_lightning_indexer_rows(ctx0, indexer_q, indexer_k, indexer_weights, rows, win, inp_dsv4->get_box().n_win) :
             ggml_lightning_indexer(ctx0, indexer_q, indexer_k, indexer_weights, inp_lid.kq_mask);
         cb(indexer_score, "lid_score_masked", il);
         res->add_fused_node({LLM_FUSED_OP_LIGHTNING_INDEXER, indexer_score, il});
@@ -717,8 +719,15 @@ ggml_tensor * llama_model_deepseek4::graph::build_lid_top_k(
     }
 
     const uint32_t n_top_k = indexer_score->ne[0] < hparams.indexer_top_k ? indexer_score->ne[0] : hparams.indexer_top_k;
-    // the live entries first, so that the host knows how many entries of the list a token reads
-    ggml_tensor * top_k = ggml_cont(ctx0, box ? ggml_argsort_top_k(ctx0, indexer_score, n_top_k) : ggml_top_k(ctx0, indexer_score, n_top_k));
+    // the live entries first, so that the host knows how many entries of the list a token reads; the top-k of a window
+    // counts from its start, as entries of the list
+    ggml_tensor * top_k = nullptr;
+    if (win) {
+        top_k = ggml_argsort_top_k_off(ctx0, indexer_score, n_top_k, ggml_view_2d(ctx0, win, 1, win->ne[1], win->nb[1], 0));
+    } else {
+        top_k = box ? ggml_argsort_top_k(ctx0, indexer_score, n_top_k) : ggml_top_k(ctx0, indexer_score, n_top_k);
+    }
+    top_k = ggml_cont(ctx0, top_k);
     cb(top_k, "lid_top_k", il);
 
     return top_k;

@@ -106,7 +106,7 @@ struct common_speculative_deleter {
 typedef std::unique_ptr<common_speculative, common_speculative_deleter> common_speculative_ptr;
 
 struct common_speculative_init_result {
-    common_speculative_init_result(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt, llama_context * ctx_dft_ready);
+    common_speculative_init_result(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt, llama_context * ctx_dft_ready, llama_model * model_dft_ready);
     ~common_speculative_init_result();
 
     llama_model   * model();
@@ -120,4 +120,7 @@ private:
 using common_speculative_init_result_ptr = std::unique_ptr<common_speculative_init_result>;
 
 // ctx_dft_ready: an MTP draft context that exists already, which this takes over; nullptr to create the draft
-common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt, llama_context * ctx_dft_ready = nullptr);
+// ctx_dft_ready and model_dft_ready: a draft created with the target context (see common_init_result::release_context_dft()),
+// which the result takes
+common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt,
+        llama_context * ctx_dft_ready = nullptr, llama_model * model_dft_ready = nullptr);

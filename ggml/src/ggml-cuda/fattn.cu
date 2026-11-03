@@ -282,6 +282,31 @@ static void ggml_cuda_flash_attn_ext_mma_f16(ggml_backend_cuda_context & ctx, gg
         const int gqa_ratio = Q->ne[2] / K->ne[2];
 
         switch (Q->ne[0]) {
+            case 64:
+                ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1< 64,  64, 8>(ctx, dst);
+                return;
+            case 80:
+                ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1< 80,  80, 8>(ctx, dst);
+                return;
+            case 96:
+                ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1< 96,  96, 8>(ctx, dst);
+                return;
+            case 112:
+                ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<112, 112, 8>(ctx, dst);
+                return;
+            case 128:
+                ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<128, 128, 8>(ctx, dst);
+                return;
+            case 192:
+                if (gqa_ratio % 16 == 0) {
+                    ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<192, 128, 16>(ctx, dst);
+                } else {
+                    ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<192, 128,  8>(ctx, dst);
+                }
+                return;
+            case 256:
+                ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<256, 256, 8>(ctx, dst);
+                return;
             case 320:
                 ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1<320, 256, 32>(ctx, dst);
                 return;
@@ -589,20 +614,22 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         float logit_softcap = 0.0f;
         memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
 
-        if (mask || max_bias != 0.0f || logit_softcap != 0.0f || Q->ne[3] != 1) {
+        // ALiBi biases by the distance of the positions, which the lists do not hold
+        if (mask || max_bias != 0.0f || Q->ne[3] != 1) {
             return BEST_FATTN_KERNEL_NONE;
         }
-        // the heads above 256 are read by the tensor core kernel, which converts the rows as it loads them
-        if (K->ne[0] > 256) {
-            const bool head_ok = (K->ne[0] == 320 && V->ne[0] == 256) || (K->ne[0] == 512 && V->ne[0] == 512) ||
-                                 (K->ne[0] == 576 && V->ne[0] == 512);
-            return head_ok && GGML_CUDA_CC_IS_NVIDIA(cc) && turing_mma_available(cc) &&
-                ggml_cuda_fattn_mma_kv_rows_types_ok(K->type, V->type, K->ne[0]) ? BEST_FATTN_KERNEL_MMA_F16 : BEST_FATTN_KERNEL_NONE;
+        // the vector kernel reads the heads it has an instance for, with the logit softcap at 128 and 256
+        if (K->ne[0] == V->ne[0] && ggml_cuda_get_fattn_vec_case(K->ne[0], K->type, V->type) != nullptr &&
+                (logit_softcap == 0.0f || K->ne[0] == 128 || K->ne[0] == 256)) {
+            return BEST_FATTN_KERNEL_VEC;
         }
-        if (K->ne[0] != V->ne[0] || ggml_cuda_get_fattn_vec_case(K->ne[0], K->type, V->type) == nullptr) {
-            return BEST_FATTN_KERNEL_NONE;
-        }
-        return BEST_FATTN_KERNEL_VEC;
+        // the others the tensor core kernel, which converts the rows as it loads them
+        const bool head_ok = (K->ne[0] == V->ne[0] && (K->ne[0] == 64 || K->ne[0] == 80 || K->ne[0] == 96 ||
+                                                       K->ne[0] == 112 || K->ne[0] == 128 || K->ne[0] == 256)) ||
+                             (K->ne[0] == 192 && V->ne[0] == 128) || (K->ne[0] == 320 && V->ne[0] == 256) ||
+                             (K->ne[0] == 512 && V->ne[0] == 512) || (K->ne[0] == 576 && V->ne[0] == 512);
+        return head_ok && logit_softcap == 0.0f && GGML_CUDA_CC_IS_NVIDIA(cc) && turing_mma_available(cc) &&
+            ggml_cuda_fattn_mma_kv_rows_types_ok(K->type, V->type, K->ne[0]) ? BEST_FATTN_KERNEL_MMA_F16 : BEST_FATTN_KERNEL_NONE;
 #endif // defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
     }
     if (dst->src[5] != nullptr) {
@@ -612,8 +639,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         float logit_softcap = 0.0f;
         memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
 
-        const bool head_ok = K->ne[0] == V->ne[0] &&
-            (K->ne[0] == 64 || K->ne[0] == 80 || K->ne[0] == 96 || K->ne[0] == 112 || K->ne[0] == 128 || K->ne[0] == 256);
+        const bool head_ok = (K->ne[0] == V->ne[0] &&
+            (K->ne[0] == 64 || K->ne[0] == 80 || K->ne[0] == 96 || K->ne[0] == 112 || K->ne[0] == 128 || K->ne[0] == 256)) ||
+            (K->ne[0] == 192 && V->ne[0] == 128);
 
         // f16 K/V are read as they are, the other types of GGML_CUDA_FA_QUANTS are converted as the rows are loaded
         if (dst->src[6] != nullptr || !GGML_CUDA_CC_IS_NVIDIA(cc) || !turing_mma_available(cc) || !head_ok ||

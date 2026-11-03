@@ -472,6 +472,10 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
     ctx_params.n_threads = 4;
     ctx_params.n_threads_batch = 4;
     ctx_params.elastic = elastic;
+
+    // an F16 V is accumulated in F16 by some read paths only: F32 leaves the rounding out of the comparison of attention
+    ctx_params.type_k = GGML_TYPE_F32;
+    ctx_params.type_v = GGML_TYPE_F32;
     if (attn) {
         ctx_params.cb_eval           = capture_attn;
         ctx_params.cb_eval_user_data = attn;
@@ -843,6 +847,12 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const in
                         report_nans("elastic",     logits_dev, tokens.size());
                         const double nmse_attn = compare_attn(attn_cpu, attn_dev);
                         const double nmse_val = std::max(nmse(logits_cpu, logits_dev), nmse_attn);
+
+                        // attention is compared as close as its rounding allows
+                        if (!(nmse_attn <= 1e-10)) {
+                            fprintf(stderr, "attention: does not match\n");
+                            all_ok = false;
+                        }
                         snprintf(nmse_str, sizeof(nmse_str), "(%.2e)", nmse_val);
                         status_nmse = "\033[1;32mOK\033[0m";
                         // written so that a NaN fails

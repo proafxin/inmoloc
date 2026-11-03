@@ -598,22 +598,22 @@ void ggml_cuda_flash_attn_ext_vec_case_impl(ggml_backend_cuda_context & ctx, ggm
 // indexed attention: the Q heads of one K/V head a block takes, the smallest of 1, 2, 4 and 8 that holds the GQA ratio.
 // f16 and bf16 keep Q and the accumulators of a head in twice the registers of the quantized types: with more than one
 // head they spill (928 bytes a thread at D 256 and 4 heads) and run 3x slower, so they take one head (measured, RTX 5090)
-template <int D, ggml_type type_K, ggml_type type_V>
+template <int D, ggml_type type_K, ggml_type type_V, bool use_logit_softcap>
 static void ggml_cuda_flash_attn_ext_vec_kv_idx(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int gqa_ratio = dst->src[0]->ne[2] / dst->src[1]->ne[2];
 
     constexpr bool wide = type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_BF16 || type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_BF16;
     if constexpr (wide) {
-        ggml_cuda_flash_attn_ext_vec_case_impl<D, 1, type_K, type_V, false, true>(ctx, dst);
+        ggml_cuda_flash_attn_ext_vec_case_impl<D, 1, type_K, type_V, use_logit_softcap, true>(ctx, dst);
     } else {
         if (gqa_ratio == 1) {
-            ggml_cuda_flash_attn_ext_vec_case_impl<D, 1, type_K, type_V, false, true>(ctx, dst);
+            ggml_cuda_flash_attn_ext_vec_case_impl<D, 1, type_K, type_V, use_logit_softcap, true>(ctx, dst);
         } else if (gqa_ratio == 2) {
-            ggml_cuda_flash_attn_ext_vec_case_impl<D, 2, type_K, type_V, false, true>(ctx, dst);
+            ggml_cuda_flash_attn_ext_vec_case_impl<D, 2, type_K, type_V, use_logit_softcap, true>(ctx, dst);
         } else if (gqa_ratio <= 4) {
-            ggml_cuda_flash_attn_ext_vec_case_impl<D, 4, type_K, type_V, false, true>(ctx, dst);
+            ggml_cuda_flash_attn_ext_vec_case_impl<D, 4, type_K, type_V, use_logit_softcap, true>(ctx, dst);
         } else {
-            ggml_cuda_flash_attn_ext_vec_case_impl<D, 8, type_K, type_V, false, true>(ctx, dst);
+            ggml_cuda_flash_attn_ext_vec_case_impl<D, 8, type_K, type_V, use_logit_softcap, true>(ctx, dst);
         }
     }
 }
@@ -628,8 +628,13 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
 
     // indexed attention: one query per block, each with its own list (see ggml_flash_attn_ext_set_kv_idx)
     if (KQV->src[6] != nullptr) {
-        GGML_ASSERT(logit_softcap == 0.0f);
-        ggml_cuda_flash_attn_ext_vec_kv_idx<D, type_K, type_V>(ctx, dst);
+        if (logit_softcap == 0.0f) {
+            ggml_cuda_flash_attn_ext_vec_kv_idx<D, type_K, type_V, false>(ctx, dst);
+        } else {
+            // the kernel has the softcap at 128 and 256 only, see ggml_cuda_get_best_fattn_kernel()
+            GGML_ASSERT(D == 128 || D == 256);
+            ggml_cuda_flash_attn_ext_vec_kv_idx<D, type_K, type_V, true>(ctx, dst);
+        }
         return;
     }
 

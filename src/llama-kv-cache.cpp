@@ -255,7 +255,8 @@ llama_kv_cache::llama_kv_cache(
             // views of the whole box, read and written through the rows of the cells, see cell_row()
             ggml_tensor * k = box->get_k(il + box_il_offset);
             ggml_tensor * v = box->get_v(il + box_il_offset);
-            GGML_ASSERT(k && (v || !has_v) && k->type == type_k);
+            GGML_ASSERT(k && (v || !has_v) && k->type == type_k && k->ne[0] == n_embd_k_gqa);
+            GGML_ASSERT(!has_v || (v->type == type_v && v->ne[0] == n_embd_v_gqa));
 
             map_layer_ids[il] = layers.size();
 
@@ -506,12 +507,8 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     return true;
 }
 
-bool llama_kv_cache::box_row_copies() const {
-    return box && box->has_row_copies();
-}
-
 uint32_t llama_kv_cache::attn_n_cells_max() const {
-    return box_row_copies() ? std::min(get_size(), GGML_PAD(hparams.n_ctx_train, 256u)) : get_size();
+    return get_size();
 }
 
 void llama_kv_cache::box_finalized() {
@@ -808,8 +805,7 @@ llama_memory_context_ptr llama_kv_cache::init_batch(
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = box_row_copies() ? balloc.split_seq(n_ubatch) :
-                n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
+            auto ubatch = n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
 
             if (ubatch.n_tokens == 0) {
                 break;
@@ -2669,53 +2665,59 @@ void llama_kv_cache::set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng,
     fill_kv_idx(kv_idx, (int32_t *) q_rng->data, ubatch, causal_attn);
 }
 
-void llama_kv_cache::set_input_kv_mask(ggml_tensor * kv_idx, ggml_tensor * kv_mask, const llama_ubatch * ubatch, bool causal_attn) const {
-    GGML_ASSERT(ggml_backend_buffer_is_host(kv_mask->buffer));
-
-    const uint32_t n_tokens = ubatch->n_tokens;
-    const int64_t  n_idx    = kv_idx->ne[0];
-
-    GGML_ASSERT(kv_mask->ne[0] == n_idx && kv_mask->ne[1] == n_tokens);
-
-    std::vector<int32_t> rng(3*n_tokens);
-
-    fill_kv_idx(kv_idx, rng.data(), ubatch, causal_attn);
-
-    float * data = (float *) kv_mask->data;
-
-    std::fill(data, data + n_idx*n_tokens, -INFINITY);
-
-    // a token sees the range of the list that its ranges say, in the rows copied from the list
-    for (uint32_t i = 0; i < n_tokens; ++i) {
-        std::fill(data + i*n_idx + rng[3*i + 1], data + i*n_idx + rng[3*i + 2], 0.0f);
-    }
-}
-
-// a selection over the list of rows: the mask says what a token sees of the list, and each query reads its n_top best entries
-// through the list the graph builds from the sorted top-k, of which only the visible ones are live
-void llama_kv_cache::set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * kv_mask, ggml_tensor * q_rng, uint32_t n_top, const llama_ubatch * ubatch, bool causal_attn) const {
-    GGML_ASSERT(ggml_backend_buffer_is_host(kv_mask->buffer));
+// a selection over the list of rows: the windows say what a token sees of the list, and each query reads its n_top best
+// entries through the list the graph builds from the sorted top-k, of which only the visible ones are live
+void llama_kv_cache::set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * q_rng, ggml_tensor * win_rng, uint32_t n_top,
+        const llama_ubatch * ubatch, bool causal_attn) const {
     GGML_ASSERT(ggml_backend_buffer_is_host(q_rng->buffer));
+    GGML_ASSERT(ggml_backend_buffer_is_host(win_rng->buffer));
 
     const uint32_t n_tokens = ubatch->n_tokens;
     const int64_t  n_idx    = kv_idx->ne[0];
+
+    GGML_ASSERT(win_rng->ne[0] == 3 && win_rng->ne[1] == n_tokens);
+    GGML_ASSERT(n_idx <= INT32_MAX);
 
     std::vector<int32_t> rng(3*n_tokens);
 
     fill_kv_idx(kv_idx, rng.data(), ubatch, causal_attn);
 
-    float   * data = (float *) kv_mask->data;
-    int32_t * sel  = (int32_t *) q_rng->data;
+    int32_t * sel = (int32_t *) q_rng->data;
+    int32_t * win = (int32_t *) win_rng->data;
 
-    std::fill(data, data + n_idx*n_tokens, -INFINITY);
+    // the window of a token starts at the first entry it sees, see ggml_lightning_indexer_rows()
+    for (uint32_t i = 0; i < n_tokens; ++i) {
+        win[3*i + 0] = rng[3*i + 1];
+        win[3*i + 1] = rng[3*i + 1];
+        win[3*i + 2] = rng[3*i + 2];
+    }
 
     for (uint32_t i = 0; i < n_tokens; ++i) {
-        std::fill(data + i*n_idx + rng[3*i + 1], data + i*n_idx + rng[3*i + 2], 0.0f);
-
         sel[3*i + 0] = (int32_t) i;
         sel[3*i + 1] = 0;
         sel[3*i + 2] = std::min<int32_t>(rng[3*i + 2] - rng[3*i + 1], (int32_t) std::min<int64_t>(n_top, n_idx));
     }
+}
+
+uint32_t llama_kv_cache::get_n_win(const llama_ubatch & ubatch) const {
+    GGML_ASSERT(n_stream == 1);
+
+    const auto & cells = v_cells[0];
+
+    uint32_t n_max = 0;
+    for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
+        n_max = std::max<uint32_t>(n_max, cells.seq_n_cells(ubatch.seq_id_unq[s]));
+    }
+
+    // the window of a token covers what it sees of its sequence
+    GGML_ASSERT(n_max <= n_win_max());
+
+    return std::min(n_win_max(), std::max<uint32_t>(256, GGML_PAD(n_max, 256)));
+}
+
+uint32_t llama_kv_cache::n_win_max() const {
+    // a request holds at most the context window of the model
+    return std::max<uint32_t>(256, GGML_PAD(std::min(get_size(), hparams.n_ctx_train), 256));
 }
 
 void llama_kv_cache::fill_kv_idx(ggml_tensor * kv_idx, int32_t * rng, const llama_ubatch * ubatch, bool causal_attn) const {
@@ -3950,12 +3952,14 @@ void llama_kv_cache_context::set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor 
     kv->set_input_kv_idx(kv_idx, q_rng, ubatch, causal_attn);
 }
 
-void llama_kv_cache_context::set_input_kv_mask(ggml_tensor * kv_idx, ggml_tensor * kv_mask, const llama_ubatch * ubatch, bool causal_attn) const {
-    kv->set_input_kv_mask(kv_idx, kv_mask, ubatch, causal_attn);
+void llama_kv_cache_context::set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * q_rng, ggml_tensor * win_rng, uint32_t n_top,
+        const llama_ubatch * ubatch, bool causal_attn) const {
+    kv->set_input_kv_sel(kv_idx, q_rng, win_rng, n_top, ubatch, causal_attn);
 }
 
-void llama_kv_cache_context::set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * kv_mask, ggml_tensor * q_rng, uint32_t n_top, const llama_ubatch * ubatch, bool causal_attn) const {
-    kv->set_input_kv_sel(kv_idx, kv_mask, q_rng, n_top, ubatch, causal_attn);
+uint32_t llama_kv_cache_context::get_n_win(const llama_ubatch & ubatch) const {
+    // a reserve has no cells yet: its windows take the most a sequence holds
+    return is_full ? kv->n_win_max() : kv->get_n_win(ubatch);
 }
 
 void llama_kv_cache_context::attn_read_counted_by_graph() const {

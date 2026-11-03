@@ -8539,6 +8539,148 @@ struct test_lightning_indexer : public test_case {
     }
 };
 
+// GGML_OP_LIGHTNING_INDEXER over the windows of a list of rows (ggml_lightning_indexer_rows(), ggml_lightning_indexer_heads())
+struct test_lightning_indexer_win : public test_case {
+    const int64_t nh;     // indexer heads
+    const int64_t n_rows; // rows of k
+    const int64_t n_list; // entries of the list of rows
+    const int64_t n_win;  // entries of a window
+    const int64_t nb;     // tokens
+    const ggml_type type_K;
+    const bool heads;     // the scores of each head
+
+    std::string vars() override {
+        return VARS_TO_STR7(nh, n_rows, n_list, n_win, nb, type_K, heads);
+    }
+
+    double max_nmse_err() override {
+        return 1e-6;
+    }
+
+    test_lightning_indexer_win(int64_t nh = 64, int64_t n_rows = 512, int64_t n_list = 300, int64_t n_win = 256, int64_t nb = 16,
+            ggml_type type_K = GGML_TYPE_F16, bool heads = false)
+        : nh(nh), n_rows(n_rows), n_list(n_list), n_win(n_win), nb(nb), type_K(type_K), heads(heads) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 128, nh, nb);
+        ggml_set_name(q, "q");
+
+        ggml_tensor * k = ggml_new_tensor_3d(ctx, type_K, 128, 1, n_rows);
+        ggml_set_name(k, "k");
+
+        ggml_tensor * rows = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_list);
+        ggml_set_name(rows, "rows");
+
+        ggml_tensor * rng = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 3, nb);
+        ggml_set_name(rng, "rng");
+
+        ggml_tensor * out = nullptr;
+        if (heads) {
+            out = ggml_lightning_indexer_heads(ctx, q, k, rows, rng, n_win);
+        } else {
+            ggml_tensor * w = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, nh, nb);
+            ggml_set_name(w, "w");
+
+            out = ggml_lightning_indexer_rows(ctx, q, k, w, rows, rng, n_win);
+        }
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        std::mt19937 gen(1234);
+
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (strcmp(t->name, "rows") == 0) {
+                // some entries have no row, they are not scored
+                std::uniform_int_distribution<int32_t> dist(0, (int32_t) n_rows - 1);
+                std::vector<int32_t> data(n_list);
+                for (size_t i = 0; i < data.size(); ++i) {
+                    data[i] = i % 7 == 3 ? -1 : dist(gen);
+                }
+                ggml_backend_tensor_set(t, data.data(), 0, ggml_nbytes(t));
+            } else if (strcmp(t->name, "rng") == 0) {
+                // windows anywhere in the list: whole, partial, past the end of the list, and empty
+                std::vector<int32_t> data(3*nb);
+                for (int64_t i = 0; i < nb; ++i) {
+                    const int32_t w  = std::uniform_int_distribution<int32_t>(0, (int32_t) n_list - 1)(gen);
+                    const int32_t e  = (int32_t) std::min<int64_t>(w + n_win, n_list);
+                    int32_t       lo = std::uniform_int_distribution<int32_t>(w, e)(gen);
+                    int32_t       hi = std::uniform_int_distribution<int32_t>(lo, e)(gen);
+                    if (i % 4 == 0) {
+                        lo = w;
+                        hi = e;
+                    } else if (i % 4 == 1) {
+                        hi = lo;
+                    }
+                    data[3*i + 0] = w;
+                    data[3*i + 1] = lo;
+                    data[3*i + 2] = hi;
+                }
+                ggml_backend_tensor_set(t, data.data(), 0, ggml_nbytes(t));
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+};
+
+// GGML_OP_ARGSORT_OFF
+struct test_argsort_top_k_off : public test_case {
+    const std::array<int64_t, 4> ne;
+    const std::array<int64_t, 4> ne_off;
+    const int k;
+
+    std::string vars() override {
+        return VARS_TO_STR3(ne, ne_off, k);
+    }
+
+    double max_err() override {
+        return 0.0;
+    }
+
+    test_argsort_top_k_off(std::array<int64_t, 4> ne = {300, 8, 4, 1}, std::array<int64_t, 4> ne_off = {1, 1, 4, 1}, int k = 32)
+        : ne(ne), ne_off(ne_off), k(k) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * a = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne.data());
+        ggml_set_name(a, "a");
+
+        ggml_tensor * off = ggml_new_tensor(ctx, GGML_TYPE_I32, 4, ne_off.data());
+        ggml_set_name(off, "off");
+
+        ggml_tensor * out = ggml_cont(ctx, ggml_argsort_top_k_off(ctx, a, k, off));
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        std::mt19937 gen(1234);
+
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->type == GGML_TYPE_I32) {
+                std::vector<int32_t> data(ggml_nelements(t));
+                for (auto & v : data) {
+                    v = std::uniform_int_distribution<int32_t>(0, 1 << 20)(gen);
+                }
+                ggml_backend_tensor_set(t, data.data(), 0, ggml_nbytes(t));
+            } else if (t->type == GGML_TYPE_F32) {
+                // unique values, no ties
+                for (int64_t r = 0; r < ggml_nrows(t); r++) {
+                    std::vector<float> data(t->ne[0]);
+                    for (int64_t i = 0; i < t->ne[0]; i++) {
+                        data[i] = (float) i;
+                    }
+                    std::shuffle(data.begin(), data.end(), gen);
+                    ggml_backend_tensor_set(t, data.data(), r*t->nb[1], t->ne[0]*sizeof(float));
+                }
+            }
+        }
+    }
+};
+
 // Deserializable generic test case
 struct input_tensor {
     ggml_type type;
@@ -11354,6 +11496,27 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     for (int kv : { 1, 7, 8, 63, 64, 65 }) {
         for (ggml_type type_K : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_0, GGML_TYPE_Q4_1, GGML_TYPE_Q4_0}) {
             test_cases.emplace_back(new test_lightning_indexer(128, 64, kv, 32, 4, 1, type_K));
+        }
+    }
+
+    // the windows of a list of rows, for DSA, DSV4 (weights) and MSA (heads)
+    for (ggml_type type_K : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
+        for (auto [n_list, n_win] : { std::pair{300, 256}, std::pair{1000, 64}, std::pair{70, 130} }) {
+            for (int nb : { 1, 16, 77 }) {
+                for (int nh : { 32, 64 }) {
+                    test_cases.emplace_back(new test_lightning_indexer_win(nh, 512, n_list, n_win, nb, type_K, false));
+                }
+                for (int nh : { 1, 4, 8 }) {
+                    test_cases.emplace_back(new test_lightning_indexer_win(nh, 512, n_list, n_win, nb, type_K, true));
+                }
+            }
+        }
+    }
+
+    // the top-k of the windows, as entries of the list
+    for (int ncols : { 7, 300, 2048, 5000 }) {
+        for (auto ne_off : { std::array<int64_t, 4>{1, 8, 4, 1}, std::array<int64_t, 4>{1, 1, 4, 1}, std::array<int64_t, 4>{1, 1, 1, 1} }) {
+            test_cases.emplace_back(new test_argsort_top_k_off({ncols, 8, 4, 1}, ne_off, std::min(ncols, 32)));
         }
     }
 

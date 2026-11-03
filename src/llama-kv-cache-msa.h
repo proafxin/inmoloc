@@ -80,6 +80,7 @@ public:
     uint32_t       get_n_seq_max() const { return n_seq_max; }
     uint32_t       get_n_swa()    const { return n_swa; }
     llama_swa_type get_swa_type() const { return swa_type; }
+    uint32_t       get_n_ctx_train() const { return hparams_idx.n_ctx_train; }
 
 private:
     // keep the indexer KV cache hparams instance here as llama_kv_cache stores only a reference
@@ -146,6 +147,21 @@ public:
     // positions without a cell map to cell 0, consumers must mask them assumes one sequence per stream
     void set_input_pos_slot(ggml_tensor * dst, const llama_ubatch * ubatch) const;
     void set_input_pos_mask(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+
+    // the elastic memory: the list of the slots of the sequences of the ubatch, one after the other, and the window of a
+    // token in it, which starts at the slots of its sequence; a sequence starts at the block of its first position p0,
+    // its position p is the slot base + p - p0; a reserve takes the most there can be
+    //   n_list: the slots of the list, a whole number of blocks
+    //   n_win:  the slots of a window, a whole number of blocks
+    void box_layout(const llama_ubatch & ubatch, int blk, int64_t & n_list, int64_t & n_win) const;
+
+    //   rows:   I32 [n_list, 1], the row of each slot
+    //   win:    I32 [3, n_tokens], the window of a token in rows and the slots it sees, see ggml_lightning_indexer_rows()
+    //   off:    I32 [1, 1, n_tokens], the block of rows the window starts at
+    //   bias:   F32 [n_win/blk, n_tokens], the blocks of the window a token always reads
+    //   q_base: I32 [2, n_tokens], the list of a token and where its range starts
+    void set_input_box(ggml_tensor * rows, ggml_tensor * win, ggml_tensor * off, ggml_tensor * bias, ggml_tensor * q_base,
+            const llama_ubatch * ubatch, int blk, int local) const;
 
 private:
     llama_kv_cache_msa * kv;
