@@ -249,8 +249,8 @@ llama_context::llama_context(
     }
 
     // the elastic memory is read by flash attention: there is nothing left to choose
-    cparams.flash_attn = params.elastic || params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED;
-    cparams.auto_fa    = !params.elastic && params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO;
+    cparams.flash_attn = true;
+    cparams.auto_fa    = false;
 
     // resolved with the fused ops, once flash attention is resolved
     cparams.kv_idx      = false;
@@ -300,8 +300,7 @@ llama_context::llama_context(
     }
 
     cparams.op_offload = params.op_offload;
-    cparams.kv_unified = params.kv_unified || params.elastic;
-    cparams.elastic    = params.elastic;
+    cparams.kv_unified = true;
     cparams.box_bytes  = params.box_bytes;
     cparams.box_deferred = params.box_deferred;
     cparams.box_draft  = params.box_draft;
@@ -992,8 +991,7 @@ uint32_t llama_context::n_seq_max_ubatch() const {
     // the elastic memory reads and writes the states in place, nothing per seq is reserved: the graphs are sized for the
     // most seqs a ubatch can hold, whatever the number of seqs that run at once (n_seq_max only caps the admission);
     // so is the draft context next to it, which decodes the same seqs
-    const bool elastic = (mem != nullptr && mem->get_box_shared() != nullptr) ||
-        (cparams.elastic && cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP);
+    const bool elastic = true;
     if (elastic) {
         return std::min(n_tokens_max, cparams.n_seq_max);
     }

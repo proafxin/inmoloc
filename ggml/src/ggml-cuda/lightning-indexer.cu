@@ -470,7 +470,13 @@ static __global__ void lightning_indexer_heads_kernel(
     float4 k_reg_f[K_VECS_PER_WARP];
     bool   k_in[K_VECS_PER_WARP];
 
-    constexpr dequantize_V_t dequantize_k = TYPE_K == GGML_TYPE_F32 ? nullptr : get_dequantize_V<TYPE_K, float, 4>();
+    constexpr dequantize_V_t dequantize_k = []() constexpr {
+        if constexpr (TYPE_K == GGML_TYPE_F32) {
+            return nullptr;
+        } else {
+            return get_dequantize_V<TYPE_K, float, 4>();
+        }
+    }();
 
 #pragma unroll
     for (int k = 0; k < K_VECS_PER_WARP; ++k) {

@@ -1329,7 +1329,7 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     const ggml_log_level log_level_fit = params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR;
 
     // the requests processed at once share one cache of n_ctx tokens
-    if (params.n_parallel > 1 || params.elastic) {
+    if (params.n_parallel > 1) {
         params.kv_unified  = true;
         cparams.kv_unified = true;
     }
@@ -1340,9 +1340,9 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
 
     // the elastic memory needs no dry run: all layers go on the device, and it is what the real context leaves of the
     // budget, allocated last; an MTP head keeps its tokens in it, also from a GGUF of its own
-    const bool box_direct = !model_only && params.elastic && (!has_draft || spec_mtp);
+    const bool box_direct = !model_only && (!has_draft || spec_mtp);
 
-    if (params.fit_params && !(params.elastic && !model_only)) {
+    if (params.fit_params && !(!model_only)) {
         COM_TRC("%s", "fitting params to device memory ...\n");
         COM_TRC("%s", "(for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)\n");
 
@@ -1955,7 +1955,6 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.op_offload        = !params.no_op_offload;
     cparams.swa_full          = params.swa_full;
     cparams.kv_unified        = params.kv_unified;
-    cparams.elastic           = params.elastic;
     cparams.box_bytes         = params.box_bytes;
     cparams.box_draft         = std::find(params.speculative.types.begin(), params.speculative.types.end(),
                                     COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();

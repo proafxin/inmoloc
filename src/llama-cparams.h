@@ -60,7 +60,6 @@ struct llama_cparams {
     bool warmup;             // TODO: remove [TAG_LLAMA_GRAPH_NO_WARMUP]
     bool op_offload;
     bool kv_unified;
-    bool elastic;            // the elastic memory, see llama_box
     size_t box_bytes;        // its size, 0 for n_ctx cells and n_rs_cells states
     bool box_deferred;       // box_bytes is its most, it is allocated by llama_memory_box_finalize()
     bool box_draft;          // an MTP draft keeps its tokens in its blocks

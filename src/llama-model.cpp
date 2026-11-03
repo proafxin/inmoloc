@@ -2251,7 +2251,7 @@ ggml_tensor * llama_model::get_rope_factors(const llama_cparams & cparams, int i
 static bool llama_model_mtp_in_box(const llama_memory_params & params, const llama_cparams & cparams) {
     const bool in_box = params.box && params.box->has_draft();
 
-    if (cparams.elastic && !in_box) {
+    if (!in_box) {
         throw std::runtime_error("the MTP draft keeps its tokens in the elastic memory of its target, which holds no MTP layers: "
                 "the target context has to be created for an MTP draft (box_draft)");
     }
@@ -2303,7 +2303,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         nullptr,
                         filter_idx,
                         nullptr,
-                        cparams.elastic,
+                        true,
                         cparams.box_bytes,
                         cparams.box_deferred);
             } break;
@@ -2364,7 +2364,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             filter_mla,
                             filter_lid,
                             nullptr,
-                            cparams.elastic,
+                            true,
                             cparams.box_bytes,
                             cparams.box_deferred,
                             cparams.box_draft,
@@ -2378,7 +2378,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                 if (hparams.indexer_top_k == 0) {
                     // full-attention checkpoint: no indexer, so no indexer key cache
                     std::shared_ptr<llama_box> box_own;
-                    if (cparams.elastic && !cparams.ctx_other) {
+                    if (!cparams.ctx_other) {
                         box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
                                 GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
                                 cparams.box_bytes, cparams.box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16, nullptr,
@@ -2426,7 +2426,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             nullptr,
                             filter_lid,
                             nullptr,
-                            cparams.elastic,
+                            true,
                             cparams.box_bytes,
                             cparams.box_deferred);
                 }
@@ -2486,7 +2486,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             filter_mla,
                             filter_lid,
                             nullptr,
-                            cparams.elastic,
+                            true,
                             cparams.box_bytes,
                             cparams.box_deferred,
                             cparams.box_draft,
@@ -2549,7 +2549,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             cparams.n_rs_seq,
                             nullptr,
                             nullptr,
-                            cparams.elastic,
+                            true,
                             cparams.box_bytes,
                             cparams.box_deferred,
                             cparams.n_batch,
@@ -2601,7 +2601,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                 if (llm_arch_is_recurrent(arch)) {
                     // the states are all the memory of the model: they hold the elastic memory
                     std::shared_ptr<llama_box> box_own;
-                    if (cparams.elastic) {
+                    if (true) {
                         box_own = llama_box_make(*this, GGML_TYPE_F16, GGML_TYPE_F16, 0,
                                 GGML_TYPE_F32, GGML_TYPE_F32, std::max((uint32_t) 1, cparams.n_rs_cells),
                                 cparams.n_rs_seq, cparams.rs_replay, cparams.offload_kqv,
@@ -2658,7 +2658,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 
                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
                         std::shared_ptr<llama_box> box_own;
-                        if (cparams.elastic && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
+                        if (params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
                             const auto & hp = hparams;
 
                             box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
@@ -2709,7 +2709,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* rs_replay         */ cparams.rs_replay,
                             /* offload           */ cparams.offload_kqv,
                             /* unified           */ cparams.kv_unified,
-                            /* use_box           */ cparams.elastic,
+                            /* use_box           */ true,
                             /* box_bytes         */ cparams.box_bytes,
                             /* box_deferred      */ cparams.box_deferred,
                             /* filter_attn       */ std::move(filter_attn),
@@ -2735,7 +2735,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* unified           */ cparams.kv_unified,
                             /* filter_attn       */ std::move(filter_attn),
                             /* filter_recr       */ std::move(filter_recr),
-                            /* use_box           */ cparams.elastic && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP,
+                            /* use_box           */ params.ctx_type != LLAMA_CONTEXT_TYPE_MTP,
                             /* box_bytes         */ cparams.box_bytes,
                             /* box_deferred      */ cparams.box_deferred,
                             /* box_draft         */ cparams.box_draft,
@@ -2812,7 +2812,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 
                             // both caches are the memory of the model: they hold the elastic memory
                             std::shared_ptr<llama_box> box_own;
-                            if (cparams.elastic && !cparams.ctx_other && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
+                            if (!cparams.ctx_other && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
                                 box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
                                         GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
                                         cparams.box_bytes, cparams.box_deferred, cparams.box_draft, cparams.box_draft_type_k, cparams.box_draft_type_v, cparams.box_draft_hparams,
@@ -2847,7 +2847,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         // this cache is all the memory of the model: it holds the elastic memory; a draft on a model of
                         // its own decodes next to a target that admits the requests, and has none
                         std::shared_ptr<llama_box> box_own;
-                        if (cparams.elastic && !in_box && !cparams.ctx_other && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
+                        if (!in_box && !cparams.ctx_other && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
                             box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
                                     GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
                                     cparams.box_bytes, cparams.box_deferred, cparams.box_draft, cparams.box_draft_type_k, cparams.box_draft_type_v, cparams.box_draft_hparams,
