@@ -457,6 +457,13 @@ llama_context::llama_context(
             }
         }
 
+        // a draft (a context next to another) keeps its tokens in the elastic memory of its target, there is no memory of
+        // its own to fall back to; the Gemma4 assistant only reads the memory of its target, see llama_kv_cache_iswa
+        if (params.ctx_other && !params_mem.box && model.arch != LLM_ARCH_GEMMA4_ASSISTANT && llama_get_memory(params.ctx_other)) {
+            throw std::runtime_error("a draft context keeps its tokens in the elastic memory of its target: create the target "
+                    "with box_draft and box_draft_model set to this model, or an MTP draft with box_draft");
+        }
+
         memory.reset(model.create_memory(params_mem, cparams));
 
         // the elastic memory: a box of blocks read through lists of its rows only, see llama_box

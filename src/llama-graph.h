@@ -420,18 +420,11 @@ public:
     ggml_tensor * self_kv_idx  = nullptr; // I32 [n_idx, n_group]
     ggml_tensor * self_q_rng   = nullptr; // I32 [3, n_batch]
 
-    // attention runs, empty when the whole ubatch attends the full view, see llama_kv_attn_run
-    // per run: the cell indices (I32 [n_idx]) and the mask (F16 [n_idx, t1 - t0, 1, 1]) of a copied gather run,
-    // nullptr otherwise; and the rows of the full mask for the tokens of the run, for a run that attends the full view
-    // or reads its cells in place, nullptr otherwise
-    // the views are made once for all layers: the scheduler copies every distinct input view to the device, so a
-    // view per layer would keep a copy of the same rows per layer
-    // a run of one sequence read in place has no mask: the prefix of its cells each token sees, I32 [t1 - t0], see
-    // ggml_flash_attn_ext_set_kv_rows_hi(); nullptr otherwise
+    // attention runs, empty when every token reads its range, see llama_kv_attn_run
+    // per gather run: the rows of its sequence (I32 [n_idx]) and the prefix of them each token sees (I32 [t1 - t0]),
+    // see ggml_flash_attn_ext_set_kv_rows_hi(); nullptr for a run read through ranges
     std::vector<llama_kv_attn_run> attn_runs;
     std::vector<ggml_tensor *>     attn_run_idxs;
-    std::vector<ggml_tensor *>     attn_run_mask;
-    std::vector<ggml_tensor *>     attn_run_mask_full;
     std::vector<ggml_tensor *>     attn_run_hi;
 
     // note: these have to be copies because in order to be able to reuse a graph, its inputs

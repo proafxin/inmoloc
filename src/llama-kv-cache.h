@@ -267,22 +267,13 @@ public:
     // the largest runs a ubatch of this size can have, for the graphs reserved at startup
     std::vector<llama_kv_attn_run> get_attn_runs_reserve(const llama_ubatch & ubatch, uint32_t n_kv, bool in_place, bool rest_indexed) const;
 
-    // whether this cache can gather the cells of a sequence at all; a copy needs F16/F32 cells, the backend checked the
-    // types of the cells read in place when it enabled cparams.kv_rows
+    // whether this cache can gather the cells of a sequence at all, the backend checked the types of the cells read in
+    // place when it enabled cparams.kv_rows
     bool attn_gather_ok(bool in_place) const;
 
-    // copies of the cells listed in idxs (I32 [n_idx]): [n_embd_head, n_head_kv, n_idx, 1], F32
-    ggml_tensor * get_k_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs, const slot_info & sinfo) const;
-    ggml_tensor * get_v_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs, const slot_info & sinfo) const;
-
-    // fill the cell indices and the mask of a gather run, the mask rows are taken from the full F16 mask [n_kv, n_tokens]
-    // a run of one sequence read in place takes its cells sorted by position and, in hi (I32 [n_tokens of the run]),
-    // the prefix of them each token sees, see ggml_flash_attn_ext_set_kv_rows_hi(); it has no mask
-    void set_input_attn_run(ggml_tensor * idxs, ggml_tensor * mask, ggml_tensor * hi, const ggml_fp16_t * full_mask, int64_t n_kv, const llama_ubatch * ubatch, const llama_kv_attn_run & run) const;
-
-    // the full F16 mask in host memory owned by the cache, for when no graph node reads the full mask tensor
-    // (every run is gathered) and so the tensor is not allocated
-    const ggml_fp16_t * fill_kq_mask_scratch(const llama_ubatch * ubatch, int64_t n_kv, bool causal_attn) const;
+    // fill a gather run: the rows of its sequence sorted by position and, in hi (I32 [n_tokens of the run]), the prefix
+    // of them each token sees, see ggml_flash_attn_ext_set_kv_rows_hi()
+    void set_input_attn_run(ggml_tensor * idxs, ggml_tensor * hi, const llama_ubatch * ubatch, const llama_kv_attn_run & run) const;
 
     // indexed attention, see ggml_flash_attn_ext_set_kv_idx()
     // each sequence of the ubatch is a group: the list of its cells sorted by position (then by the 2D position),
@@ -434,9 +425,6 @@ private:
     mutable attn_stats stats_attn;
     mutable bool       stats_read_by_graph = false;
 
-    // see fill_kq_mask_scratch()
-    mutable std::vector<ggml_fp16_t> kq_mask_scratch;
-
     // see set_input_kv_idx()
     mutable std::vector<llama_pos> kv_idx_pos;
 
@@ -563,13 +551,7 @@ public:
     // see llama_kv_cache::get_attn_runs()
     std::vector<llama_kv_attn_run> get_attn_runs(const llama_ubatch & ubatch, bool in_place, bool rest_indexed) const;
 
-    ggml_tensor * get_k_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs) const;
-    ggml_tensor * get_v_rows(ggml_context * ctx, int32_t il, ggml_tensor * idxs) const;
-
-    void set_input_attn_run(ggml_tensor * idxs, ggml_tensor * mask, ggml_tensor * hi, const ggml_fp16_t * full_mask, int64_t n_kv, const llama_ubatch * ubatch, const llama_kv_attn_run & run) const;
-
-    // see llama_kv_cache::fill_kq_mask_scratch()
-    const ggml_fp16_t * fill_kq_mask_scratch(const llama_ubatch * ubatch, bool causal_attn) const;
+    void set_input_attn_run(ggml_tensor * idxs, ggml_tensor * hi, const llama_ubatch * ubatch, const llama_kv_attn_run & run) const;
 
     // see llama_kv_cache::set_input_kv_idx()
     bool kv_idx_supported() const;

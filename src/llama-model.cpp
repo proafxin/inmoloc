@@ -2570,32 +2570,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             cparams.box_draft);
                 }
             } break;
-        case LLM_ARCH_DFLASH:
-            {
-                // DSV4 DSpark stages store a single MLA-style K per position (window = the draft ring)
-                if (hparams.dsv4_hc_mult > 0) {
-                    GGML_ASSERT(hparams.swa_type != LLAMA_SWA_TYPE_NONE);
-
-                    res = new llama_kv_cache_iswa(
-                            *this,
-                            params.type_k,
-                            params.type_v,
-                            !cparams.flash_attn,
-                            cparams.offload_kqv,
-                            params.swa_full,
-                            cparams.kv_unified,
-                            cparams.n_ctx_seq,
-                            cparams.n_seq_max,
-                            cparams.n_ubatch,
-                            1,
-                            nullptr,
-                            nullptr,
-                            nullptr,
-                            nullptr);
-                    break;
-                }
-            }
-            [[fallthrough]];
         // Models that need standard caching should rely on recurrent/hybrid
         // checks
         default:
