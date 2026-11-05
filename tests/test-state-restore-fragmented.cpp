@@ -18,7 +18,6 @@ int main(int argc, char ** argv) {
     common_params params;
 
     params.sampling.seed = 1234;
-    params.kv_unified = true;
     params.n_parallel = 3;
     params.n_ctx = 256;
 

@@ -1328,10 +1328,6 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
 
     const ggml_log_level log_level_fit = params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR;
 
-    // the requests processed at once share the one elastic memory
-    params.kv_unified  = true;
-    cparams.kv_unified = true;
-
     // with the cache sized by the budget, fit only places the layers: for the cache of one typical request, against the
     // budget and without a margin
     const bool fit_layers_only = params.vram_budget_ctx && !model_only;
@@ -1954,7 +1950,6 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.no_perf           = params.no_perf;
     cparams.op_offload        = !params.no_op_offload;
     cparams.swa_full          = params.swa_full;
-    cparams.kv_unified        = params.kv_unified;
     cparams.box_bytes         = params.box_bytes;
     cparams.box_draft         = std::find(params.speculative.types.begin(), params.speculative.types.end(),
                                     COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();

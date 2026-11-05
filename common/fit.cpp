@@ -193,9 +193,6 @@ static void common_params_fit_impl(
     uint32_t hp_nct = 0; // hparams.n_ctx_train
     uint32_t hp_nex = 0; // hparams.n_expert
 
-    // with non-unified kv, we need to take into account n_streams
-    // for example, if memory can hold more than model's trained context size, we must extend the n_ctx to hold enough n_streams
-    const uint32_t n_streams  = cparams->kv_unified ? 1 : std::max<uint32_t>(1, cparams->n_seq_max);
     const bool     n_ctx_auto = cparams->n_ctx == 0;
 
     dmds_t   dmds_extra;       // memory of the extra model, laid out on the devices of the main model
@@ -264,18 +261,13 @@ static void common_params_fit_impl(
     LOG_TRC("%s: getting device memory data for initial parameters:\n", __func__);
     dmds_t dmds_full = common_get_device_memory_data_impl(path_model, mparams, cparams, devs, hp_ngl, hp_nct, hp_nex, log_level);
 
-    // saturate instead of overflowing, this also preserves the UINT32_MAX sentinel of n_ctx_min:
-    const uint32_t n_ctx_max       = (uint32_t) std::min<uint64_t>(uint64_t(hp_nct)    * n_streams, UINT32_MAX);
-    const uint32_t n_ctx_min_total = (uint32_t) std::min<uint64_t>(uint64_t(n_ctx_min) * n_streams, UINT32_MAX);
+    // the sequences share one memory: the context is the trained one at most
+    const uint32_t n_ctx_max       = hp_nct;
+    const uint32_t n_ctx_min_total = n_ctx_min;
 
     // llama_context would use only hp_nct in total for n_ctx == 0, resolve the context before measuring anything else:
     if (n_ctx_auto) {
         cparams->n_ctx = n_ctx_max;
-        if (n_streams > 1) {
-            LOG_TRC("%s: context size unset and KV cache not unified -> using %" PRIu32 " for %" PRIu32 " sequences:\n",
-                __func__, n_ctx_max, n_streams);
-            dmds_full = common_get_device_memory_data_impl(path_model, mparams, cparams, devs, hp_ngl, hp_nct, hp_nex, log_level);
-        }
     }
     add_extra_memory(dmds_full);
 
@@ -426,8 +418,8 @@ static void common_params_fit_impl(
                         // linear interpolation between minimum and maximum context size:
                         cparams->n_ctx += (n_ctx_max - n_ctx_min_total) * (sum_used_target - sum_projected_used_min_ctx)
                             / (sum_projected_used - sum_projected_used_min_ctx);
-                        // round down context for CUDA backend, keep it divisible by the number of streams:
-                        const uint32_t align = 256 * n_streams;
+                        // round down context for CUDA backend
+                        const uint32_t align = 256;
                         cparams->n_ctx = std::max(cparams->n_ctx - cparams->n_ctx % align, n_ctx_min_total);
 
                         const int64_t bytes_per_ctx = (sum_projected_used - sum_projected_used_min_ctx) / (n_ctx_max - n_ctx_min_total);
@@ -1303,7 +1295,6 @@ bool common_budget_params(
             llama_context_params cpd = *extra->cparams;
             cpd.n_ctx      = cp.n_ctx;
             cpd.n_seq_max  = n_seq;
-            cpd.kv_unified = cp.kv_unified;
             cpd.ctx_other  = ctx;
 
             llama_context * ctx_dft = llama_init_from_model(extra->shares_model ? model : model_dft, cpd);

@@ -43,8 +43,6 @@ ggml_tensor * llm_build_rwkv6_base::build_rwkv6_time_mix(llm_graph_input_rs * in
     const auto n_head       = n_embd / head_size;
     const auto n_head_kv    = hparams.n_head_kv(il);
 
-    const auto kv_head = mctx_cur->get_head();
-
     const auto & layer = model.layers[il];
 
     bool is_qrwkv = layer.time_mix_first == nullptr;
@@ -141,8 +139,7 @@ ggml_tensor * llm_build_rwkv6_base::build_rwkv6_time_mix(llm_graph_input_rs * in
     cur       = ggml_view_1d(ctx0, wkv_output, n_embd * n_tokens, 0);
     wkv_state = ggml_view_1d(ctx0, wkv_output, n_embd * head_size * n_seqs, n_embd * n_tokens * sizeof(float));
 
-    ggml_build_forward_expand(gf, build_rs_store(inp, mctx_cur->get_s_l(il), wkv_state,
-                                                 hparams.n_embd_s() * kv_head * ggml_element_size(mctx_cur->get_s_l(il)), il));
+    ggml_build_forward_expand(gf, build_rs_store(inp, mctx_cur->get_s_l(il), wkv_state, il));
 
     if (!is_qrwkv) {
         // group norm with head_count groups

@@ -160,7 +160,6 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
                                                 llm_graph_input_rs * inp_recr,
                                                 int                  il) -> ggml_tensor * {
         const auto * mctx_cur = static_cast<const mem_hybrid_ctx *>(mctx)->get_recr();
-        const uint32_t kv_head      = mctx_cur->get_head();
         const int64_t  n_seq_tokens = ubatch.n_seq_tokens;
         const int64_t  n_seqs       = ubatch.n_seqs;
         GGML_ASSERT(n_seqs != 0);
@@ -207,14 +206,11 @@ llama_model_lfm2::graph<iswa>::graph(const llama_model & model, const llm_graph_
         // write conv states: slot 0 = the final state, slot s = the state s tokens back (partial rollback)
         const int64_t K         = hparams.causal_attn && cparams.n_rs_seq > 0 ? (int64_t) cparams.n_rs_seq + 1 : 1;
         const int64_t n_written = std::min<int64_t>(n_seq_tokens, K);
-        const auto    mem_size  = mctx_cur->get_size();
-        const size_t  row_size  = ggml_row_size(conv_state->type, (int64_t) d_conv * n_embd);
 
         for (int64_t slot = 0; slot < n_written; ++slot) {
             auto * conv_snap = ggml_view_3d(ctx0, bx, d_conv, bx->ne[1], bx->ne[2], bx->nb[1], bx->nb[2],
                                             (bx->ne[0] - d_conv - slot) * ggml_element_size(bx));
-            ggml_build_forward_expand(gf, build_rs_store(inp_recr, conv_state, conv_snap,
-                                                         ((size_t) slot * mem_size + kv_head) * row_size, il, (uint32_t) slot));
+            ggml_build_forward_expand(gf, build_rs_store(inp_recr, conv_state, conv_snap, il, (uint32_t) slot));
         }
 
         auto * conv_kernel = model.layers[il].shortconv.conv;

@@ -20,7 +20,6 @@ public:
                     ggml_type   type_k,
                     ggml_type   type_v,
                          bool   offload,
-                         bool   unified,
                      uint32_t   kv_size,
                      uint32_t   n_seq_max,
                      uint32_t   n_pad,
@@ -29,7 +28,6 @@ public:
         const layer_filter_cb & filter_mla,
         const layer_filter_cb & filter_lid,
         const  layer_reuse_cb & reuse,
-                         bool   use_box = false,
                        size_t   box_bytes = 0,
                          bool   box_deferred = false,
                          const llama_box_draft & box_draft = {},
@@ -89,7 +87,6 @@ public:
 private:
     // we keep indexer KV cache hparams instance here as llama_kv_cache stores only reference to it
     llama_hparams hparams_lid;
-    const uint32_t n_stream  = 1;
 
     std::unique_ptr<llama_kv_cache> kv_mla;
     std::unique_ptr<llama_kv_cache> kv_lid;

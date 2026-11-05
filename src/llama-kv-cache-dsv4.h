@@ -9,29 +9,13 @@
 #include <unordered_map>
 #include <vector>
 
+// the compressor state of a sequence is a state of the elastic memory, at pieces piece0, 2 per layer (kv, score)
 class llama_dsv4_comp_state {
 public:
-    using stream_copy_info = llama_kv_cache::stream_copy_info;
     using layer_id = uint32_t;
 
-    stream_copy_info sc_info;
-
-    llama_dsv4_comp_state(
-            const llama_model & model,
-            bool            offload,
-            bool            unified,
-            uint32_t        n_seq_max,
-            uint32_t        ratio,
-            uint32_t        state_size,
-            uint32_t        n_embd_state,
-            uint32_t        n_rs_seq,
-            const char    * name,
-        const llama_memory_i::layer_filter_cb & filter);
-
-    // the elastic memory: the state of a sequence is a state of the box, at pieces piece0, 2 per layer (kv, score)
     llama_dsv4_comp_state(
             llama_box * box,
-            uint32_t    n_layer,
             uint32_t    ratio,
             uint32_t    state_size,
             uint32_t    n_rs_seq,
@@ -41,27 +25,15 @@ public:
     // row r of plane (0 is the state, the others are the rollback snapshots) of box state s
     int32_t box_row(int32_t s, uint32_t plane, uint32_t r) const;
 
-    void clear(llama_seq_id seq_id, bool data);
-    void seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst);
-    void apply_copies(const stream_copy_info & sc_info) const;
-
-    uint32_t get_ratio()      const;
-    uint32_t get_state_size() const;
-    uint32_t get_n_stream()   const;
-    uint32_t get_n_rs_seq()   const;
-    uint32_t get_n_rows()     const;
+    uint32_t get_ratio()      const { return ratio; }
+    uint32_t get_state_size() const { return state_size; }
+    uint32_t get_n_rs_seq()   const { return n_rs_seq; }
 
     const std::vector<layer_id> & get_ils() const { return ils; }
 
-    std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const;
-
-    void state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags, const std::vector<uint32_t> & rs_idx) const;
-    void state_read (llama_io_read_i  & io, llama_seq_id seq_id, llama_state_seq_flags flags);
-
-    ggml_tensor * get_kv       (ggml_context * ctx, int32_t il) const;
-    ggml_tensor * get_score    (ggml_context * ctx, int32_t il) const;
-    ggml_tensor * get_kv_all   (ggml_context * ctx, int32_t il) const;
-    ggml_tensor * get_score_all(ggml_context * ctx, int32_t il) const;
+    // the pieces of the box that hold the states of every sequence
+    ggml_tensor * get_kv_all   (int32_t il) const;
+    ggml_tensor * get_score_all(int32_t il) const;
 
     ggml_tensor * cpy_kv   (ggml_context * ctx, ggml_tensor * cur, ggml_tensor * idxs, int32_t il) const;
     ggml_tensor * cpy_score(ggml_context * ctx, ggml_tensor * cur, ggml_tensor * idxs, int32_t il) const;
@@ -72,15 +44,10 @@ private:
 
         ggml_tensor * kv;
         ggml_tensor * score;
-
-        std::vector<ggml_tensor *> kv_stream;
-        std::vector<ggml_tensor *> score_stream;
     };
 
     const uint32_t ratio;
     const uint32_t state_size;
-    const uint32_t n_embd_state;
-    const uint32_t n_stream;
     const uint32_t n_rs_seq;
 
     llama_box * box    = nullptr;
@@ -88,13 +55,9 @@ private:
 
     std::vector<layer_id> ils;
 
-    std::vector<std::pair<ggml_context_ptr, ggml_backend_buffer_ptr>> ctxs_bufs;
-
     std::vector<layer> layers;
 
     std::unordered_map<int32_t, int32_t> map_layer_ids;
-
-    size_t total_size() const;
 };
 
 //
@@ -102,9 +65,9 @@ private:
 //
 
 // DSV4 uses a normal raw/SWA token cache plus compressed K-only block caches.
-// The compressed caches are storage only; DSV4-specific visibility and block
-// planning are handled by llama_kv_cache_dsv4_context / llm_graph_input_dsv4.
-// FIXME: currently the cache only supports non-unified mode even if unified flag is passed
+// The compressed rows and the compressor states are in the elastic memory; the compressed caches of one cell keep the
+// rotation matrices of the graph. DSV4-specific visibility and block planning are handled by
+// llama_kv_cache_dsv4_context / llm_graph_input_dsv4.
 // FIXME: we currently conflate token_pos and buffer contents. See https://github.com/ggml-org/llama.cpp/pull/25521#discussion_r3558173819
 
 class llama_kv_cache_dsv4 : public llama_memory_i {
@@ -115,7 +78,6 @@ public:
                     ggml_type   type_v,
                          bool   offload,
                          bool   swa_full,
-                         bool   unified,
                      uint32_t   kv_size,
                      uint32_t   n_seq_max,
                      uint32_t   n_ubatch,
@@ -123,7 +85,6 @@ public:
                      uint32_t   n_rs_seq,
         const layer_filter_cb & filter,
         const  layer_reuse_cb & reuse,
-                         bool   use_box = false,
                        size_t   box_bytes = 0,
                          bool   box_deferred = false,
                      uint32_t   n_batch = 0,
@@ -214,7 +175,8 @@ private:
     std::unique_ptr<llama_dsv4_comp_state> hca_state;
     std::unique_ptr<llama_dsv4_comp_state> lid_state;
 
-    void clear_compressed(llama_seq_id seq_id, bool data);
+    // frees the compressor state of seq_id (all for -1) unless an admitted request holds it
+    void clear_compressed(llama_seq_id seq_id);
 
     // the elastic memory, see llama_box; it holds raw blocks for the window of a sequence and compressed blocks for all
     // of its tokens; the caches of the compressed rows only keep their rotation matrices then
@@ -273,11 +235,9 @@ public:
 
     llama_kv_cache_dsv4_raw_context(
             llama_kv_cache_iswa * kv,
-            slot_info_vec_t sinfos_base_write,
-            slot_info_vec_t sinfos_swa_write,
-            slot_info_vec_t sinfos_swa_read,
-            std::vector<llama_ubatch> ubatches,
-            std::vector<llama_ubatch> ubatches_write);
+            slot_info_vec_t sinfos_base,
+            slot_info_vec_t sinfos_swa,
+            std::vector<llama_ubatch> ubatches);
 
     bool next() override;
     bool apply() override;
@@ -286,7 +246,6 @@ public:
     const llama_ubatch & get_ubatch() const override;
 
     uint32_t get_n_kv() const;
-    uint32_t get_n_write() const;
 
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
@@ -298,7 +257,6 @@ public:
     ggml_tensor * build_input_k_rot(ggml_context * ctx) const;
 
     void set_input_k_idxs(ggml_tensor * dst) const;
-    void set_input_kq_mask(ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
     void set_input_k_rot(ggml_tensor * dst) const;
 
 private:
@@ -306,10 +264,8 @@ private:
 
     llama_kv_cache * kv_swa = nullptr;
 
-    slot_info_vec_t sinfos_write;
-    slot_info_vec_t sinfos_read;
+    slot_info_vec_t sinfos;
     std::vector<llama_ubatch> ubatches;
-    std::vector<llama_ubatch> ubatches_write;
 
     const llama_memory_context_ptr ctx_base_mem;
     const llama_memory_context_ptr ctx_swa_mem;
@@ -323,21 +279,11 @@ private:
 // Keep a small context that exposes K tensors without generic apply() semantics.
 class llama_kv_cache_dsv4_comp_context {
 public:
-    using slot_info_vec_t = llama_kv_cache::slot_info_vec_t;
-
-    llama_kv_cache_dsv4_comp_context(llama_kv_cache * kv);
-
-    llama_kv_cache_dsv4_comp_context(
-            llama_kv_cache * kv,
-            slot_info_vec_t sinfos,
-            std::vector<llama_ubatch> ubatches);
-
-    bool next();
+    // the rows are in the box (the indexer rows when lid), kv only holds the rotation matrix; n_kv is the most rows a
+    // sequence holds
+    llama_kv_cache_dsv4_comp_context(llama_kv_cache * kv, llama_box * box, bool lid, uint32_t n_kv);
 
     uint32_t get_n_kv() const;
-
-    // the elastic memory: the rows are in the box, kv only holds the rotation matrix
-    void set_box(llama_box * box_in, bool lid_in, uint32_t n_kv_in) { box = box_in; lid = lid_in; n_kv = n_kv_in; }
 
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
@@ -351,17 +297,12 @@ private:
 
     llama_kv_cache * kv;
 
-    size_t i_cur = 0;
-    slot_info_vec_t sinfos;
-    std::vector<llama_ubatch> ubatches;
-
     uint32_t n_kv;
 };
 
 class llama_kv_cache_dsv4_context : public llama_memory_context_i {
 public:
     using slot_info_vec_t = llama_kv_cache::slot_info_vec_t;
-    using stream_copy_info = llama_kv_cache::stream_copy_info;
 
     struct comp_plan {
         // Per-ubatch recipe for updating compressor state, committing completed
@@ -378,7 +319,6 @@ public:
         // Device-side rollback restore copies snapshot planes back to the
         // current compressor-state plane before the graph reads it.
         std::vector<int32_t> state_restore_src_idxs;
-        std::vector<int32_t> state_restore_dst_idxs;
 
         // Device-side rollback snapshots copy rows from the graph-local
         // [persistent_state | current_ubatch_scratch] tensor into rollback
@@ -407,9 +347,6 @@ public:
         // memory, where the indexer list holds the sequences of the ubatch one after the other
         std::vector<int32_t> n_skip;
 
-        // Number of streams used by the attention graph for this ubatch.
-        int64_t n_stream = 1;
-
         // Graph-width for compressed rows. This can be larger than n_visible
         // so masked padding rows do not force a new graph at every CSA block.
         int64_t n_kv = 0;
@@ -423,18 +360,13 @@ public:
     llama_kv_cache_dsv4_context(
             llama_kv_cache_dsv4 * kv,
             llama_context * lctx,
-            bool optimize,
-            stream_copy_info sc_info_csa,
-            stream_copy_info sc_info_hca,
-            stream_copy_info sc_info_lid);
+            bool optimize);
 
     llama_kv_cache_dsv4_context(
             llama_kv_cache_dsv4 * kv,
-            slot_info_vec_t sinfos_raw_base_write,
-            slot_info_vec_t sinfos_raw_swa_write,
-            slot_info_vec_t sinfos_raw_swa_read,
-            std::vector<llama_ubatch> ubatches,
-            std::vector<llama_ubatch> ubatches_raw);
+            slot_info_vec_t sinfos_raw_base,
+            slot_info_vec_t sinfos_raw_swa,
+            std::vector<llama_ubatch> ubatches);
 
     virtual ~llama_kv_cache_dsv4_context();
 
@@ -468,7 +400,7 @@ public:
     const comp_plan & get_hca_plan(const llama_ubatch & ubatch) const;
     const comp_plan & get_lid_plan(const llama_ubatch & ubatch) const;
 
-    // the elastic memory, nullptr without it
+    // the elastic memory
     llama_box * get_box() const { return kv_box; }
 
     // the size of the lists of an attention of the elastic memory: raw rows, then compressed rows
@@ -514,11 +446,8 @@ private:
     llama_dsv4_comp_state * hca_state = nullptr;
     llama_dsv4_comp_state * lid_state = nullptr;
 
-    stream_copy_info sc_info_csa;
-    stream_copy_info sc_info_hca;
-    stream_copy_info sc_info_lid;
-
-    void box_set_comp();
+    static std::unique_ptr<llama_kv_cache_dsv4_comp_context> comp_context(
+            llama_kv_cache_dsv4 * kv, llama_kv_cache * kv_comp, bool lid, uint32_t ratio);
 
     bool reserve_plans = false;
     mutable comp_plan reserve_plan_csa;

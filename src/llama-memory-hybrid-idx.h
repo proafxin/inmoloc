@@ -35,8 +35,6 @@ public:
                  uint32_t   n_rs_seq,
                      bool   rs_replay,
                      bool   offload,
-                     bool   unified,
-                     bool   use_box,
                    size_t   box_bytes,
                      bool   box_deferred,
                             /* layer filters */
@@ -190,29 +188,25 @@ public:
     // nullptr with no indexer
     const llama_kv_cache_context * get_idx() const;
 
-    // streams in the current slot info, the `ns` of get_k/get_v; 1 if unified
-    uint32_t get_n_stream() const;
-
     // complete pools of kpool cells per sequence, scored as whole pools
     uint32_t get_n_kpool    () const; // padded pool count, where the last pool is always unused
     uint32_t get_n_kpool_new() const; // pools to re-pool this ubatch, padded to a stable bound, never below 1
     kpool_access get_kpool_access(ggml_context * ctx, int32_t il, int64_t n_embd) const;
     // new_pool_pos (I32 [4*n_new]): M-RoPE position of each new pool's first member, for pooled keys rotated at pooling time
-    // sel_rng (I32 [3, n_tokens]): with the elastic memory, the range of each token in its list of rows: [tail][top pools], the
-    // tail at the end of its slots, the live pools first; pool_idxs and tail_idxs then hold rows, not cells
+    // sel_rng (I32 [3, n_tokens]): the range of each token in its list of rows: [tail][top pools], the tail at the end of
+    // its slots, the live pools first; pool_idxs and tail_idxs hold rows of the elastic memory
     void set_input_kpool(ggml_tensor * pool_cells, ggml_tensor * pool_idxs, ggml_tensor * pool_mask, ggml_tensor * tail_idxs,
                          ggml_tensor * new_pool_idxs, ggml_tensor * new_pool_rep,
-                         const llama_ubatch * ubatch, ggml_tensor * new_pool_pos = nullptr, ggml_tensor * sel_rng = nullptr) const;
+                         const llama_ubatch * ubatch, ggml_tensor * new_pool_pos, ggml_tensor * sel_rng) const;
 
 private:
     llama_memory_hybrid_idx * mem = nullptr;
 
-    // streams per ubatch, read from the slot infos before ctx_idx takes them
-    // declared first, so it is initialised while sinfos_idx is still intact
-    const std::vector<uint32_t> ns_ubatch;
+    // the pools are tracked for the whole cache and the ubatches, not for an update
+    const bool kpool_on = false;
 
-    // the indexer cells of each ubatch, kept for pools in cache order (qwen4exp): token s*n + i of ubatch u sits in cell
-    // idxs[s][i] of stream strm[s] of sinfos_kpool[u], and several cells can share a position
+    // the indexer cells of each ubatch, kept for pools in cache order (qwen4exp): token i of ubatch u sits in cell idxs[i]
+    // of sinfos_kpool[u], and several cells can share a position
     const slot_info_vec_t sinfos_kpool;
 
     // null unless the model has an indexer
@@ -236,9 +230,6 @@ private:
     // whether this context tracks k-pool states
     bool kpool_track() const;
 
-    // the sequences whose pools a ubatch sees: those of the ubatch with the elastic memory, else all of them
+    // the sequences whose pools a ubatch sees: those of the ubatch
     std::vector<llama_seq_id> kpool_seqs(const llama_ubatch & ubatch) const;
-
-    // positions each sequence must re-pool from, cleared only after the first ubatch succeeds
-    llama_memory_hybrid_idx::stale_pos_t mem_idx_stale_batch;
 };

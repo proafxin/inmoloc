@@ -17,7 +17,6 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
                 ggml_type   type_k,
                 ggml_type   type_v,
                      bool   offload,
-                     bool   unified,
                  uint32_t   kv_size,
                  uint32_t   n_seq_max,
                  uint32_t   n_pad,
@@ -26,29 +25,25 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
     const layer_filter_cb & filter_mla,
     const layer_filter_cb & filter_lid,
     const  layer_reuse_cb & reuse,
-                     bool   use_box,
                    size_t   box_bytes,
                      bool   box_deferred,
                      const llama_box_draft & box_draft,
                      bool   box_swa) :
-    hparams_lid(model.hparams), n_stream(unified ? 1 : n_seq_max) {
+    hparams_lid(model.hparams) {
 
-    std::shared_ptr<llama_box> box_own;
-    if (use_box) {
-        // with a SWA cache next to it, the layers it does not filter are the layers of both
-        box_own = llama_box_make(model, type_k, type_v, kv_size, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
-                box_bytes, box_deferred, box_draft,
-                [&](int32_t il) { return box_swa || filter_mla == nullptr || filter_mla(il); }, nullptr,
-                box_layers_lid(model, type_k, filter_lid));
+    // with a SWA cache next to it, the layers it does not filter are the layers of both
+    std::shared_ptr<llama_box> box_own = llama_box_make(model, type_k, type_v, kv_size, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
+            box_bytes, box_deferred, box_draft,
+            [&](int32_t il) { return box_swa || filter_mla == nullptr || filter_mla(il); }, nullptr,
+            box_layers_lid(model, type_k, filter_lid));
 
-        kv_size = box_own->get_n_cells();
-    }
+    kv_size = box_own->get_n_cells();
 
     LLAMA_LOG_INFO("%s: creating main KV cache, size = %u cells\n", __func__, kv_size);
 
     kv_mla = std::make_unique<llama_kv_cache>(
             model, model.hparams, type_k, type_v,
-            offload, unified, kv_size, n_seq_max, n_pad,
+            offload, kv_size, n_seq_max, n_pad,
             n_swa, swa_type, nullptr, filter_mla, reuse, nullptr, "", nullptr, 0, nullptr, box_own);
 
     // we use llama_kv_cache for caching indexer keys
@@ -65,9 +60,9 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
 
     kv_lid = std::make_unique<llama_kv_cache>(
             model, hparams_lid, type_k, type_v,
-            offload, unified, kv_size, n_seq_max, n_pad,
+            offload, kv_size, n_seq_max, n_pad,
             n_swa, swa_type, nullptr, filter_lid, reuse, nullptr, "lid_",
-            box_own.get(), box_own ? (int32_t) model.hparams.n_layer_all : 0);
+            box_own.get(), (int32_t) model.hparams.n_layer_all);
 }
 
 std::vector<llama_box::attn_layer> llama_kv_cache_dsa::box_layers_lid(const llama_model & model, ggml_type type_k, const layer_filter_cb & filter_lid) {
@@ -146,7 +141,7 @@ llama_memory_context_ptr llama_kv_cache_dsa::init_batch(
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = n_stream == 1 ? balloc.split_simple(n_ubatch) : balloc.split_equal(n_ubatch, true, 0);
+            auto ubatch = balloc.split_simple(n_ubatch);
 
             if (ubatch.n_tokens == 0) {
                 break;

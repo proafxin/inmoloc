@@ -1576,8 +1576,7 @@ private:
         }
 
         // setup slots
-        SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d, kv_unified = '%s'\n",
-                params_base.n_parallel, n_ctx_slot(), params_base.kv_unified ? "true" : "false");
+        SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d\n", params_base.n_parallel, n_ctx_slot());
 
         // try speculative decoding
         if (ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
@@ -1733,13 +1732,7 @@ private:
                 SRV_WRN("%s", "--cache-idle-slots requires --cache-ram, disabling\n");
                 params_base.cache_idle_slots = false;
             } else {
-                if (params_base.kv_unified) {
-                    SRV_TRC("%s", "idle slots stay in memory, they are saved to prompt cache and cleared when the memory is needed\n");
-                } else {
-                    // without a unified KV cache, clearing a slot frees no reusable room, so we only
-                    // publish a RAM-cache copy of idle slots (their KV stays in VRAM) [TAG_IDLE_SLOT_CLEAR]
-                    SRV_TRC("%s", "idle slots will be saved to prompt cache upon starting a new task\n");
-                }
+                SRV_TRC("%s", "idle slots stay in memory, they are saved to prompt cache and cleared when the memory is needed\n");
                 SRV_DBG("%s", "__TEST_TAG_CACHE_IDLE_SLOTS_ENABLED__\n");
             }
         }
@@ -1978,7 +1971,7 @@ private:
                     continue;
                 }
 
-                const bool slot_empty = params_base.kv_unified && slot.prompt.n_tokens() == 0;
+                const bool slot_empty = slot.prompt.n_tokens() == 0;
                 if (ret && empty && !slot_empty) {
                     continue;
                 }
@@ -2028,7 +2021,7 @@ private:
             SLT_DBG(*ret, "%s", "not loading from the prompt cache, a slot in memory can share the prefix\n");
         } else {
             // idle slots in memory give up room for the load: its cells replace the ones of this slot
-            if (kv_preemption_enabled()) {
+            {
                 while (kv_cells_committed() - ret->prompt.n_tokens() + task.n_tokens() > kv_cells_total() &&
                        try_clear_idle_slot_rs(ret, "KV cells for a prompt cache load")) {
                 }
@@ -2051,10 +2044,6 @@ private:
 
     // return true if at least one slot has been cleared
     bool try_clear_idle_slots() {
-        if (!params_base.kv_unified) {
-            return false;
-        }
-
         return try_clear_idle_slot_rs(nullptr, "KV cells");
     }
 
@@ -2267,13 +2256,13 @@ private:
         int32_t  n_kv_offered = 0;
         uint32_t n_rs_offered = 0;
 
-        const int32_t  n_kv_avail = kv_preemption_enabled() ? kv_cells_avail() : 0;
+        const int32_t  n_kv_avail = kv_cells_avail();
         const uint32_t n_rs_avail = is_rs ? n_rs_cells_avail() : 0;
 
         std::vector<int> offer;
         for (const auto & w : waiting) {
             if (!all) {
-                if (kv_preemption_enabled() && n_kv_avail - n_kv_offered < w.n_kv_wait_at) {
+                if (n_kv_avail - n_kv_offered < w.n_kv_wait_at) {
                     continue;
                 }
                 if (is_rs && n_rs_avail < n_rs_offered + w.n_rs_need) {
@@ -2296,10 +2285,6 @@ private:
     // slots are preempted - their memory is freed and they are recomputed once there is room again -
     // instead of failing the decode for every active slot
     //
-
-    bool kv_preemption_enabled() const {
-        return params_base.kv_unified;
-    }
 
     int32_t kv_cells_total() const {
         if (box) {
@@ -2361,7 +2346,7 @@ private:
     }
 
     bool prefix_share_allowed(server_task_type type) const {
-        return params_base.prefix_share && params_base.kv_unified && !params_base.ctx_shift && type == SERVER_TASK_TYPE_COMPLETION;
+        return params_base.prefix_share && !params_base.ctx_shift && type == SERVER_TASK_TYPE_COMPLETION;
     }
 
     // a draft memory that can be cut at any position (a plain KV cache) needs no state in a checkpoint: seq_cp and
@@ -2734,7 +2719,7 @@ private:
 
         // the elastic memory admits a request with all it takes, so the running ones never need more than they hold and
         // reserve: nothing is preempted and the prompts hold their pages already
-        if (!kv_preemption_enabled() || box) {
+        if (box) {
             mem_offer_waiting(false);
             return;
         }
@@ -3877,7 +3862,7 @@ private:
     // now (counting what evicting idle slots frees), and n_rs_need recurrent-state cells
     void defer_task_mem(server_task && task, server_defer_reason reason, int32_t n_kv_need, int32_t n_kv_missing, uint32_t n_rs_need) {
         task.n_kv_need    = n_kv_need;
-        task.n_kv_wait_at = kv_preemption_enabled() && !box ? kv_cells_avail() + std::max(0, n_kv_missing) : 0;
+        task.n_kv_wait_at = !box ? kv_cells_avail() + std::max(0, n_kv_missing) : 0;
         task.n_rs_need    = n_rs_need;
         defer_task(std::move(task), reason);
     }
@@ -3937,7 +3922,7 @@ private:
                     int32_t n_reuse = n_own;
 
                     const server_slot * donor = nullptr;
-                    if (params_base.kv_unified && prefix_share_allowed(task.type) && task.params.lora.empty()) {
+                    if (prefix_share_allowed(task.type) && task.params.lora.empty()) {
                         prefix_share share;
                         donor = prefix_share_find(slot, task.tokens, n_reuse, share);
                         if (donor) {
@@ -4008,7 +3993,7 @@ private:
                     const int32_t n_need = std::max(0, task.n_tokens() - n_reuse) + n_gen - (slot->prompt.n_tokens() - n_own);
 
                     // the elastic memory is not predicted: see the admission below
-                    const bool kv_predict = kv_preemption_enabled() && !box;
+                    const bool kv_predict = !box;
 
                     // the running slots keep the room they are expected to generate into, see kv_cells_growth()
                     const int32_t n_growth = kv_cells_growth();
@@ -4125,19 +4110,7 @@ private:
                         break; // drop the task
                     }
 
-                    // with a unified KV cache, idle slots stay in memory until it is needed, see try_clear_idle_slot_rs()
-                    if (params_base.cache_idle_slots && !params_base.kv_unified) {
-                        for (auto & slot : slots) {
-                            if (!slot.is_processing()) {
-                                SLT_TRC(slot, "%s", "saving idle slot to prompt cache\n");
-
-                                if (slot.prompt_save(*prompt_cache)) {
-                                    SLT_DBG(slot, "%s", "__TEST_TAG_CACHE_IDLE_SLOT__\n");
-                                    prompt_cache->update();
-                                }
-                            }
-                        }
-                    }
+                    // idle slots stay in memory until it is needed, see try_clear_idle_slot_rs()
                 } break;
             case SERVER_TASK_TYPE_CANCEL:
                 {

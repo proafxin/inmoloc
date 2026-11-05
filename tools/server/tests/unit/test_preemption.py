@@ -21,7 +21,6 @@ def create_server():
     server.n_ctx = 512
     server.n_slots = N_REQUESTS
     server.n_predict = N_PREDICT
-    server.kv_unified = True
     server.server_metrics = True
     server.temperature = 0.0
     server.cache_ram = 0  # no RAM prompt cache: the cells come from the slots alone

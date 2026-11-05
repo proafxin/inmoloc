@@ -38,13 +38,11 @@ public:
                  uint32_t   n_rs_seq,
                      bool   rs_replay,
                      bool   offload,
-                     bool   unified,
                             /* layer filters */
     const layer_filter_cb & filter_attn = nullptr,
     const layer_filter_cb & filter_recr = nullptr,
-        // hold the KV cells and the states in one elastic memory, see llama_box, when the model can: kv_size is then the
-        // cells of the box and rs_size is ignored
-                     bool   use_box = false,
+        // the KV cells and the states are in one elastic memory, see llama_box: kv_size is the cells of the box when no
+        // bytes are given, and rs_size its states
         // the bytes of the box, 0 for kv_size cells and rs_size states, and the layer of an MTP draft kept in its blocks
                    size_t   box_bytes = 0,
                      bool   box_deferred = false,

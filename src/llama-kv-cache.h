@@ -20,50 +20,22 @@ struct llama_context;
 
 class llama_kv_cache : public llama_memory_i {
 public:
-    struct stream_copy_info {
-        bool empty() const {
-            assert(ssrc.size() == sdst.size());
-            return ssrc.empty();
-        }
-
-        std::vector<uint32_t> ssrc;
-        std::vector<uint32_t> sdst;
-    };
-
     // for each ubatch, create a slot_info that contains information about where the ubatch should be inserted in the
     //   KV cells. for example, cell indices for each token, such that: token[i] -> goes to cells[idxs[i]]
     struct slot_info {
         // data for ggml_set_rows
         using idx_vec_t = std::vector<uint32_t>;
 
-        // number of streams: ns = s1 - s0 + 1
-        uint32_t s0;
-        uint32_t s1;
-
-        std::vector<llama_seq_id> strm; // [ns]
-        std::vector<idx_vec_t>    idxs; // [ns]
+        idx_vec_t idxs;
 
         uint32_t head() const {
-            GGML_ASSERT(idxs.size() == 1);
-            GGML_ASSERT(!idxs[0].empty());
+            GGML_ASSERT(!idxs.empty());
 
-            return idxs[0][0];
-        }
-
-        void resize(size_t n) {
-            strm.resize(n);
-            idxs.resize(n);
+            return idxs[0];
         }
 
         size_t size() const {
-            GGML_ASSERT(idxs.size() == strm.size());
-            GGML_ASSERT(!idxs.empty());
-
-            return idxs[0].size();
-        }
-
-        size_t n_stream() const {
-            return strm.size();
+            return idxs.size();
         }
 
         bool empty() const {
@@ -76,15 +48,8 @@ public:
 
         // check if indices are contiguous starting from head()
         bool is_contiguous() const {
-            if (idxs.empty() || idxs[0].empty()) {
-                return true;
-            }
-            if (idxs.size() > 1) {
-                return false;
-            }
-            const uint32_t h = idxs[0][0];
-            for (size_t i = 0; i < idxs[0].size(); ++i) {
-                if (idxs[0][i] != h + i) {
+            for (size_t i = 0; i < idxs.size(); ++i) {
+                if (idxs[i] != idxs[0] + i) {
                     return false;
                 }
             }
@@ -103,7 +68,6 @@ public:
                     ggml_type   type_k,
                     ggml_type   type_v,
                          bool   offload,
-                         bool   unified,
                      uint32_t   kv_size,
                      uint32_t   n_seq_max,
                      uint32_t   n_pad,
@@ -165,9 +129,7 @@ public:
     //
 
     uint32_t get_size()     const;
-    uint32_t get_n_stream() const;
     uint32_t get_n_seq_max() const { return n_seq_max; }
-    uint32_t get_stream(llama_seq_id seq_id) const { return seq_to_stream.at(seq_id); }
 
     //
     // elastic memory, see llama_box
@@ -201,7 +163,7 @@ public:
     // the empty cells in the blocks of seq_id
     uint32_t box_seq_free(llama_seq_id seq_id) const;
 
-    // used cells summed over streams, and the largest used range (highest used cell + 1) of any stream
+    // used cells, and the used range (highest used cell + 1)
     void get_usage(uint32_t & n_used, uint32_t & n_span) const;
 
     // attention cost counters, accumulated over every KQ mask that was filled, in (token, cell) pairs:
@@ -229,18 +191,18 @@ public:
     std::vector<uint32_t> get_layer_ids() const;
     ggml_tensor * get_k_storage(int32_t il) const;
 
-    const llama_kv_cells & get_cells(llama_seq_id seq_id) const;
+    const llama_kv_cells & get_cells() const;
 
     // state_read, plus the cells the restored tokens were placed in
     // a cache that mirrors another one (the qwen4exp indexer) must not search for its own cells: two searches agree only by luck
-    //   sinfos_out: if set, filled with the layout used; a stream with no cells leaves an empty entry
-    //   sinfos_in : if set, the layout to use instead of searching. one entry per stream, cell count must match the blob
+    //   sinfo_out: if set, filled with the layout used; empty when the state has no cells
+    //   sinfo_in : if set, the layout to use instead of searching, cell count must match the blob
     void state_read_sinfo(
             llama_io_read_i & io,
                llama_seq_id   seq_id,
       llama_state_seq_flags   flags,
-          slot_info_vec_t *   sinfos_out,
-    const slot_info_vec_t *   sinfos_in);
+                slot_info *   sinfo_out,
+          const slot_info *   sinfo_in);
 
     // undo a state_read() of seq_id (-1 for the whole cache) that another memory module failed to complete
     void state_clear(llama_seq_id seq_id);
@@ -249,11 +211,11 @@ public:
     // graph_build API
     //
 
-    uint32_t get_n_kv(const slot_info & sinfo) const;
+    uint32_t get_n_kv() const;
 
     // get views of the current state of the cache
-    ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
-    ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+    ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv) const;
+    ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv) const;
 
     // split the ubatch into attention runs, see llama_kv_attn_run
     // returns an empty list when no run is worth gathering, i.e. the whole ubatch attends the full view
@@ -279,7 +241,6 @@ public:
     // and each token attends to the range of that list that the mask would keep
     // the attention reads only the cells of the sequence, and the host fills O(cells of the sequences + tokens)
     // instead of the O(tokens * n_kv) mask
-    bool kv_idx_supported() const;
 
     // shape of the index lists of the ubatch: [n_idx, n_group], padded so that graphs can be reused
     void get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const;
@@ -304,8 +265,8 @@ public:
     void fill_kv_idx(ggml_tensor * kv_idx, int32_t * rng, const llama_ubatch * ubatch, bool causal_attn) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
-    ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
-    ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const;
+    ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const;
+    ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
 
     //
     // preparation API
@@ -315,7 +276,7 @@ public:
     // return empty vector on failure
     slot_info_vec_t prepare(const std::vector<llama_ubatch> & ubatches);
 
-    bool update(llama_context * lctx, bool do_shift, const stream_copy_info & sc_info);
+    bool update(llama_context * lctx, bool do_shift);
 
     // find a slot of kv cells that can hold the ubatch
     // if cont == true, then the slot must be continuous
@@ -339,8 +300,6 @@ public:
     void set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ubatch, const slot_info & sinfo) const;
 
     void set_input_k_shift(ggml_tensor * dst) const;
-
-    void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
 
     void set_input_k_rot(ggml_tensor * dst) const;
     void set_input_v_rot(ggml_tensor * dst) const;
@@ -367,9 +326,6 @@ private:
 
         ggml_tensor * k;
         ggml_tensor * v;
-
-        std::vector<ggml_tensor *> k_stream;
-        std::vector<ggml_tensor *> v_stream;
     };
 
     // the elastic memory that holds the cells, nullptr when the cache has its own buffers
@@ -385,7 +341,6 @@ private:
     uint32_t box_keep = 0;
 
     uint32_t n_seq_max = 1;
-    const uint32_t n_stream  = 1;
 
     // required padding
     const uint32_t n_pad = 1;
@@ -416,17 +371,14 @@ private:
 
     // the current index from where we start searching for a free slot in the ring buffer of KV cells (see find_slot())
     // note: this is not part of the KV state and it's only used to speed-up the find_slot() method
-    std::vector<uint32_t> v_heads;
+    uint32_t head = 0;
 
-    // updated while filling KQ masks, see get_attn_stats()
+    // updated while filling the lists of the rows, see get_attn_stats()
     mutable attn_stats stats_attn;
     mutable bool       stats_read_by_graph = false;
 
     // see set_input_kv_idx()
     mutable std::vector<llama_pos> kv_idx_pos;
-
-    // fills a KQ mask [n_kv, n_tokens/n_stream, 1, n_stream] of type F16 or F32 at data
-    void fill_kq_mask(ggml_type type, void * data, int64_t n_kv, int64_t n_stream, const llama_ubatch * ubatch, bool causal_attn) const;
 
     // the cells of seq_id sorted by position (then by the 2D position), the order of the causal mask, with their positions
 
@@ -443,15 +395,9 @@ private:
     // TODO: temporary until we refactor to be able to share the same cells between 2 kv caches [TAG_KV_CACHE_SHARE_CELLS]
     llama_kv_cache * other;
 
-    std::shared_ptr<llama_kv_cells_vec> v_cells_impl;
+    std::shared_ptr<llama_kv_cells> cells_impl;
 
-    llama_kv_cells_vec & v_cells;
-
-    // maps from a sequence id to a stream id
-    std::vector<uint32_t> seq_to_stream;
-
-    // pending stream copies that will be applied during the next update
-    stream_copy_info sc_info;
+    llama_kv_cells & cells;
 
     std::vector<kv_layer> layers;
 
@@ -479,8 +425,6 @@ private:
                   llama_context * lctx) const;
 
     struct cell_ranges_t {
-        uint32_t strm;
-
         std::vector<std::pair<uint32_t, uint32_t>> data; // ranges, from inclusive, to exclusive
     };
 
@@ -488,17 +432,16 @@ private:
     void state_write_data(llama_io_write_i & io, const cell_ranges_t & cr) const;
 
     // sinfo_in, when set, replaces the find_slot call: the cells are given by the caller
-    bool state_read_meta(llama_io_read_i & io, uint32_t strm, uint32_t cell_count,       slot_info & sinfo, llama_seq_id dest_seq_id = -1, const slot_info * sinfo_in = nullptr);
-    bool state_read_data(llama_io_read_i & io, uint32_t strm, uint32_t cell_count, const slot_info & sinfo);
+    bool state_read_meta(llama_io_read_i & io, uint32_t cell_count,       slot_info & sinfo, llama_seq_id dest_seq_id = -1, const slot_info * sinfo_in = nullptr);
+    bool state_read_data(llama_io_read_i & io, uint32_t cell_count, const slot_info & sinfo);
 
-    void state_clear(llama_seq_id seq_id, uint32_t strm, const slot_info & sinfo);
+    void state_clear(llama_seq_id seq_id, const slot_info & sinfo);
 };
 
 class llama_kv_cache_context : public llama_memory_context_i {
 public:
     // some shorthands
     using slot_info_vec_t  = llama_kv_cache::slot_info_vec_t;
-    using stream_copy_info = llama_kv_cache::stream_copy_info;
 
     // used for errors
     llama_kv_cache_context(llama_memory_status status);
@@ -511,8 +454,7 @@ public:
     llama_kv_cache_context(
             llama_kv_cache * kv,
             llama_context * lctx,
-            bool do_shift,
-            stream_copy_info sc_info);
+            bool do_shift);
 
     // used to create a batch processing context from a batch
     llama_kv_cache_context(
@@ -551,7 +493,6 @@ public:
     void set_input_attn_run(ggml_tensor * idxs, ggml_tensor * hi, const llama_ubatch * ubatch, const llama_kv_attn_run & run) const;
 
     // see llama_kv_cache::set_input_kv_idx()
-    bool kv_idx_supported() const;
     void get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const;
     uint32_t kv_idx_planes() const;
     void set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const;
@@ -561,9 +502,6 @@ public:
 
     // see llama_kv_cache::get_n_win(); a reserve takes the most a sequence holds
     uint32_t get_n_win(const llama_ubatch & ubatch) const;
-
-    // whether the cells are in the elastic memory, see llama_box
-    bool has_box() const;
 
     // see llama_kv_cache::attn_read_counted_by_graph()
     void attn_read_counted_by_graph() const;
@@ -583,8 +521,6 @@ public:
     ggml_tensor * cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il) const;
 
     // create destination indices for each head of the current batch for where it would be written in the KV cache
-    // the indices address the global KV cache (not per stream) - this is not relevant for the user of this API, but
-    //   helps understand the implementation logic of cpy_k and cpy_v
     ggml_tensor * build_input_k_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const;
     ggml_tensor * build_input_v_idxs(ggml_context * ctx, const llama_ubatch & ubatch) const;
 
@@ -595,7 +531,6 @@ public:
     void set_input_v_idxs(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
     void set_input_k_shift   (ggml_tensor * dst) const;
-    void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
 
     void set_input_k_rot(ggml_tensor * dst) const;
     void set_input_v_rot(ggml_tensor * dst) const;
@@ -617,8 +552,6 @@ private:
     //
 
     bool do_shift = false;
-
-    stream_copy_info sc_info;
 
     //
     // batch processing context

@@ -25,7 +25,6 @@ def create_server():
     server.temperature = 0.0
     server.server_slots = True
     server.cache_ram = 100
-    server.kv_unified = True
     server.debug = True
     fd, server.log_path = tempfile.mkstemp(suffix='.log')
     os.close(fd)

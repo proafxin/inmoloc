@@ -68,7 +68,6 @@ static llama_context * make_ctx(const common_params & params, llama_model * mode
     cparams.n_ctx      = 512;
     cparams.n_batch    = 256;
     cparams.n_ubatch   = 256;
-    cparams.kv_unified = true;
 
     llama_context * ctx = llama_init_from_model(model, cparams);
     if (ctx == nullptr || fill == 0) {

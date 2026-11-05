@@ -278,7 +278,6 @@ llama_model_minimax_01::graph::graph(const llama_model & model, const llm_graph_
             // lightning attention layer
 
             const auto * mctx_cur = inp_rs->mctx;
-            const auto kv_head = mctx_cur->get_head();
 
             // TODO unneeded - any way to make conv states optional in recurrent memory?
             ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
@@ -388,8 +387,7 @@ llama_model_minimax_01::graph::graph(const llama_model & model, const llm_graph_
             }
 
             // store new KV
-            ggml_build_forward_expand(gf, build_rs_store(inp_rs, la_states_all, kv_new,
-                                                         kv_head * hparams.n_embd_s() * ggml_element_size(la_states_all), il));
+            ggml_build_forward_expand(gf, build_rs_store(inp_rs, la_states_all, kv_new, il));
 
             qkv = ggml_cont(ctx0, ggml_permute(ctx0, qkv, 0, 2, 1, 3));
             cb(qkv, "qkv_permuted", il);

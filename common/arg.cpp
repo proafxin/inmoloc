@@ -1704,25 +1704,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LOCAL_INFERENCE_ARG_CACHE_RAM").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
-        {"-kvu", "--kv-unified"},
-        {"-no-kvu", "--no-kv-unified"},
-        "use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto)",
-        [](common_params & params, bool value) {
-            params.kv_unified = value;
-        }
-    ).set_env("LOCAL_INFERENCE_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_BATCHED, LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_PARALLEL}));
-    add_opt(common_arg(
-        {"-kvu", "--kv-unified"},
-        {"-no-kvu", "--no-kv-unified"},
-        "the requests processed at once always share one KV cache: --kv-unified is accepted, --no-kv-unified is refused",
-        [](common_params & params, bool value) {
-            if (!value) {
-                throw std::invalid_argument("error: the server always shares one KV cache between the requests it processes at once, --no-kv-unified is not supported\n");
-            }
-            params.kv_unified = true;
-        }
-    ).set_env("LOCAL_INFERENCE_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_SERVER}));
-    add_opt(common_arg(
         {"--max-output-tokens"}, "N",
         "required with the elastic memory: the most tokens a request generates; a request's max_tokens is capped at it, "
         "and a request without max_tokens uses it",

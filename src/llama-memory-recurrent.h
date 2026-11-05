@@ -21,16 +21,11 @@ class llama_memory_recurrent : public llama_memory_i {
 public:
     llama_memory_recurrent(
             const llama_model & model,
-                    ggml_type   type_r,
-                    ggml_type   type_s,
-                         bool   offload,
-                     uint32_t   mem_size,
-                     uint32_t   n_seq_max,
                      uint32_t   n_rs_seq,
                          bool   rs_replay_req, // replay if the model supports it, see rs_replay
         const layer_filter_cb & filter,
-        // the elastic memory that holds the states, see llama_box: mem_size is its pages then
-                    llama_box * box = nullptr,
+        // the elastic memory that holds the states, see llama_box: a cell is a state of it
+                    llama_box * box,
         // the elastic memory this memory owns, a model whose only memory is the recurrent states
         std::shared_ptr<llama_box> box_own = nullptr);
 
@@ -69,7 +64,7 @@ public:
 
     bool prepare(const std::vector<llama_ubatch> & ubatches);
 
-    // find a contiguous slot of memory cells and emplace the ubatch there
+    // sets up the states the step reads and writes, see box_src and box_dst
     bool find_slot(const llama_ubatch & ubatch);
 
     bool get_can_shift() const override;
@@ -111,57 +106,21 @@ public:
     // per seq: the tokens of the last cached step that are in the sequence but not yet in the scan state
     std::vector<uint32_t> n_pend;
 
-    // per seq, set by find_slot() for the step being computed: the row its replay reads and how many tokens
-    std::vector<uint32_t> x_rd;
+    // per seq, set by find_slot() for the step being computed: how many tokens its replay reads
     std::vector<uint32_t> n_rep;
-
-    // input-cache rows to copy before the next step, when a seq takes over the pending tokens of another one
-    // (seq_cp, or a step decoding several seqs at once); applied by the next memory update, see init_update()
-    struct x_copy {
-        llama_seq_id dst;
-        uint32_t     row_src;
-        uint32_t     row_dst;
-    };
-
-    std::vector<x_copy> x_copies;
 
     // number of token slots in the input cache of a seq: a speculative step is at most this long
     uint32_t n_x() const {
         return rs_replay ? n_rs_seq + 1 : 0;
     }
 
-    uint32_t x_row(llama_seq_id seq_id, uint32_t half) const {
-        return half*n_seq_max + (uint32_t) seq_id;
-    }
-
-    // the row that holds the pending inputs of a seq, which is another seq's while a copy into it is queued
-    uint32_t x_row_pend(llama_seq_id seq_id) const;
-
-    // the seq whose rows a cell's replay reads and writes
-    llama_seq_id x_seq(uint32_t i) const {
-        return cells[i].seq_id.empty() ? -1 : *cells[i].seq_id.begin();
-    }
-
-    // copies the input-cache row of seq src into the half of seq dst that holds its pending inputs
-    void x_copy_queue(llama_seq_id src, llama_seq_id dst);
-
-    // applies the queued copies, after the computation that writes their source rows
-    void x_copy_apply(llama_context * lctx);
-
-    // drops the queued copies into seq_id (all when negative)
-    void x_copy_drop(llama_seq_id seq_id);
-
     // computed before each graph build
     uint32_t n = 0;
-
-    // first zero-ed state
-    int32_t rs_z = -1;
 
     // TODO: optimize for recurrent state needs
     struct mem_cell {
         llama_pos pos  = -1;
         int32_t   src  = -1; // used to know where states should be copied from
-        int32_t   src0 = -1; // like src, but only used when setting the inputs (allowing to copy once)
 
         std::set<llama_seq_id> seq_id;
 
@@ -233,8 +192,6 @@ public:
     // the state of an emptied cell goes back to the box
     void box_cell_freed(uint32_t i);
 
-    bool box_find_slot(const llama_ubatch & ubatch);
-
     // per layer
     std::vector<ggml_tensor *> r_l;
     std::vector<ggml_tensor *> s_l;
@@ -250,22 +207,13 @@ private:
 
     uint32_t n_seq_max = 1;
 
-    // ggml contexts for the KV cache along with the allocated backend buffers:
-    std::vector<std::pair<ggml_context_ptr, ggml_backend_buffer_ptr>> ctxs_bufs;
-
-    size_t total_size() const;
-
-    size_t size_r_bytes() const;
-    size_t size_s_bytes() const;
-    size_t size_p_bytes() const;
-
     void state_write_meta(llama_io_write_i & io, const std::vector<std::pair<uint32_t, uint32_t>> & cell_ranges, llama_seq_id seq_id = -1) const;
     void state_write_data(llama_io_write_i & io, const std::vector<std::pair<uint32_t, uint32_t>> & cell_ranges, const std::vector<std::pair<uint32_t, uint32_t>> & cell_ranges_s) const;
 
     bool state_read_meta(llama_io_read_i & io, uint32_t cell_count, llama_seq_id dest_seq_id = -1);
     bool state_read_data(llama_io_read_i & io, uint32_t cell_count);
 
-    void state_clear(llama_seq_id seq_id, uint32_t cell_head, uint32_t cell_count);
+    void state_clear(llama_seq_id seq_id);
 
     // the pending tokens of each seq and their cached inputs, see rs_replay
     void state_write_pend(llama_io_write_i & io, llama_seq_id seq_id) const;
@@ -280,11 +228,6 @@ public:
     // used to create a full-cache context
     llama_memory_recurrent_context(
             llama_memory_recurrent * mem);
-
-    // used to create an update context, which applies the queued input-cache copies
-    llama_memory_recurrent_context(
-            llama_memory_recurrent * mem,
-                     llama_context * lctx);
 
     // used to create a batch processing context from a batch
     llama_memory_recurrent_context(
@@ -307,11 +250,6 @@ public:
     // llama_memory_recurrent_context specific API
     //
 
-    uint32_t get_n_rs() const;
-    uint32_t get_head() const;
-    int32_t  get_rs_z() const;
-    uint32_t get_size() const;
-
     ggml_tensor * get_r_l(int32_t il) const;
     ggml_tensor * get_s_l(int32_t il) const;
     ggml_tensor * get_p_l(int32_t il) const;
@@ -322,21 +260,12 @@ public:
     // number of token slots in the input cache, 0 when it is not used
     uint32_t get_n_x() const;
 
-    // the row of the scan state of the i-th cell, which has no snapshots when a rollback replays instead
-    int32_t s_copy_plain(int i) const;
-
-    // whether t is one of the scan-state tensors, which are read with s_copy_plain()
+    // whether t is one of the scan-state or conv history tensors, which have rows of their own in the box
     bool is_s_l(const ggml_tensor * t) const;
     bool is_p_l(const ggml_tensor * t) const;
 
-    // rows of the input cache read by the replay of this step, and written by it
-    int32_t x_read (int i) const;
-    int32_t x_write(int i) const;
-
-    // tokens replayed by the i-th cell of the ubatch before the tokens of this step
+    // tokens replayed by the i-th seq of the ubatch before the tokens of this step
     uint32_t replay_n(int i) const;
-
-    int32_t s_copy(int i) const;
 
     //
     // the elastic memory, see llama_memory_recurrent::box
@@ -353,7 +282,6 @@ public:
         BOX_C_WRITE, // conv history row k of the state written
     };
 
-    bool     is_box() const;
     uint32_t get_n_rs_seq() const;
 
     // the recurrent layers of the box, and the index of model layer il among them
@@ -370,9 +298,6 @@ private:
     const llama_memory_status status;
 
     llama_memory_recurrent * mem;
-
-    // set for an update context
-    llama_context * lctx = nullptr;
 
     size_t i_next = 0;
 

@@ -19,7 +19,6 @@ public:
                     ggml_type   type_v,
                          bool   offload,
                          bool   swa_full,
-                         bool   unified,
                      uint32_t   kv_size,
                      uint32_t   n_seq_max,
                      uint32_t   n_ubatch,
@@ -41,7 +40,6 @@ public:
                     ggml_type   type_v,
                          bool   offload,
                          bool   swa_full,
-                         bool   unified,
                      uint32_t   kv_size,
                      uint32_t   n_seq_max,
                      uint32_t   n_ubatch,
@@ -105,8 +103,6 @@ public:
     llama_kv_cache * get_swa () const;
 
 private:
-    const bool unified;
-
     std::unique_ptr<llama_kv_cache> kv_base;
     std::unique_ptr<llama_kv_cache> kv_swa;
 };

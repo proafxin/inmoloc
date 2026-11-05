@@ -8,8 +8,7 @@
 
 // uses two instances of llama_kv_cache, one for K/V tensors, and one for the MSA indexer tensors
 // both receive identical sequence operations and identical ubatches, so their cell layouts stay in synced.
-// the context also exposes per-ubatch pos - cell translation maps populated from llama_kv_cells via
-// llama_kv_cache::get_cells(), which the model graph uses to run MSA block selection in position space
+// the context lays out the rows of the sequences of a ubatch in the elastic memory, see set_input_box()
 
 class llama_kv_cache_msa : public llama_memory_i {
 public:
@@ -18,7 +17,6 @@ public:
                     ggml_type   type_k,
                     ggml_type   type_v,
                          bool   offload,
-                         bool   unified,
                      uint32_t   kv_size,
                      uint32_t   n_seq_max,
                      uint32_t   n_pad,
@@ -27,7 +25,6 @@ public:
         const layer_filter_cb & filter,
         const layer_filter_cb & filter_idx,
         const  layer_reuse_cb & reuse,
-                         bool   use_box = false,
                        size_t   box_bytes = 0,
                          bool   box_deferred = false);
 
@@ -85,7 +82,6 @@ private:
     // keep the indexer KV cache hparams instance here as llama_kv_cache stores only a reference
     llama_hparams hparams_idx;
 
-    const uint32_t n_stream  = 1;
     const uint32_t n_seq_max = 1;
     const uint32_t n_pad     = 1;
 
@@ -134,18 +130,6 @@ public:
 
     const llama_kv_cache_context * get_base() const;
     const llama_kv_cache_context * get_idx () const;
-
-    // max position currently present in the cache plus one, padded MSA blocks are defined over token positions
-    // so the block-selection tensors are sized by this value rather than by the number of cells
-    uint32_t get_n_pos() const;
-
-    // position <-> cell translation maps, populated from the base cache cells
-    // the model graph relates cache contents to token positions only through these per ubatch inputs
-    // value for empty or other-sequence cells is 0 so consumers must mask them
-    void set_input_cell_pos(ggml_tensor * dst, const llama_ubatch * ubatch, int32_t div) const;
-    // positions without a cell map to cell 0, consumers must mask them assumes one sequence per stream
-    void set_input_pos_slot(ggml_tensor * dst, const llama_ubatch * ubatch) const;
-    void set_input_pos_mask(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
     // the elastic memory: the list of the slots of the sequences of the ubatch, one after the other, and the window of a
     // token in it, which starts at the slots of its sequence; the cell of rank r of a sequence (causal order) is the slot

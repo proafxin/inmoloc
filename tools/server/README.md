@@ -162,7 +162,6 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `-ctxcp, --ctx-checkpoints, --swa-checkpoints N` | max number of context checkpoints to create per slot (default: 32)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)<br/>(env: LOCAL_INFERENCE_ARG_CTX_CHECKPOINTS) |
 | `-cms, --checkpoint-min-step N` | minimum spacing between context checkpoints in tokens (default: 8192, 0 = no minimum)<br/>(env: LOCAL_INFERENCE_ARG_CHECKPOINT_MIN_SPACING_NT) |
 | `-cram, --cache-ram N` | set the maximum cache size in MiB (default: 8192, -1 - no limit, 0 - disable)[(more info)](https://github.com/ggml-org/llama.cpp/pull/16391)<br/>(env: LOCAL_INFERENCE_ARG_CACHE_RAM) |
-| `-kvu, --kv-unified, -no-kvu, --no-kv-unified` | the requests processed at once always share one KV cache: --kv-unified is accepted, --no-kv-unified is refused<br/>(env: LOCAL_INFERENCE_ARG_KV_UNIFIED) |
 | `--prefix-share, --no-prefix-share` | let a new request start from the memory of another slot that holds the same prefix (default: enabled) |
 | `--prefix-share-min N` | the least gain in tokens worth sharing a prefix from another slot (default: 256) |
 | `--slow-loop-ms N` | log a time breakdown of server loop iterations that take longer than N ms (default: 1000, 0 = off) |

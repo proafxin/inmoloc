@@ -69,8 +69,7 @@ struct llama_cparams {
     bool no_perf;
     bool warmup;             // TODO: remove [TAG_LLAMA_GRAPH_NO_WARMUP]
     bool op_offload;
-    bool kv_unified;
-    size_t box_bytes;        // its size, 0 for n_ctx cells and n_rs_cells states
+    size_t box_bytes;       // its size, 0 for n_ctx cells and n_rs_cells states
     bool box_deferred;       // box_bytes is its most, it is allocated by llama_memory_box_finalize()
     llama_box_draft box_draft; // the draft whose tokens the blocks keep
     bool pipeline_parallel;

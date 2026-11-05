@@ -295,31 +295,16 @@ public:
     // like can_reuse, for the wrappers that hold this input next to an attention one
     bool can_reuse_impl(const llm_graph_params & params, const llama_memory_recurrent_context * mctx_cur);
 
-    ggml_tensor * s_copy;  // I32 [n_rs]
-
-    // views of s_copy, computed once per graph
-    // and shared across layers which use build_rs
-    ggml_tensor * s_copy_main; // I32 [n_seqs]
-    ggml_tensor * s_copy_tail; // I32 [n_rs - 1]
-
-    // rows of the scan state, which has no snapshots when a rollback replays the cached inputs, so they are the
-    // source cells themselves, without the rollback index of s_copy
-    ggml_tensor * rs_s_copy       = nullptr; // I32 [n_rs]
-    ggml_tensor * rs_s_copy_main  = nullptr; // I32 [n_seqs]
-    ggml_tensor * rs_s_copy_tail  = nullptr; // I32 [n_rs - 1]
-
-    // rows of the cached scan inputs, see llama_memory_recurrent::rs_replay
-    // nullptr when the rollback keeps a state snapshot per draft position instead
-    ggml_tensor * rs_x_read  = nullptr; // I32 [n_seqs]        rows a replay reads
-    ggml_tensor * rs_x_write = nullptr; // I32 [n_seqs]        rows this step writes
+    // the cached scan inputs, see llama_memory_recurrent::rs_replay: nullptr when the rollback keeps a state snapshot per
+    // draft position instead
     ggml_tensor * rs_x_mask  = nullptr; // F32 [1, 1, n_replay, n_seqs] 1 for replayed tokens, 0 for padding
 
     // token slots the replay scans, the mask says how many of them are pending tokens; shapes the graph
     uint32_t n_replay = 0;
 
     // the elastic memory (see llama_box): the states stay in their cells, read and written by the rows of each seq of
-    // the ubatch in each recurrent layer, nullptr otherwise; one input for all the rows, so that it is copied to the
-    // device once, each layer reading views of it: per recurrent layer, runs of n_seqs rows of the kinds of
+    // the ubatch in each recurrent layer; one input for all the rows, so that it is copied to the device once, each layer
+    // reading views of it: per recurrent layer, runs of n_seqs rows of the kinds of
     // llama_memory_recurrent_context::box_row_kind, conv write rows one run per conv row
     ggml_tensor * box_rows = nullptr; // I32 [n_seqs*n_box_runs*n_layers]
     ggml_tensor * box_ids  = nullptr; // I32 [n_seqs], 0..n_seqs-1: the seqs of a gather of their states
@@ -342,10 +327,6 @@ public:
     ggml_tensor * box_run(ggml_context * ctx, int il, uint32_t run) const;
 
     const llama_memory_recurrent_context * mctx;
-
-    // used in view offsets, need to match for valid graph reuse
-    uint32_t head;
-    int32_t rs_z;
 };
 
 class llm_graph_input_cross_embd : public llm_graph_input_i {
@@ -403,20 +384,14 @@ public:
     ggml_tensor * get_k_idxs() const { return self_k_idxs; }
     ggml_tensor * get_v_idxs() const { return self_v_idxs; }
 
-    ggml_tensor * get_kq_mask() const { return self_kq_mask_cnv; }
-
     ggml_tensor * self_k_idxs = nullptr; // I64 [n_batch]
     ggml_tensor * self_v_idxs = nullptr; // I64 [n_batch] or [n_batch*n_embd_v_gqa]
-
-    ggml_tensor * self_kq_mask     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
-    ggml_tensor * self_kq_mask_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
 
     // note: assumes v_rot^2 == I
     ggml_tensor * self_k_rot = nullptr;
     ggml_tensor * self_v_rot = nullptr;
 
-    // indexed attention (see llama_kv_cache::set_input_kv_idx), nullptr when the mask is used
-    // the mask tensor still exists for graphs that need it; tensors that no node reads are not allocated
+    // indexed attention, see llama_kv_cache::set_input_kv_idx; tensors that no node reads are not allocated
     ggml_tensor * self_kv_idx  = nullptr; // I32 [n_idx, n_group]
     ggml_tensor * self_q_rng   = nullptr; // I32 [3, n_batch]
 
@@ -459,12 +434,7 @@ public:
 
     ggml_tensor * get_k_idxs() const { return self_k_idxs; }
 
-    ggml_tensor * get_kq_mask() const { return self_kq_mask_cnv; }
-
     ggml_tensor * self_k_idxs = nullptr; // I64 [n_batch]
-
-    ggml_tensor * self_kq_mask     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
-    ggml_tensor * self_kq_mask_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
 
     // the elastic memory: each token reads a range of the cells of its sequence
     ggml_tensor * self_kv_idx  = nullptr; // I32 [n_idx, n_group]
@@ -498,27 +468,19 @@ public:
     ggml_tensor * get_k_idxs_mla() const { return self_k_idxs_mla; }
     ggml_tensor * get_k_idxs_lid() const { return self_k_idxs_lid; }
 
-    ggml_tensor * get_kq_mask_mla() const { return self_kq_mask_mla_cnv; }
-    ggml_tensor * get_kq_mask_lid() const { return self_kq_mask_lid; }
-
-    // with the elastic memory the indexer counts in the list of rows self_kv_idx: the masks, its scores and the top-k
+    // the indexer counts in the list of rows self_kv_idx: its scores and the top-k
     ggml_tensor * get_k_lid(ggml_context * ctx, int32_t il) const;
-    ggml_tensor * build_lid(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * weights, ggml_tensor * mask) const;
+    ggml_tensor * build_lid(ggml_context * ctx, ggml_tensor * q, ggml_tensor * k, ggml_tensor * weights) const;
     ggml_tensor * build_top_k(ggml_context * ctx, ggml_tensor * score, int n_top_k) const;
 
-    ggml_tensor * self_kv_idx  = nullptr; // I32 [n_kv, 1]         elastic memory: the rows of the sequences of the ubatch
-    ggml_tensor * self_q_rng   = nullptr; // I32 [3, n_batch]      elastic memory: the live entries of the top-k of each token
-    ggml_tensor * self_win_rng = nullptr; // I32 [3, n_batch]      elastic memory: the window of each token in the list, for the
-                                          //                       indexer kernel, see ggml_lightning_indexer_rows()
-    int64_t       n_win        = 0;       //                       elastic memory: the entries of a window
+    ggml_tensor * self_kv_idx  = nullptr; // I32 [n_kv, 1]         the rows of the sequences of the ubatch
+    ggml_tensor * self_q_rng   = nullptr; // I32 [3, n_batch]      the live entries of the top-k of each token
+    ggml_tensor * self_win_rng = nullptr; // I32 [3, n_batch]      the window of each token in the list, for the indexer
+                                          //                       kernel, see ggml_lightning_indexer_rows()
+    int64_t       n_win        = 0;       //                       the entries of a window
 
     ggml_tensor * self_k_idxs_mla = nullptr; // I64 [n_batch]
     ggml_tensor * self_k_idxs_lid = nullptr; // I64 [n_batch]
-
-    ggml_tensor * self_kq_mask_mla     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
-    ggml_tensor * self_kq_mask_mla_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
-    ggml_tensor * self_kq_mask_lid     = nullptr; // F32     [n_kv, n_batch/n_stream, 1, n_stream]
-    ggml_tensor * self_kq_mask_lid_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
 
     ggml_tensor * self_k_rot_lid = nullptr;
 
@@ -595,25 +557,16 @@ public:
     ggml_tensor * get_k_idxs_swa() const { return self_k_idxs_swa; }
     ggml_tensor * get_v_idxs_swa() const { return self_v_idxs_swa; }
 
-    ggml_tensor * get_kq_mask()     const { return self_kq_mask_cnv; }
-    ggml_tensor * get_kq_mask_swa() const { return self_kq_mask_swa_cnv; }
-
     ggml_tensor * self_k_idxs     = nullptr; // I64 [n_batch]
     ggml_tensor * self_v_idxs     = nullptr; // I64 [n_batch] or [n_batch*n_embd_v_gqa]
     ggml_tensor * self_k_idxs_swa = nullptr; // I64 [n_batch]
     ggml_tensor * self_v_idxs_swa = nullptr; // I64 [n_batch] or [n_batch*n_embd_v_gqa]
-
-    ggml_tensor * self_kq_mask         = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
-    ggml_tensor * self_kq_mask_cnv     = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
-    ggml_tensor * self_kq_mask_swa     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
-    ggml_tensor * self_kq_mask_swa_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
 
     // the elastic memory: each token reads a range of the cells of its sequence
     ggml_tensor * self_kv_idx     = nullptr; // I32 [n_idx, n_group]
     ggml_tensor * self_q_rng      = nullptr; // I32 [3, n_batch]
     ggml_tensor * self_kv_idx_swa = nullptr; // I32 [n_idx, n_group]
     ggml_tensor * self_q_rng_swa  = nullptr; // I32 [3, n_batch]
-
 
     ggml_tensor * self_k_rot = nullptr;
     ggml_tensor * self_v_rot = nullptr;
@@ -646,16 +599,8 @@ public:
     ggml_tensor * get_k_idxs()     const { return self_k_idxs; }
     ggml_tensor * get_k_idxs_swa() const { return self_k_idxs_swa; }
 
-    ggml_tensor * get_kq_mask()     const { return self_kq_mask_cnv; }
-    ggml_tensor * get_kq_mask_swa() const { return self_kq_mask_swa_cnv; }
-
     ggml_tensor * self_k_idxs     = nullptr; // I64 [n_batch]
     ggml_tensor * self_k_idxs_swa = nullptr; // I64 [n_batch]
-
-    ggml_tensor * self_kq_mask         = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
-    ggml_tensor * self_kq_mask_cnv     = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
-    ggml_tensor * self_kq_mask_swa     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
-    ggml_tensor * self_kq_mask_swa_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
 
     // the elastic memory: each token reads a range of the cells of its sequence
     ggml_tensor * self_kv_idx     = nullptr; // I32 [n_idx, n_group]
@@ -673,8 +618,7 @@ public:
     const llama_kv_cache_iswa_context * mctx;
 };
 
-// DSV4 raw graph inputs are SWA-only, but their mask may be stream-shaped
-// so raw K can be concatenated with DSV4 compressed K in one attention op.
+// DSV4 raw graph inputs are SWA-only: the attentions read the raw rows through the lists of llm_graph_input_dsv4
 class llm_graph_input_dsv4_raw {
 public:
     llm_graph_input_dsv4_raw(
@@ -687,12 +631,8 @@ public:
     void set_input(const llama_ubatch * ubatch);
 
     ggml_tensor * get_k_idxs() const { return self_k_idxs; }
-    ggml_tensor * get_kq_mask() const { return self_kq_mask_cnv; }
 
     ggml_tensor * self_k_idxs = nullptr; // I64 [n_batch]
-
-    ggml_tensor * self_kq_mask     = nullptr; // F32/F16 [n_kv, n_batch/n_stream, 1, n_stream]
-    ggml_tensor * self_kq_mask_cnv = nullptr; //         [n_kv, n_batch/n_stream, 1, n_stream]
 
     ggml_tensor * self_k_rot = nullptr;
 
@@ -708,14 +648,11 @@ public:
         ggml_tensor * state_persist_src_idxs = nullptr; // I32 [n_state_persist]
         ggml_tensor * state_persist_dst_idxs = nullptr; // I32 [n_state_persist]
         ggml_tensor * state_restore_src_idxs = nullptr; // I32 [n_state_restore]
-        ggml_tensor * state_restore_dst_idxs = nullptr; // I32 [n_state_restore]
         ggml_tensor * state_snapshot_src_idxs = nullptr; // I32 [n_state_snapshot]
         ggml_tensor * state_snapshot_dst_idxs = nullptr; // I32 [n_state_snapshot]
         ggml_tensor * state_read_idxs  = nullptr; // I32 [ratio*n_state_write]
         ggml_tensor * state_write_idxs = nullptr; // I64 [n_state_write]
         ggml_tensor * state_write_pos  = nullptr; // I32 [n_state_write]
-
-        ggml_tensor * kq_mask    = nullptr; // F32 [n_kv, n_batch/n_stream, 1, n_stream]
 
         ggml_tensor * k_rot      = nullptr;
     };
@@ -1376,7 +1313,7 @@ struct llm_graph_context {
 
     llm_graph_input_attn_k_dsa_iswa * build_attn_inp_k_dsa_iswa() const;
 
-    llm_graph_input_attn_kv_msa * build_attn_inp_kv_msa(bool msa_enabled) const;
+    llm_graph_input_attn_kv_msa * build_attn_inp_kv_msa() const;
 
     ggml_tensor * build_attn(
             llm_graph_input_attn_k_dsa * inp,
@@ -1450,23 +1387,6 @@ struct llm_graph_context {
     // recurrent
     //
 
-    // TODO: move this implementation to llama_memory_recurrent.
-    //       this is analogous to llama_kv_cache::cpy_k / cpy_v
-    //       when moving, avoid passing `ggml_cgraph` - only pass `ggml_context`. would likely need to split the
-    //         implementation in 2 separate methods. the goal is to avoid calling `ggml_build_forward_expand` in
-    //         `llama_memory_recurrent`
-    ggml_tensor * build_rs(
-            ggml_tensor * s,
-            ggml_tensor * state_copy,
-            ggml_tensor * state_copy_main,
-                int32_t   state_size,
-                int32_t   n_seqs,
-               uint32_t   n_rs,
-               uint32_t   rs_head,
-               uint32_t   rs_size,
-                int32_t   rs_zero,
-            const llm_graph_get_rows_fn & get_state_rows = nullptr) const;
-
     llm_graph_input_rs * build_rs_inp() const;
 
     // il: the model layer, which selects its rows of the elastic memory (see llama_box)
@@ -1478,13 +1398,12 @@ struct llm_graph_context {
             const llm_graph_get_rows_fn & get_state_rows = nullptr,
                     int   il = -1) const;
 
-    // stores the states of the seqs of the ubatch in s: by their rows in the elastic memory, else at offs; k is the conv
-    // row, see llm_graph_input_rs::box_r_write()
+    // stores the states of the seqs of the ubatch in s by their rows in the elastic memory; k is the conv row, see
+    // llm_graph_input_rs::box_r_write()
     ggml_tensor * build_rs_store(
             llm_graph_input_rs * inp,
             ggml_tensor * s,
             ggml_tensor * states,
-                 size_t   offs,
                     int   il,
                uint32_t   k = 0) const;
 

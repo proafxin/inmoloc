@@ -17,16 +17,12 @@ public:
                     ggml_type   type_k,
                     ggml_type   type_v,
                          bool   offload,
-                         bool   swa_full,
-                         bool   unified,
                      uint32_t   kv_size,
                      uint32_t   n_seq_max,
-                     uint32_t   n_ubatch,
                      uint32_t   n_pad,
         const layer_filter_cb & filter_mla,
         const layer_filter_cb & filter_lid,
         const  layer_reuse_cb & reuse,
-                         bool   use_box = false,
                        size_t   box_bytes = 0,
                          bool   box_deferred = false,
                          const llama_box_draft & box_draft = {});
@@ -80,8 +76,6 @@ public:
     llama_kv_cache     * get_swa() const;
 
 private:
-    const bool unified;
-
     std::unique_ptr<llama_kv_cache_dsa> kv_dsa;
     std::unique_ptr<llama_kv_cache>     kv_swa;
 };

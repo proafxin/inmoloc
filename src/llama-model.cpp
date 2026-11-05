@@ -2246,17 +2246,12 @@ ggml_tensor * llama_model::get_rope_factors(const llama_cparams & cparams, int i
     return layers[il].rope_short;
 }
 
-// whether an MTP draft keeps its tokens in the elastic memory of its target: it has to, there is no cache of its own to
-// fall back to
-static bool llama_model_mtp_in_box(const llama_memory_params & params) {
-    const bool in_box = params.box && params.box->has_draft();
-
-    if (!in_box) {
+// an MTP draft keeps its tokens in the elastic memory of its target: there is no cache of its own to fall back to
+static void llama_model_mtp_in_box(const llama_memory_params & params) {
+    if (!params.box || !params.box->has_draft()) {
         throw std::runtime_error("the MTP draft keeps its tokens in the elastic memory of its target, which holds no MTP layers: "
                 "the target context has to be created for an MTP draft (box_draft)");
     }
-
-    return in_box;
 }
 
 llama_memory_i * llama_model::create_memory(const llama_memory_params & params, const llama_cparams & cparams) const {
@@ -2273,12 +2268,12 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 
         if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
             return new llama_kv_cache_iswa(*this, params.type_k, params.type_v, cparams.offload_kqv,
-                    params.swa_full, cparams.kv_unified, params.box->get_n_cells(), cparams.n_seq_max, cparams.n_ubatch, 1,
+                    params.swa_full, params.box->get_n_cells(), cparams.n_seq_max, cparams.n_ubatch, 1,
                     nullptr, nullptr, nullptr, nullptr, nullptr, params.box, offset);
         }
 
         return new llama_kv_cache(*this, hparams, params.type_k, params.type_v, cparams.offload_kqv,
-                cparams.kv_unified, params.box->get_n_cells(), cparams.n_seq_max, 1, hparams.n_swa, hparams.swa_type,
+                params.box->get_n_cells(), cparams.n_seq_max, 1, hparams.n_swa, hparams.swa_type,
                 nullptr, nullptr, nullptr, nullptr, "", nullptr, offset, params.box, nullptr);
     }
 
@@ -2313,7 +2308,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         params.type_k,
                         params.type_v,
                         cparams.offload_kqv,
-                        cparams.kv_unified,
                         cparams.n_ctx_seq,
                         cparams.n_seq_max,
                         1,
@@ -2322,7 +2316,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         nullptr,
                         filter_idx,
                         nullptr,
-                        true,
                         cparams.box_bytes,
                         cparams.box_deferred);
             } break;
@@ -2336,7 +2329,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     llama_kv_cache::layer_filter_cb filter =
                         [&](uint32_t il) { return il >= hparams.n_layer(); };
 
-                    const bool in_box = llama_model_mtp_in_box(params);
+                    llama_model_mtp_in_box(params);
 
                     res = new llama_kv_cache(
                             *this,
@@ -2344,8 +2337,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             params.type_k,
                             params.type_v,
                             cparams.offload_kqv,
-                            cparams.kv_unified,
-                            in_box ? params.box->get_n_cells() : cparams.n_ctx_seq,
+                            params.box->get_n_cells(),
                             cparams.n_seq_max,
                             1,
                             hparams.n_swa,
@@ -2357,7 +2349,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             "",
                             nullptr,
                             0,
-                            in_box ? params.box : nullptr);
+                            params.box);
                 } else {
                     // Main context: DSA cache for the trunk layers only - the nextn
                     // layer(s) are never attended by the trunk graph.
@@ -2372,7 +2364,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             params.type_k,
                             params.type_v,
                             cparams.offload_kqv,
-                            cparams.kv_unified,
                             cparams.n_ctx_seq,
                             cparams.n_seq_max,
                             1,
@@ -2381,7 +2372,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             filter_mla,
                             filter_lid,
                             nullptr,
-                            true,
                             cparams.box_bytes,
                             cparams.box_deferred,
                             cparams.box_draft);
@@ -2391,13 +2381,10 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
             {
                 if (hparams.indexer_top_k == 0) {
                     // full-attention checkpoint: no indexer, so no indexer key cache
-                    std::shared_ptr<llama_box> box_own;
-                    if (!cparams.ctx_other) {
-                        box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
-                                GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
-                                cparams.box_bytes, cparams.box_deferred, llama_box_draft{},
-                                [](int32_t) { return true; }, nullptr);
-                    }
+                    std::shared_ptr<llama_box> box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
+                            GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
+                            cparams.box_bytes, cparams.box_deferred, llama_box_draft{},
+                            [](int32_t) { return true; }, nullptr);
 
                     res = new llama_kv_cache(
                             *this,
@@ -2405,8 +2392,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             params.type_k,
                             params.type_v,
                             cparams.offload_kqv,
-                            cparams.kv_unified,
-                            box_own ? box_own->get_n_cells() : cparams.n_ctx_seq,
+                            box_own->get_n_cells(),
                             cparams.n_seq_max,
                             1,
                             hparams.n_swa,
@@ -2429,7 +2415,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             params.type_k,
                             params.type_v,
                             cparams.offload_kqv,
-                            cparams.kv_unified,
                             cparams.n_ctx_seq,
                             cparams.n_seq_max,
                             1,
@@ -2438,7 +2423,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             nullptr,
                             filter_lid,
                             nullptr,
-                            true,
                             cparams.box_bytes,
                             cparams.box_deferred);
                 }
@@ -2452,7 +2436,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     llama_kv_cache::layer_filter_cb filter =
                         [&](uint32_t il) { return il >= hparams.n_layer(); };
 
-                    const bool in_box = llama_model_mtp_in_box(params);
+                    llama_model_mtp_in_box(params);
 
                     res = new llama_kv_cache(
                             *this,
@@ -2460,8 +2444,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             params.type_k,
                             params.type_v,
                             cparams.offload_kqv,
-                            cparams.kv_unified,
-                            in_box ? params.box->get_n_cells() : cparams.n_ctx_seq,
+                            params.box->get_n_cells(),
                             cparams.n_seq_max,
                             1,
                             hparams.n_swa,
@@ -2473,9 +2456,9 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             "",
                             nullptr,
                             0,
-                            in_box ? params.box : nullptr);
+                            params.box);
                 } else {
-                    // main context: DSA cache for the trunk full-attention layers plus a window-sized SWA cache
+                    // main context: DSA cache for the trunk full-attention layers plus a SWA cache in the same blocks
                     llama_kv_cache::layer_filter_cb filter_mla = nullptr;
                     if (hparams.n_layer_nextn > 0) {
                         filter_mla = [&](uint32_t il) { return il < hparams.n_layer(); };
@@ -2487,16 +2470,12 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             params.type_k,
                             params.type_v,
                             cparams.offload_kqv,
-                            params.swa_full,
-                            cparams.kv_unified,
                             cparams.n_ctx_seq,
                             cparams.n_seq_max,
-                            cparams.n_ubatch,
                             1,
                             filter_mla,
                             filter_lid,
                             nullptr,
-                            true,
                             cparams.box_bytes,
                             cparams.box_deferred,
                             cparams.box_draft);
@@ -2511,34 +2490,18 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         return il >= (int32_t) hparams.n_layer();
                     };
 
-                    if (llama_model_mtp_in_box(params)) {
-                        res = new llama_kv_cache_dsv4_draft(
-                                *this,
-                                params.type_k,
-                                params.type_v,
-                                cparams.offload_kqv,
-                                cparams.n_seq_max,
-                                cparams.n_ubatch,
-                                cparams.n_rs_seq,
-                                filter_mtp,
-                                params.box);
-                    } else {
-                        res = new llama_kv_cache_iswa(
-                                *this,
-                                params.type_k,
-                                params.type_v,
-                                cparams.offload_kqv,
-                                params.swa_full,
-                                cparams.kv_unified,
-                                cparams.n_ctx_seq,
-                                cparams.n_seq_max,
-                                cparams.n_ubatch,
-                                1,
-                                nullptr,
-                                filter_mtp,
-                                nullptr,
-                                nullptr);
-                    }
+                    llama_model_mtp_in_box(params);
+
+                    res = new llama_kv_cache_dsv4_draft(
+                            *this,
+                            params.type_k,
+                            params.type_v,
+                            cparams.offload_kqv,
+                            cparams.n_seq_max,
+                            cparams.n_ubatch,
+                            cparams.n_rs_seq,
+                            filter_mtp,
+                            params.box);
                 } else {
                     res = new llama_kv_cache_dsv4(
                             *this,
@@ -2546,7 +2509,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             params.type_v,
                             cparams.offload_kqv,
                             params.swa_full,
-                            cparams.kv_unified,
                             cparams.n_ctx_seq,
                             cparams.n_seq_max,
                             cparams.n_ubatch,
@@ -2554,7 +2516,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             cparams.n_rs_seq,
                             nullptr,
                             nullptr,
-                            true,
                             cparams.box_bytes,
                             cparams.box_deferred,
                             cparams.n_batch,
@@ -2576,22 +2537,14 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 
                 if (llm_arch_is_recurrent(arch)) {
                     // the states are all the memory of the model: they hold the elastic memory
-                    std::shared_ptr<llama_box> box_own;
-                    {
-                        box_own = llama_box_make(*this, GGML_TYPE_F16, GGML_TYPE_F16, 0,
-                                GGML_TYPE_F32, GGML_TYPE_F32, std::max((uint32_t) 1, cparams.n_rs_cells),
-                                cparams.n_rs_seq, cparams.rs_replay, cparams.offload_kqv,
-                                cparams.box_bytes, cparams.box_deferred, llama_box_draft{},
-                                [](int32_t) { return false; }, [](int32_t) { return true; });
-                    }
+                    std::shared_ptr<llama_box> box_own = llama_box_make(*this, GGML_TYPE_F16, GGML_TYPE_F16, 0,
+                            GGML_TYPE_F32, GGML_TYPE_F32, std::max((uint32_t) 1, cparams.n_rs_cells),
+                            cparams.n_rs_seq, cparams.rs_replay, cparams.offload_kqv,
+                            cparams.box_bytes, cparams.box_deferred, llama_box_draft{},
+                            [](int32_t) { return false; }, [](int32_t) { return true; });
 
                     res = new llama_memory_recurrent(
                             *this,
-                            GGML_TYPE_F32,
-                            GGML_TYPE_F32,
-                            cparams.offload_kqv,
-                            box_own ? std::max<uint32_t>(1, box_own->get_max_states()) : std::max((uint32_t) 1, cparams.n_rs_cells),
-                            cparams.n_seq_max,
                             cparams.n_rs_seq,
                             cparams.rs_replay,
                             nullptr,
@@ -2633,17 +2586,14 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     }
 
                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
-                        std::shared_ptr<llama_box> box_own;
-                        if (params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
-                            const auto & hp = hparams;
+                        const auto & hp = hparams;
 
-                            box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
-                                    GGML_TYPE_F32, GGML_TYPE_F32, std::max((uint32_t) 1, cparams.n_rs_cells),
-                                    cparams.n_rs_seq, cparams.rs_replay, cparams.offload_kqv,
-                                    cparams.box_bytes, cparams.box_deferred, cparams.box_draft,
-                                    filter_attn ? filter_attn : [&hp](int32_t il) { return !hp.is_recr(il); },
-                                    filter_recr ? filter_recr : [&hp](int32_t il) { return  hp.is_recr(il); });
-                        }
+                        std::shared_ptr<llama_box> box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
+                                GGML_TYPE_F32, GGML_TYPE_F32, std::max((uint32_t) 1, cparams.n_rs_cells),
+                                cparams.n_rs_seq, cparams.rs_replay, cparams.offload_kqv,
+                                cparams.box_bytes, cparams.box_deferred, cparams.box_draft,
+                                filter_attn ? filter_attn : [&hp](int32_t il) { return !hp.is_recr(il); },
+                                filter_recr ? filter_recr : [&hp](int32_t il) { return  hp.is_recr(il); });
 
                         // Use hybrid-iswa for hybrid models with SWA
                         res = new llama_memory_hybrid_iswa(
@@ -2651,17 +2601,12 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* attn_type_k       */ params.type_k,
                             /* attn_type_v       */ params.type_v,
                             /* attn_swa_full     */ params.swa_full,
-                            /* attn_kv_size      */ cparams.n_ctx_seq,
                             /* attn_n_ubatch     */ cparams.n_ubatch,
                             /* attn_n_pad        */ 1,
-                            /* recurrent_type_r  */ GGML_TYPE_F32,
-                            /* recurrent_type_s  */ GGML_TYPE_F32,
-                            /* recurrent_rs_size */ std::max((uint32_t) 1, cparams.n_rs_cells),
                             /* n_seq_max         */ cparams.n_seq_max,
                             /* n_rs_seq          */ cparams.n_rs_seq,
                             /* rs_replay         */ cparams.rs_replay,
                             /* offload           */ cparams.offload_kqv,
-                            /* unified           */ cparams.kv_unified,
                             /* filter_attn       */ std::move(filter_attn),
                             /* filter_recr       */ std::move(filter_recr),
                             /* box               */ box_own);
@@ -2682,8 +2627,6 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* n_rs_seq          */ cparams.n_rs_seq,
                             /* rs_replay         */ cparams.rs_replay,
                             /* offload           */ cparams.offload_kqv,
-                            /* unified           */ cparams.kv_unified,
-                            /* use_box           */ true,
                             /* box_bytes         */ cparams.box_bytes,
                             /* box_deferred      */ cparams.box_deferred,
                             /* filter_attn       */ std::move(filter_attn),
@@ -2705,10 +2648,8 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             /* n_rs_seq          */ cparams.n_rs_seq,
                             /* rs_replay         */ cparams.rs_replay,
                             /* offload           */ cparams.offload_kqv,
-                            /* unified           */ cparams.kv_unified,
                             /* filter_attn       */ std::move(filter_attn),
                             /* filter_recr       */ std::move(filter_recr),
-                            /* use_box           */ params.ctx_type != LLAMA_CONTEXT_TYPE_MTP,
                             /* box_bytes         */ cparams.box_bytes,
                             /* box_deferred      */ cparams.box_deferred,
                             /* box_draft         */ cparams.box_draft);
@@ -2760,13 +2701,13 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 return llama_model_n_layer(model_other) - 1;
                             };
 
+                            // the cells of the target, in its elastic memory: this cache only reads them
                             res = new llama_kv_cache_iswa(
                                     *this,
                                     params.type_k,
                                     params.type_v,
                                     cparams.offload_kqv,
                                     params.swa_full,
-                                    cparams.kv_unified,
                                     cparams.n_ctx_seq,
                                     cparams.n_seq_max,
                                     cparams.n_ubatch,
@@ -2776,12 +2717,15 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                     reuse,
                                     share);
                         } else {
-                            // an MTP draft keeps its tokens in the blocks of the elastic memory of its target
-                            const bool in_box = params.ctx_type == LLAMA_CONTEXT_TYPE_MTP && llama_model_mtp_in_box(params);
+                            // an MTP draft keeps its tokens in the blocks of the elastic memory of its target, the caches
+                            // of a model hold the elastic memory
+                            const bool in_box = params.ctx_type == LLAMA_CONTEXT_TYPE_MTP;
+                            if (in_box) {
+                                llama_model_mtp_in_box(params);
+                            }
 
-                            // both caches are the memory of the model: they hold the elastic memory
                             std::shared_ptr<llama_box> box_own;
-                            if (!cparams.ctx_other && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
+                            if (!in_box) {
                                 box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
                                         GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
                                         cparams.box_bytes, cparams.box_deferred, cparams.box_draft,
@@ -2794,8 +2738,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                     params.type_v,
                                     cparams.offload_kqv,
                                     params.swa_full,
-                                    cparams.kv_unified,
-                                    in_box ? params.box->get_n_cells() : (box_own ? box_own->get_n_cells() : cparams.n_ctx_seq),
+                                    in_box ? params.box->get_n_cells() : box_own->get_n_cells(),
                                     cparams.n_seq_max,
                                     cparams.n_ubatch,
                                     1,
@@ -2809,13 +2752,15 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     } else {
                         GGML_ASSERT(!hparams.is_swa_any());
 
-                        // an MTP draft keeps its tokens in the blocks of the elastic memory of its target
-                        const bool in_box = params.ctx_type == LLAMA_CONTEXT_TYPE_MTP && llama_model_mtp_in_box(params);
+                        // an MTP draft keeps its tokens in the blocks of the elastic memory of its target, the cache of
+                        // a model holds the elastic memory
+                        const bool in_box = params.ctx_type == LLAMA_CONTEXT_TYPE_MTP;
+                        if (in_box) {
+                            llama_model_mtp_in_box(params);
+                        }
 
-                        // this cache is all the memory of the model: it holds the elastic memory; a draft on a model of
-                        // its own decodes next to a target that admits the requests, and has none
                         std::shared_ptr<llama_box> box_own;
-                        if (!in_box && !cparams.ctx_other && params.ctx_type != LLAMA_CONTEXT_TYPE_MTP) {
+                        if (!in_box) {
                             box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
                                     GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
                                     cparams.box_bytes, cparams.box_deferred, cparams.box_draft,
@@ -2828,8 +2773,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 params.type_k,
                                 params.type_v,
                                 cparams.offload_kqv,
-                                cparams.kv_unified,
-                                in_box ? params.box->get_n_cells() : (box_own ? box_own->get_n_cells() : cparams.n_ctx_seq),
+                                in_box ? params.box->get_n_cells() : box_own->get_n_cells(),
                                 cparams.n_seq_max,
                                 1,
                                 hparams.n_swa,

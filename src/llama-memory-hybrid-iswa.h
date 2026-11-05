@@ -24,24 +24,18 @@ public:
                 ggml_type   type_k,
                 ggml_type   type_v,
                      bool   swa_full,
-                 uint32_t   kv_size,
                  uint32_t   n_ubatch,
                  uint32_t   n_pad,
-                            /* recurrent */
-                ggml_type   type_r,
-                ggml_type   type_s,
-                 uint32_t   rs_size,
                             /* common */
                  uint32_t   n_seq_max,
                  uint32_t   n_rs_seq,
                      bool   rs_replay,
                      bool   offload,
-                     bool   unified,
                             /* layer filters */
-    const layer_filter_cb & filter_attn = nullptr,
-    const layer_filter_cb & filter_recr = nullptr,
+    const layer_filter_cb & filter_attn,
+    const layer_filter_cb & filter_recr,
         // the elastic memory, which holds the cells of the caches and the states
-    const std::shared_ptr<llama_box> & box = nullptr);
+    const std::shared_ptr<llama_box> & box);
 
     ~llama_memory_hybrid_iswa() = default;
 

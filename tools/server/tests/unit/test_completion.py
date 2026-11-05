@@ -407,7 +407,6 @@ def test_completion_parallel_slots(n_slots: int, n_requests: int):
 def test_completion_unified(n_ctx, n_slots, n_predict_vals, expected_success):
     global server
     server.n_slots = n_slots
-    server.kv_unified = True
     server.n_ctx = n_ctx
     server.n_predict = max(n_predict_vals)
     server.start()
@@ -658,7 +657,6 @@ def test_cancel_request():
 def test_completion_prompt_cache():
     global server
     server.n_slots = 2
-    server.kv_unified = True
     server.start()
 
     for _ in range(16):

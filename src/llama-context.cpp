@@ -285,7 +285,6 @@ llama_context::llama_context(
     }
 
     cparams.op_offload = params.op_offload;
-    cparams.kv_unified = true;
     cparams.box_bytes  = params.box_bytes;
     cparams.box_deferred = params.box_deferred;
     // a draft that reads the cache of its target (Gemma4 assistant) keeps no rows of its own
@@ -312,21 +311,8 @@ llama_context::llama_context(
     // ref: https://github.com/ggml-org/llama.cpp/pull/17046#discussion_r2503085732
     cparams.n_ctx = GGML_PAD(cparams.n_ctx, 256);
 
-    if (cparams.kv_unified) {
-        cparams.n_ctx_seq = cparams.n_ctx;
-    } else {
-        cparams.n_ctx_seq = cparams.n_ctx / cparams.n_seq_max;
-        cparams.n_ctx_seq = GGML_PAD(cparams.n_ctx_seq, 256);
-
-        if (cparams.n_ctx_seq == 0) {
-            throw std::runtime_error("n_ctx_seq == 0");
-        }
-
-        if (cparams.n_ctx != cparams.n_ctx_seq * cparams.n_seq_max) {
-            cparams.n_ctx =  cparams.n_ctx_seq * cparams.n_seq_max;
-            LLAMA_LOG_WARN("%s: n_ctx is not divisible by n_seq_max - rounding down to %u\n", __func__, cparams.n_ctx);
-        }
-    }
+    // the sequences share the cells of one memory
+    cparams.n_ctx_seq = cparams.n_ctx;
 
     LLAMA_LOG_INFO("%s: n_seq_max             = %u\n",   __func__, cparams.n_seq_max);
     LLAMA_LOG_INFO("%s: n_ctx                 = %u\n",   __func__, cparams.n_ctx);
@@ -335,7 +321,6 @@ llama_context::llama_context(
     LLAMA_LOG_INFO("%s: n_ubatch              = %u\n",   __func__, cparams.n_ubatch);
     LLAMA_LOG_INFO("%s: causal_attn           = %d\n",   __func__, cparams.causal_attn);
     LLAMA_LOG_INFO("%s: flash_attn            = %s\n",   __func__, llama_flash_attn_type_name(params.flash_attn_type));
-    LLAMA_LOG_INFO("%s: kv_unified            = %s\n",   __func__, cparams.kv_unified ? "true" : "false");
     LLAMA_LOG_INFO("%s: freq_base             = %.1f\n", __func__, cparams.rope_freq_base);
     LLAMA_LOG_INFO("%s: freq_scale            = %g\n",   __func__, cparams.rope_freq_scale);
     LLAMA_LOG_INFO("%s: n_rs_seq              = %u\n",   __func__, cparams.n_rs_seq);
@@ -2542,9 +2527,9 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         }
     }
 
-    // attention split into runs (see llama_kv_attn_run): up to 4 gather runs and the full runs between them,
+    // attention split into runs (see llama_kv_attn_run): up to 4 gather runs and the indexed runs between them,
     // about 16 nodes each per layer
-    if (cparams.flash_attn && cparams.kv_unified) {
+    if (cparams.flash_attn) {
         res += 16u*9u*model.hparams.n_layer();
     }
 
@@ -3937,7 +3922,6 @@ llama_context_params llama_context_default_params() {
         /*.no_perf                     =*/ true,
         /*.op_offload                  =*/ true,
         /*.swa_full                    =*/ true,
-        /*.kv_unified                  =*/ false,
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
         /*.ctx_other                   =*/ nullptr,
@@ -4437,7 +4421,7 @@ llama_memory_usage llama_memory_get_usage(llama_memory_t mem) {
     }
 
     if (kv) {
-        res.kv_size = kv->get_size()*kv->get_n_stream();
+        res.kv_size = kv->get_size();
         kv->get_usage(res.kv_used, res.kv_span);
 
         const auto stats = kv->get_attn_stats();

@@ -110,7 +110,6 @@ static bool test_multi_seq_split_replay(const common_params & params, llama_mode
         cparams.n_ctx      = 256;
         cparams.n_batch    = 256;
         cparams.n_ubatch   = n_ubatch;
-        cparams.kv_unified = false;
         return init_ctx(model, cparams, fill);
     };
 
@@ -277,7 +276,6 @@ static bool test_shared_pending(const common_params & params, llama_model * mode
     cparams.n_ctx      = 256;
     cparams.n_batch    = 256;
     cparams.n_ubatch   = 64;
-    cparams.kv_unified = true;
 
     llama_context * ctx = init_ctx(model, cparams, fill);
     if (ctx == nullptr) {
