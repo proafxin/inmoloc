@@ -102,7 +102,6 @@ public:
           const llama_hparams & hparams,
                     ggml_type   type_k,
                     ggml_type   type_v,
-                         bool   v_trans,
                          bool   offload,
                          bool   unified,
                      uint32_t   kv_size,
@@ -372,8 +371,6 @@ private:
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
     };
-
-    bool v_trans = true;  // the value tensor is transposed
 
     // the elastic memory that holds the cells, nullptr when the cache has its own buffers
     llama_box * box = nullptr;

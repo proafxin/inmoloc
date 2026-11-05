@@ -15,7 +15,6 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
         const llama_model & model,
                 ggml_type   type_k,
                 ggml_type   type_v,
-                     bool   v_trans,
                      bool   offload,
                      bool   swa_full,
                      bool   unified,
@@ -30,7 +29,7 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
     const std::shared_ptr<llama_box> & box,
     const std::shared_ptr<llama_box> & box_ref,
     int32_t box_il_offset) :
-    llama_kv_cache_iswa(model, model.hparams, type_k, type_v, v_trans, offload, swa_full, unified,
+    llama_kv_cache_iswa(model, model.hparams, type_k, type_v, offload, swa_full, unified,
             kv_size, n_seq_max, n_ubatch, n_pad, mem_other, filter, reuse, share, box, box_ref, box_il_offset) {
 }
 
@@ -39,7 +38,6 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
         const llama_hparams & hparams,
                 ggml_type   type_k,
                 ggml_type   type_v,
-                     bool   v_trans,
                      bool   offload,
                      bool   swa_full,
                      bool   unified,
@@ -105,14 +103,14 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
 
     kv_base = std::make_unique<llama_kv_cache>(
             model, hparams, type_k, type_v,
-            v_trans, offload, unified, size_base, n_seq_max, n_pad,
+            offload, unified, size_base, n_seq_max, n_pad,
             0, LLAMA_SWA_TYPE_NONE, mem_other_base, filter_base, reuse, share, "", nullptr, box_il_offset, box_ref, box);
 
     LLAMA_LOG_INFO("%s: creating     SWA KV cache, size = %u cells\n", __func__, size_swa);
 
     kv_swa = std::make_unique<llama_kv_cache>(
             model, hparams, type_k, type_v,
-            v_trans, offload, unified, size_swa, n_seq_max, n_pad,
+            offload, unified, size_swa, n_seq_max, n_pad,
             hparams.n_swa, hparams.swa_type, mem_other_swa, filter_swa, reuse, share, "", nullptr, box_il_offset, box_ref, box);
 }
 

@@ -15,7 +15,6 @@ llama_kv_cache_dsa_iswa::llama_kv_cache_dsa_iswa(
         const llama_model & model,
                 ggml_type   type_k,
                 ggml_type   type_v,
-                     bool   v_trans,
                      bool   offload,
                      bool   swa_full,
                      bool   unified,
@@ -68,7 +67,7 @@ llama_kv_cache_dsa_iswa::llama_kv_cache_dsa_iswa(
 
     kv_dsa = std::make_unique<llama_kv_cache_dsa>(
             model, type_k, type_v,
-            v_trans, offload, unified, size_dsa, n_seq_max, n_pad,
+            offload, unified, size_dsa, n_seq_max, n_pad,
             0, LLAMA_SWA_TYPE_NONE, filter_dsa, filter_lid, reuse,
             use_box, box_bytes, box_deferred, box_draft, true);
 
@@ -83,7 +82,7 @@ llama_kv_cache_dsa_iswa::llama_kv_cache_dsa_iswa(
 
     kv_swa = std::make_unique<llama_kv_cache>(
             model, hparams, type_k, type_v,
-            v_trans, offload, unified, size_swa, n_seq_max, n_pad,
+            offload, unified, size_swa, n_seq_max, n_pad,
             hparams.n_swa, hparams.swa_type, nullptr, filter_swa, reuse, nullptr, "", nullptr, 0, nullptr, box);
 }
 

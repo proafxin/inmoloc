@@ -54,12 +54,9 @@ struct llama_cparams {
     bool offload_kqv;
     bool flash_attn;
     bool auto_fa;
-    bool kv_idx;             // indexed flash attention over the KV cache, see ggml_flash_attn_ext_set_kv_idx()
-    bool auto_kv_idx;
-    bool kv_rows;            // gather runs read their cells in place, see ggml_flash_attn_ext_set_kv_rows()
-    bool auto_kv_rows;
-    bool kv_idx_rest;        // with kv_rows: the tokens outside the gather runs (e.g. generation) read the cells of their
-                             // sequence through indexed ranges instead of all the cells of the cache with a mask
+    bool kv_idx;             // every token reads its range of the elastic memory, see ggml_flash_attn_ext_set_kv_idx()
+    bool kv_rows;            // prompts read the rows of their sequence in place, see ggml_flash_attn_ext_set_kv_rows()
+    bool kv_idx_rest;        // with kv_rows: the tokens outside the gather runs (e.g. generation) read their ranges
     bool fused_gdn_ar;       // use fused gated delta net (autoregressive)
     bool fused_gdn_ch;       // use fused gated delta net (chunked)
     bool auto_fgdn;

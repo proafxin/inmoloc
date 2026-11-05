@@ -25,7 +25,6 @@ public:
                             /* attn */
                 ggml_type   type_k,
                 ggml_type   type_v,
-                     bool   v_trans,
                  uint32_t   kv_size,
                  uint32_t   n_pad,
                  uint32_t   n_swa,

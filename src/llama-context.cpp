@@ -50,19 +50,6 @@ static const llm_fused_op_probe llm_fused_op_flash_attn_probe = {
     /*.n_tokens_per_seq =*/ 1,
 };
 
-static const llm_fused_op_probe llm_fused_op_flash_attn_kv_idx_probe = {
-    /*.op               =*/ LLM_FUSED_OP_FLASH_ATTN,
-    /*.name             =*/ "Flash Attention with indexed KV cells",
-    /*.n_tokens_per_seq =*/ 1,
-};
-
-// the gather runs of the graph need at least 32 tokens of one sequence, see llama_kv_cache::get_attn_runs_reserve()
-static const llm_fused_op_probe llm_fused_op_flash_attn_kv_rows_probe = {
-    /*.op               =*/ LLM_FUSED_OP_FLASH_ATTN,
-    /*.name             =*/ "Flash Attention reading the KV cells of a sequence in place",
-    /*.n_tokens_per_seq =*/ 32,
-};
-
 static const llm_fused_op_probe llm_fused_op_gdn_ar_probe = {
     /*.op               =*/ LLM_FUSED_OP_GDN_AR,
     /*.name             =*/ "fused Gated Delta Net (autoregressive)",
@@ -252,11 +239,9 @@ llama_context::llama_context(
     cparams.flash_attn = true;
     cparams.auto_fa    = false;
 
-    // resolved with the fused ops, once flash attention is resolved
+    // how the elastic memory is read, set from it once it exists; a context without one reads no KV cells
     cparams.kv_idx      = false;
-    cparams.auto_kv_idx = true;
     cparams.kv_rows     = false;
-    cparams.auto_kv_rows = true;
     cparams.kv_idx_rest = false;
 
     cparams.fused_gdn_ar = true;
@@ -311,14 +296,6 @@ llama_context::llama_context(
     cparams.box_draft.type_v     = params.box_draft_type_v;
     cparams.box_draft.hparams    = params.box_draft_model ? &params.box_draft_model->hparams : nullptr;
     cparams.box_draft.standalone = params.box_draft_standalone;
-
-    // a non-unified KV cache keeps one stream per seq and reserves graphs with one seq per stream,
-    // which a recurrent-state pool smaller than n_seq_max cannot back
-    if (cparams.n_rs_cells < cparams.n_seq_max && !cparams.kv_unified &&
-        (llm_arch_is_recurrent(model.arch) || llm_arch_is_hybrid(model.arch))) {
-        throw std::runtime_error("n_rs_cells (" + std::to_string(cparams.n_rs_cells) + ") below n_seq_max (" +
-                std::to_string(cparams.n_seq_max) + ") requires a unified KV cache (--kv-unified)");
-    }
 
     // initialized later
     cparams.pipeline_parallel = false;
@@ -480,11 +457,9 @@ llama_context::llama_context(
             cparams.n_seq_max = box->get_n_seq_max();
 
             // prompts through lists where the device reads them, every token through ranges otherwise
-            cparams.kv_rows      = box->has_row_lists();
-            cparams.auto_kv_rows = false;
-            cparams.kv_idx_rest  = box->has_row_lists();
-            cparams.kv_idx       = !box->has_row_lists();
-            cparams.auto_kv_idx  = false;
+            cparams.kv_rows     = box->has_row_lists();
+            cparams.kv_idx_rest = box->has_row_lists();
+            cparams.kv_idx      = !box->has_row_lists();
 
             LLAMA_LOG_INFO("%s: elastic memory: %s\n", __func__, box->has_row_lists() ?
                     "prompts read through row lists, generation through ranges" : "all tokens read through ranges");
@@ -600,14 +575,6 @@ llama_context::~llama_context() {
     ggml_opt_free(opt_ctx);
 }
 
-// the attention that reads the cells of each sequence alone (indexed lists, cells read in place) is built for
-// llama_kv_cache, alone or as the attention of a hybrid memory; other memories (e.g. the caches of DeepSeek 4) build
-// their own attention
-static bool memory_attends_per_seq(const llama_memory_context_i * mctx) {
-    return dynamic_cast<const llama_kv_cache_context *>(mctx) != nullptr ||
-           dynamic_cast<const llama_memory_hybrid_context *>(mctx) != nullptr;
-}
-
 void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs) {
     const char * func = __func__;
     auto resolve = [&](const llm_fused_op_probe & probe, bool & enabled) {
@@ -669,38 +636,6 @@ void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint3
     }
     if (memory && memory->get_box_shared() && !cparams.flash_attn) {
         throw std::runtime_error("the elastic memory needs flash attention");
-    }
-
-    // indexed flash attention reads only the cells of each sequence of a unified KV cache, see
-    // ggml_flash_attn_ext_set_kv_idx(); it is used when every device that runs attention supports it
-    if (cparams.auto_kv_idx) {
-        cparams.kv_idx = cparams.flash_attn && cparams.kv_unified && !model.hparams.use_alibi && memory_attends_per_seq(mctx);
-        if (cparams.kv_idx) {
-            resolve(llm_fused_op_flash_attn_kv_idx_probe, cparams.kv_idx);
-        }
-        cparams.auto_kv_idx = false;
-    }
-
-    // the gather runs of a unified KV cache read the cells of their sequence in place instead of copying them, when
-    // every device that runs attention supports it, see ggml_flash_attn_ext_set_kv_rows()
-    //   - with indexed attention too, the prompts keep their gather runs, whose many tokens share one list of cells,
-    //     and the other tokens (generation) read the cells of their sequence through indexed ranges
-    //   - with indexed attention alone, every token reads through indexed ranges
-    if (cparams.auto_kv_rows) {
-        const bool kv_idx = cparams.kv_idx;
-        cparams.kv_idx = false; // the gather runs are built without it
-
-        cparams.kv_rows = cparams.flash_attn && cparams.kv_unified && !model.hparams.use_alibi && memory_attends_per_seq(mctx);
-        if (cparams.kv_rows) {
-            resolve(llm_fused_op_flash_attn_kv_rows_probe, cparams.kv_rows);
-        }
-
-        cparams.kv_idx_rest = kv_idx &&  cparams.kv_rows;
-        cparams.kv_idx      = kv_idx && !cparams.kv_rows;
-        if (cparams.kv_idx_rest) {
-            LLAMA_LOG_INFO("%s: generation reads the KV cells of its sequence through indexed ranges\n", func);
-        }
-        cparams.auto_kv_rows = false;
     }
 
     if (cparams.auto_fgdn) {

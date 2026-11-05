@@ -1386,7 +1386,7 @@ llama_kv_cache_dsv4_draft::llama_kv_cache_dsv4_draft(
     const layer_filter_cb & filter,
     const std::shared_ptr<llama_box> & box) :
     llama_dsv4_draft_hparams(model.hparams),
-    llama_kv_cache_iswa(model, hparams_draft, type_k, type_v, false, offload, false, true, box->get_n_cells(), n_seq_max, n_ubatch, 1,
+    llama_kv_cache_iswa(model, hparams_draft, type_k, type_v, offload, false, true, box->get_n_cells(), n_seq_max, n_ubatch, 1,
             nullptr, filter, nullptr, nullptr, nullptr, box) {
     // what a token of the next batch reads, and a rollback before it
     set_box_keep(hparams_draft.n_swa - 1 + n_rs_seq);
@@ -1400,7 +1400,6 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
         const llama_model & model,
                 ggml_type   type_k,
                 ggml_type   type_v,
-                     bool   v_trans,
                      bool   offload,
                      bool   swa_full,
                      bool   unified,
@@ -1535,7 +1534,7 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
 
     kv_raw = std::make_unique<llama_kv_cache_iswa>(
             model, hparams_raw, type_k, type_v,
-            v_trans, offload, swa_full, unified_raw, kv_size, n_seq_max, n_ubatch, n_pad,
+            offload, swa_full, unified_raw, kv_size, n_seq_max, n_ubatch, n_pad,
             nullptr, filter_raw, reuse, nullptr, box);
 
     dsv4_make_k_only(hparams_csa);
@@ -1579,7 +1578,7 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
 
     kv_csa = std::make_unique<llama_kv_cache>(
             model, hparams_csa, type_k, type_v,
-            v_trans, offload, unified_compressed, comp_cells(DSV4_CSA_RATIO), n_seq_comp, n_pad,
+            offload, unified_compressed, comp_cells(DSV4_CSA_RATIO), n_seq_comp, n_pad,
             0, LLAMA_SWA_TYPE_NONE, nullptr, filter_csa, nullptr, nullptr);
 
     LLAMA_LOG_INFO("%s: creating DSV4 HCA compressed KV cache, size = %u cells\n",
@@ -1587,7 +1586,7 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
 
     kv_hca = std::make_unique<llama_kv_cache>(
             model, hparams_hca, type_k, type_v,
-            v_trans, offload, unified_compressed, comp_cells(DSV4_HCA_RATIO), n_seq_comp, n_pad,
+            offload, unified_compressed, comp_cells(DSV4_HCA_RATIO), n_seq_comp, n_pad,
             0, LLAMA_SWA_TYPE_NONE, nullptr, filter_hca, nullptr, nullptr);
 
     LLAMA_LOG_INFO("%s: creating DSV4 lightning-indexer KV cache, size = %u cells\n",
@@ -1595,7 +1594,7 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
 
     kv_lid = std::make_unique<llama_kv_cache>(
             model, hparams_lid, type_k, type_v,
-            v_trans, offload, unified_compressed, comp_cells(DSV4_CSA_RATIO), n_seq_comp, n_pad,
+            offload, unified_compressed, comp_cells(DSV4_CSA_RATIO), n_seq_comp, n_pad,
             0, LLAMA_SWA_TYPE_NONE, nullptr, filter_csa, nullptr, nullptr);
 
     if (use_box) {

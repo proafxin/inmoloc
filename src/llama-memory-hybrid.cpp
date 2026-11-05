@@ -17,7 +17,6 @@ llama_memory_hybrid::llama_memory_hybrid(
                             /* attn */
                 ggml_type   type_k,
                 ggml_type   type_v,
-                     bool   v_trans,
                  uint32_t   kv_size,
                  uint32_t   n_pad,
                  uint32_t   n_swa,
@@ -51,7 +50,6 @@ llama_memory_hybrid::llama_memory_hybrid(
         model.hparams,
         type_k,
         type_v,
-        v_trans,
         offload,
         unified,
         box ? box->get_n_cells() : kv_size,
