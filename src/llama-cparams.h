@@ -7,6 +7,19 @@
 
 struct llama_hparams;
 
+// a draft that keeps its tokens in the blocks of the elastic memory, next to the layers of the same tokens, see
+// llama_box_make()
+struct llama_box_draft {
+    bool        enabled = false;
+    ggml_type   type_k  = GGML_TYPE_F16;
+    ggml_type   type_v  = GGML_TYPE_F16;
+
+    // the model of the draft: nullptr for the MTP layers of the model; the MTP layers of an MTP head in a GGUF of its own;
+    // all the layers of a draft model of its own (standalone), in slots after those of the model
+    const llama_hparams * hparams    = nullptr;
+    bool                  standalone = false;
+};
+
 struct llama_cparams {
     uint32_t n_ctx;           // context size used during inference
     uint32_t n_ctx_seq;       // context for a single sequence
@@ -62,10 +75,7 @@ struct llama_cparams {
     bool kv_unified;
     size_t box_bytes;        // its size, 0 for n_ctx cells and n_rs_cells states
     bool box_deferred;       // box_bytes is its most, it is allocated by llama_memory_box_finalize()
-    bool box_draft;          // an MTP draft keeps its tokens in its blocks
-    ggml_type box_draft_type_k;
-    ggml_type box_draft_type_v;
-    const llama_hparams * box_draft_hparams; // the layers of an MTP head in a GGUF of its own, nullptr for those of the model
+    llama_box_draft box_draft; // the draft whose tokens the blocks keep
     bool pipeline_parallel;
 
     std::vector<bool> embeddings_layer_inp; // [n_layer()] extract input embeddings for layer

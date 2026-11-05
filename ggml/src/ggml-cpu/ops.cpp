@@ -8499,13 +8499,14 @@ void ggml_compute_forward_timestep_embedding(
 // ggml_compute_forward_argsort
 
 template<enum ggml_sort_order order>
+// equal values keep the order of their indices, like the stable sorts of the other backends
 struct cmp_argsort {
     const float * data;
     bool operator()(int32_t a, int32_t b) const {
         if constexpr (order == GGML_SORT_ORDER_ASC) {
-            return data[a] < data[b];
+            return data[a] < data[b] || (data[a] == data[b] && a < b);
         } else {
-            return data[a] > data[b];
+            return data[a] > data[b] || (data[a] == data[b] && a < b);
         }
     }
 };
@@ -8671,6 +8672,10 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
     const ggml_tensor * kv_idx  = q_rng ? dst->src[5] : nullptr;
     const ggml_tensor * kv_rows = q_rng ? nullptr : dst->src[5];
 
+    // a relative bias by distance over the ranges, see ggml_flash_attn_ext_set_rel_bias()
+    const float * rel_bias = dst->src[7] ? (const float *) dst->src[7]->data : nullptr;
+    const int64_t n_rel    = dst->src[7] ? dst->src[7]->ne[0] : 0;
+
     GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)
     GGML_TENSOR_LOCALS(size_t,  nbq, q,   nb)
     GGML_TENSOR_LOCALS(int64_t, nek, k,   ne)
@@ -8787,6 +8792,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
 
         // K/V rows to visit: [ic_start, ic_end), or a range of the index list of the query's group
         const int32_t * idx      = nullptr;
+        const int32_t * pos      = nullptr; // the positions of the rows of the list, for ALiBi or a relative bias
         int64_t         it_start = ic_start;
         int64_t         it_end   = ic_end;
 
@@ -8797,6 +8803,7 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
             GGML_ASSERT(rng[1] >= 0 && rng[1] <= rng[2] && rng[2] <= kv_idx->ne[0]);
 
             idx      = (const int32_t *) ((const char *) kv_idx->data + rng[0]*kv_idx->nb[1]);
+            pos      = kv_idx->ne[2] == 2 ? (const int32_t *) ((const char *) idx + kv_idx->nb[2]) : nullptr;
             it_start = rng[1];
             it_end   = rng[2];
         } else if (kv_rows) {
@@ -8816,8 +8823,15 @@ static void ggml_compute_forward_flash_attn_ext_f16_one_chunk(
             }
             GGML_ASSERT(ic < nek1);
 
-            // the mask of a list of rows is laid out like the list, see ggml_flash_attn_ext_set_kv_rows()
-            const float mv = mp ? slope*GGML_CPU_FP16_TO_FP32(mp[kv_rows ? it : ic]) : 0.0f;
+            // the mask of a list of rows is laid out like the list, see ggml_flash_attn_ext_set_kv_rows(); ALiBi over a
+            // range is the distance to its last row, which differs from the distance to the query by a constant only;
+            // a relative bias is looked up by that distance, see ggml_flash_attn_ext_set_rel_bias()
+            float mv = mp ? slope*GGML_CPU_FP16_TO_FP32(mp[kv_rows ? it : ic]) :
+                       pos && max_bias > 0.0f ? slope*(float) (pos[it] - pos[it_end - 1]) : 0.0f;
+            if (rel_bias && pos) {
+                const int64_t d = std::min<int64_t>(pos[it_end - 1] - pos[it], n_rel - 1);
+                mv += rel_bias[h*n_rel + std::max<int64_t>(d, 0)];
+            }
             if (mv == -INFINITY) {
                 continue;
             }
@@ -12227,18 +12241,22 @@ static void ggml_compute_forward_lightning_indexer_win(
         const int64_t t = ir/n_win;
         const int64_t j = ir%n_win;
 
-        const int64_t e  = (int64_t) rng[3*t + 0] + j;
-        const bool    in = e >= rng[3*t + 1] && e < rng[3*t + 2] && rows[e] >= 0;
+        const int64_t e      = (int64_t) rng[3*t + 0] + j;
+        const bool    in_rng = e >= rng[3*t + 1] && e < rng[3*t + 2];
 
-        GGML_ASSERT(!(e >= rng[3*t + 1] && e < rng[3*t + 2]) || (e >= 0 && e < n_list));
+        GGML_ASSERT(!in_rng || (e >= 0 && e < n_list));
 
+        const bool in = in_rng && rows[e] >= 0;
+
+        // the key as f32: converted into the scratch row, or read in place
+        const float * k_f32 = k_row_f32;
         if (in) {
             const char * k_row = (const char *) k->data + (size_t) rows[e]*k->nb[2];
 
             if (k_to_float) {
                 k_to_float(k_row, k_row_f32, n_embd);
             } else {
-                k_row_f32 = (float *) k_row;
+                k_f32 = (const float *) k_row;
             }
         }
 
@@ -12249,7 +12267,7 @@ static void ggml_compute_forward_lightning_indexer_win(
 
             if (in) {
                 const float * q_row = (const float *) ((const char *) q->data + h*q->nb[1] + t*q->nb[2]);
-                ggml_vec_dot_f32(n_embd, &qk, 0, q_row, 0, k_row_f32, 0, 1);
+                ggml_vec_dot_f32(n_embd, &qk, 0, q_row, 0, k_f32, 0, 1);
             }
 
             if (w) {

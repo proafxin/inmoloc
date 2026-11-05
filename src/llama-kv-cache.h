@@ -294,6 +294,9 @@ public:
     // shape of the index lists of the ubatch: [n_idx, n_group], padded so that graphs can be reused
     void get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const;
 
+    // planes of the index lists: 2 with ALiBi, whose second plane holds the positions of the rows
+    uint32_t kv_idx_planes() const;
+
     // kv_idx: I32 [n_idx, n_group], q_rng: I32 [3, n_tokens]
     void set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const;
 
@@ -348,7 +351,6 @@ public:
     void set_input_k_shift(ggml_tensor * dst) const;
 
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
-    void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
     void set_input_k_rot(ggml_tensor * dst) const;
     void set_input_v_rot(ggml_tensor * dst) const;
@@ -572,6 +574,7 @@ public:
     // see llama_kv_cache::set_input_kv_idx()
     bool kv_idx_supported() const;
     void get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const;
+    uint32_t kv_idx_planes() const;
     void set_input_kv_idx(ggml_tensor * kv_idx, ggml_tensor * q_rng, const llama_ubatch * ubatch, bool causal_attn) const;
 
     void set_input_kv_sel(ggml_tensor * kv_idx, ggml_tensor * q_rng, ggml_tensor * win_rng, uint32_t n_top,
@@ -614,7 +617,6 @@ public:
 
     void set_input_k_shift   (ggml_tensor * dst) const;
     void set_input_kq_mask   (ggml_tensor * dst, const llama_ubatch * ubatch, bool causal_attn) const;
-    void set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
     void set_input_k_rot(ggml_tensor * dst) const;
     void set_input_v_rot(ggml_tensor * dst) const;

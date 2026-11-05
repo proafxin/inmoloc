@@ -1328,21 +1328,19 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
 
     const ggml_log_level log_level_fit = params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR;
 
-    // the requests processed at once share one cache of n_ctx tokens
-    if (params.n_parallel > 1) {
-        params.kv_unified  = true;
-        cparams.kv_unified = true;
-    }
+    // the requests processed at once share the one elastic memory
+    params.kv_unified  = true;
+    cparams.kv_unified = true;
 
     // with the cache sized by the budget, fit only places the layers: for the cache of one typical request, against the
     // budget and without a margin
     const bool fit_layers_only = params.vram_budget_ctx && !model_only;
 
     // the elastic memory needs no dry run: all layers go on the device, and it is what the real context leaves of the
-    // budget, allocated last; an MTP head keeps its tokens in it, also from a GGUF of its own
-    const bool box_direct = !model_only && (!has_draft || spec_mtp);
+    // budget, allocated last; a draft keeps its tokens in it, an MTP head or a draft model of its own
+    const bool box_direct = !model_only;
 
-    if (params.fit_params && !(!model_only)) {
+    if (params.fit_params && model_only) {
         COM_TRC("%s", "fitting params to device memory ...\n");
         COM_TRC("%s", "(for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)\n");
 
@@ -1428,17 +1426,19 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     pimpl->model.reset(model);
 
     if (box_direct) {
-        // an MTP head in a GGUF of its own: the blocks of the elastic memory hold its layers
-        if (spec_mtp && has_draft) {
-            COM_INF("%s: loading the MTP draft model '%s'\n", __func__, params_dft.model.path.c_str());
+        // a draft in a GGUF of its own, an MTP head or a draft model: the blocks of the elastic memory hold its layers
+        if (has_draft) {
+            COM_INF("%s: loading the draft model '%s'\n", __func__, params_dft.model.path.c_str());
 
             pimpl->model_dft.reset(llama_model_load_from_file(params_dft.model.path.c_str(), mparams_dft));
             if (pimpl->model_dft == nullptr) {
-                COM_ERR("failed to load the MTP draft model '%s'\n", params_dft.model.path.c_str());
+                COM_ERR("failed to load the draft model '%s'\n", params_dft.model.path.c_str());
                 return;
             }
 
-            cparams.box_draft_model = pimpl->model_dft.get();
+            cparams.box_draft            = true;
+            cparams.box_draft_model      = pimpl->model_dft.get();
+            cparams.box_draft_standalone = !spec_mtp;
         }
 
         // the sequences follow the memory, and the outputs of a ubatch its tokens
@@ -1521,15 +1521,9 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     if (box_direct) {
         llama_memory_box_info info;
         if (llama_memory_box_get_info(llama_get_memory(lctx), &info)) {
-            // the outputs an MTP draft asks of this context are part of its compute buffers
-            if (spec_mtp) {
-                llama_set_embeddings_nextn(lctx, true, /*masked*/ false);
-                llama_context_reserve(lctx);
-            }
-
             // the draft is created once, here: what it takes is known before the elastic memory is allocated
             llama_context * ctx_dft = nullptr;
-            if (spec_mtp) {
+            if (spec_mtp || has_draft) {
                 llama_model * model_dft = pimpl->model_dft ? pimpl->model_dft.get() : model;
 
                 cparams_dft.n_ctx         = llama_n_ctx(lctx);
@@ -1539,10 +1533,16 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
 
                 ctx_dft = llama_init_from_model(model_dft, cparams_dft);
                 if (ctx_dft == nullptr) {
-                    COM_ERR("%s", "failed to create the MTP draft context\n");
+                    COM_ERR("%s", "failed to create the draft context\n");
                     llama_free(lctx);
                     return;
                 }
+            }
+
+            // the outputs a draft asks of this context and of its own are part of their compute buffers
+            if (ctx_dft) {
+                common_speculative_set_outputs(params.speculative, lctx, ctx_dft);
+                llama_context_reserve(lctx);
             }
 
             size_t box_bytes = 0;

@@ -2663,6 +2663,61 @@ llama_context * common_speculative_init_result::context() {
     return pimpl->context.get();
 }
 
+void common_speculative_set_outputs(const common_params_speculative & params, llama_context * ctx_tgt, llama_context * ctx_dft) {
+    const auto has = [&](common_speculative_type t) {
+        return std::find(params.types.begin(), params.types.end(), t) != params.types.end();
+    };
+
+    if (ctx_dft == nullptr) {
+        return;
+    }
+
+    const llama_model * model_dft = llama_get_model(ctx_dft);
+    const llama_model * model_tgt = llama_get_model(ctx_tgt);
+
+    if (has(COMMON_SPECULATIVE_TYPE_DRAFT_MTP)) {
+        llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false);
+        llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
+    }
+
+    // see common_speculative_impl_draft_eagle3
+    if (has(COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3)) {
+        const int32_t * ids   = llama_model_target_layer_ids  (model_dft);
+        const uint32_t  n_ids = llama_model_target_layer_ids_n(model_dft);
+        const int32_t   n_layer_tgt = llama_model_n_layer(model_tgt);
+
+        for (uint32_t k = 0; k < n_ids; ++k) {
+            if (ids[k] < n_layer_tgt) {
+                llama_set_embeddings_layer_inp(ctx_tgt, (uint32_t) ids[k], true);
+            } else if (ids[k] == n_layer_tgt) {
+                llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false);
+            }
+        }
+        llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
+    }
+
+    // see common_speculative_impl_draft_dflash
+    if (has(COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH) || has(COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK)) {
+        const int32_t * ids   = llama_model_target_layer_ids  (model_dft);
+        const uint32_t  n_ids = llama_model_target_layer_ids_n(model_dft);
+
+        for (uint32_t k = 0; k < n_ids; ++k) {
+            llama_set_embeddings_layer_inp(ctx_tgt, (uint32_t) ids[k], true);
+        }
+
+        bool causal_attn = false;
+        char buf[32] = {};
+        if (llama_model_meta_val_str(model_dft, "dflash.attention.causal", buf, sizeof(buf)) >= 0) {
+            causal_attn = std::strcmp(buf, "true") == 0;
+        }
+
+        const bool is_dflash2 = llama_model_dflash_selector_top_k(model_dft) > 0;
+
+        llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ !is_dflash2);
+        llama_set_causal_attn(ctx_dft, causal_attn);
+    }
+}
+
 common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt,
         llama_context * ctx_dft_ready, llama_model * model_dft_ready) {
     return std::make_unique<common_speculative_init_result>(params, model_tgt, ctx_tgt, ctx_dft_ready, model_dft_ready);

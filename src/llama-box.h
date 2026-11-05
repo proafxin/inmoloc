@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llama.h"
+#include "llama-cparams.h"
 
 #include "ggml-backend.h"
 #include "ggml-cpp.h"
@@ -137,6 +138,11 @@ public:
 
     bool has_draft() const { return row_bytes_draft > 0; }
 
+    // a draft model of its own whose layers the blocks hold (nullptr for MTP layers), in the slots il + draft_il_offset
+    void set_draft(const llama_hparams * hparams, int32_t il_offset) { draft_hparams = hparams; draft_il_offset = il_offset; }
+    const llama_hparams * get_draft_hparams()   const { return draft_hparams; }
+    int32_t               get_draft_il_offset() const { return draft_il_offset; }
+
     // whether model layer il is a draft layer of the box
     bool is_draft(int32_t il) const;
 
@@ -272,6 +278,9 @@ private:
 
     size_t n_attn_main = 0; // the attention layers before the draft layers
 
+    const llama_hparams * draft_hparams   = nullptr;
+    int32_t               draft_il_offset = 0;
+
     size_t r_row_bytes = 0; // padded to unit
     size_t s_row_bytes = 0;
     size_t x_row_bytes = 0;
@@ -359,9 +368,9 @@ private:
 
 // the elastic memory of a model; filter_attn selects the attention layers, and filter_recr the recurrent ones (nullptr
 // for a model without them, which ignores the state parameters); kv_size cells and rs_size states size it when box_bytes
-// is 0; with box_draft, the blocks hold the MTP layers of box_draft_hparams (an MTP head in a GGUF of its own), or of the
-// model when it is nullptr; extra_attn holds pre-built layer descriptors for layers whose dimensions differ from the main hparams (e.g. an
-// indexer cache with a different head size), appended after the main attention layers
+// is 0; the blocks also hold the layers of box_draft, see llama_box_draft; extra_attn holds pre-built layer descriptors
+// for layers whose dimensions differ from the main hparams (e.g. an indexer cache with a different head size), appended
+// after the main attention layers
 std::unique_ptr<llama_box> llama_box_make(
         const llama_model & model,
                 ggml_type   type_k,
@@ -375,10 +384,7 @@ std::unique_ptr<llama_box> llama_box_make(
                      bool   offload,
                    size_t   box_bytes,
                      bool   box_deferred,
-                     bool   box_draft,
-                ggml_type   box_draft_type_k,
-                ggml_type   box_draft_type_v,
-      const llama_hparams * box_draft_hparams,
+                     const llama_box_draft & box_draft,
     const std::function<bool(int32_t)> & filter_attn,
     const std::function<bool(int32_t)> & filter_recr,
     std::vector<llama_box::attn_layer>   extra_attn = {},

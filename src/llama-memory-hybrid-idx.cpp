@@ -51,7 +51,7 @@ llama_memory_hybrid_idx::llama_memory_hybrid_idx(
         type_r, type_s, rs_size,
         n_seq_max, n_rs_seq, rs_replay, offload, unified,
         filter_attn, filter_recr,
-        use_box, box_bytes, box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16, nullptr,
+        use_box, box_bytes, box_deferred, llama_box_draft{},
         // build indexer attn_layer descriptors for the box: K-only (has_v=false), one head of indexer_head_size
         // use il + n_layer_all as the box slot to avoid colliding with the main attention layers
         [&]() -> std::vector<llama_box::attn_layer> {

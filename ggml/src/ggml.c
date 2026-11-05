@@ -5552,9 +5552,8 @@ struct ggml_tensor * ggml_flash_attn_ext(
         GGML_ASSERT(q->ne[3] % mask->ne[3] == 0);
     }
 
-    if (max_bias > 0.0f) {
-        GGML_ASSERT(mask);
-    }
+    // ALiBi reads the distances from the mask, or without one from the positions of the rows that
+    // ggml_flash_attn_ext_set_kv_idx() adds, which checks them
 
     // permute(0, 2, 1, 3)
     int64_t ne[4] = { v->ne[0], q->ne[2], q->ne[1], q->ne[3] };
@@ -5627,7 +5626,6 @@ void ggml_flash_attn_ext_set_kv_idx(
 
     float max_bias = 0.0f;
     memcpy(&max_bias, (const float *) a->op_params + 1, sizeof(float));
-    GGML_ASSERT(max_bias == 0.0f && "kv_idx does not support ALiBi");
 
     const struct ggml_tensor * q = a->src[0];
     const struct ggml_tensor * k = a->src[1];
@@ -5635,13 +5633,35 @@ void ggml_flash_attn_ext_set_kv_idx(
     GGML_ASSERT(q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1);
 
     GGML_ASSERT(kv_idx->type == GGML_TYPE_I32 && ggml_is_contiguous(kv_idx));
-    GGML_ASSERT(kv_idx->ne[2] == 1 && kv_idx->ne[3] == 1);
+    // ALiBi reads the positions of the rows from the second plane, which a relative bias reads too
+    if ((max_bias != 0.0f && kv_idx->ne[2] != 2) || kv_idx->ne[2] > 2 || kv_idx->ne[3] != 1) {
+        GGML_ABORT("%s: the list %s [%lld, %lld, %lld, %lld] (view of %s) does not match max_bias = %f: ALiBi needs the positions in a second plane",
+                __func__, kv_idx->name, (long long) kv_idx->ne[0], (long long) kv_idx->ne[1], (long long) kv_idx->ne[2],
+                (long long) kv_idx->ne[3], kv_idx->view_src ? kv_idx->view_src->name : "-", max_bias);
+    }
 
     GGML_ASSERT(q_rng->type == GGML_TYPE_I32 && ggml_is_contiguous(q_rng));
     GGML_ASSERT(q_rng->ne[0] == 3 && q_rng->ne[1] >= q->ne[1] && q_rng->ne[2] == 1 && q_rng->ne[3] == 1);
 
     a->src[5] = kv_idx;
     a->src[6] = q_rng;
+}
+
+void ggml_flash_attn_ext_set_rel_bias(
+        struct ggml_tensor * a,
+        struct ggml_tensor * rel_bias) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(a->src[6] != NULL && a->src[5]->ne[2] == 2 && "the relative bias reads the positions of the ranges");
+    GGML_ASSERT(a->src[7] == NULL);
+
+    float max_bias = 0.0f;
+    memcpy(&max_bias, (const float *) a->op_params + 1, sizeof(float));
+    GGML_ASSERT(max_bias == 0.0f && "a relative bias takes the place of ALiBi");
+
+    GGML_ASSERT(rel_bias->type == GGML_TYPE_F32 && ggml_is_contiguous(rel_bias));
+    GGML_ASSERT(rel_bias->ne[0] >= 1 && rel_bias->ne[1] == a->src[0]->ne[2] && rel_bias->ne[2] == 1 && rel_bias->ne[3] == 1);
+
+    a->src[7] = rel_bias;
 }
 
 void ggml_flash_attn_ext_set_kv_rows(

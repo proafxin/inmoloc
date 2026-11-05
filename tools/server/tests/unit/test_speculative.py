@@ -14,7 +14,6 @@ def create_server():
     server.spec_type = "draft-simple"
     server.spec_draft_n_min = 4
     server.spec_draft_n_max = 8
-    server.fa = "off"
 
 
 @pytest.fixture(autouse=True)

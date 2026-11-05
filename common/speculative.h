@@ -120,6 +120,11 @@ private:
 using common_speculative_init_result_ptr = std::unique_ptr<common_speculative_init_result>;
 
 // ctx_dft_ready: an MTP draft context that exists already, which this takes over; nullptr to create the draft
+// the outputs a draft asks of the target context and of its own context (hidden states of target layers, the state of
+// the draft before its norm, its attention), set before their compute buffers are reserved, so that the memory budget
+// holds them; the draft implementations set the same again
+void common_speculative_set_outputs(const common_params_speculative & params, llama_context * ctx_tgt, llama_context * ctx_dft);
+
 // ctx_dft_ready and model_dft_ready: a draft created with the target context (see common_init_result::release_context_dft()),
 // which the result takes
 common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt,

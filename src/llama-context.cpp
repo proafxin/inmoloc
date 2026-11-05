@@ -303,10 +303,14 @@ llama_context::llama_context(
     cparams.kv_unified = true;
     cparams.box_bytes  = params.box_bytes;
     cparams.box_deferred = params.box_deferred;
-    cparams.box_draft  = params.box_draft;
-    cparams.box_draft_type_k = params.box_draft_type_k;
-    cparams.box_draft_type_v = params.box_draft_type_v;
-    cparams.box_draft_hparams = params.box_draft_model ? &params.box_draft_model->hparams : nullptr;
+    // a draft that reads the cache of its target (Gemma4 assistant) keeps no rows of its own
+    const bool draft_has_kv = params.box_draft_model == nullptr || params.box_draft_model->arch != LLM_ARCH_GEMMA4_ASSISTANT;
+
+    cparams.box_draft.enabled    = params.box_draft && draft_has_kv;
+    cparams.box_draft.type_k     = params.box_draft_type_k;
+    cparams.box_draft.type_v     = params.box_draft_type_v;
+    cparams.box_draft.hparams    = params.box_draft_model ? &params.box_draft_model->hparams : nullptr;
+    cparams.box_draft.standalone = params.box_draft_standalone;
 
     // a non-unified KV cache keeps one stream per seq and reserves graphs with one seq per stream,
     // which a recurrent-state pool smaller than n_seq_max cannot back
@@ -442,10 +446,14 @@ llama_context::llama_context(
             /*.box       =*/ nullptr,
         };
 
-        // an MTP draft on the same model keeps its tokens in the elastic memory of its target
-        if (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP && params.ctx_other) {
+        // a draft keeps its tokens in the elastic memory of its target: an MTP draft, or the draft model whose layers the
+        // target holds
+        if (params.ctx_other) {
             if (auto * mem_other = llama_get_memory(params.ctx_other); mem_other) {
-                params_mem.box = mem_other->get_box_shared();
+                const auto box = mem_other->get_box_shared();
+                if (box && (cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP || (box->has_draft() && box->get_draft_hparams() == &model.hparams))) {
+                    params_mem.box = box;
+                }
             }
         }
 
@@ -731,7 +739,8 @@ void llama_context::sched_reserve() {
     const uint32_t n_seqs = n_seq_max_ubatch();
     const uint32_t n_tokens = std::min(cparams.n_ctx, cparams.n_ubatch);
 
-    const size_t max_nodes = this->graph_max_nodes(n_tokens);
+    // graph_reserve() rounds the tokens of a ubatch up to a multiple of its sequences
+    const size_t max_nodes = this->graph_max_nodes(GGML_PAD(n_tokens, n_seqs));
 
     LLAMA_LOG_DEBUG("%s: max_nodes = %zu\n", __func__, max_nodes);
 
@@ -979,29 +988,13 @@ uint32_t llama_context::n_seq_max() const {
 }
 
 uint32_t llama_context::n_seq_max_ubatch() const {
-    // only a context whose memory holds recurrent state is limited by the cell pool;
-    // e.g. the MTP draft context of a hybrid arch uses a plain KV cache
-    // llama_memory_hybrid_idx derives from llama_memory_hybrid
-    const llama_memory_i * mem = memory.get();
-    const auto * mem_hyb = dynamic_cast<const llama_memory_hybrid *>(mem);
-
     // each seq of a ubatch has at least one token in it
     const uint32_t n_tokens_max = std::min(cparams.n_ctx, cparams.n_ubatch);
 
     // the elastic memory reads and writes the states in place, nothing per seq is reserved: the graphs are sized for the
     // most seqs a ubatch can hold, whatever the number of seqs that run at once (n_seq_max only caps the admission);
     // so is the draft context next to it, which decodes the same seqs
-    const bool elastic = true;
-    if (elastic) {
-        return std::min(n_tokens_max, cparams.n_seq_max);
-    }
-
-    const bool has_rs =
-        mem_hyb != nullptr ||
-        dynamic_cast<const llama_memory_recurrent *>(mem)   != nullptr ||
-        dynamic_cast<const llama_memory_hybrid_iswa *>(mem) != nullptr;
-
-    return std::min(has_rs ? cparams.n_rs_cells : cparams.n_seq_max, n_tokens_max);
+    return std::min(n_tokens_max, cparams.n_seq_max);
 }
 
 uint32_t llama_context::n_threads() const {
@@ -2613,23 +2606,35 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         res += 16u*9u*model.hparams.n_layer();
     }
 
-    uint32_t n_sampling_nodes = 0;
-    uint32_t n_sampling_nodes_max = 0;
+    // every sampler takes one row (an inactive one the dummy row); the outputs of a ubatch beyond them go to a sampler
+    // of all sequences, every one of them, or to the samplers of their sequences, n_outputs_max_per_seq each
+    const uint32_t n_outputs_ubatch = std::min(n_tokens, cparams.n_outputs_max);
+
+    uint32_t n_sampling_nodes     = 0;
+    uint32_t n_sampling_nodes_all = 0;
+    uint32_t n_sampling_nodes_seq = 0;
     for (const auto & [seq_id, sampler] : sampling.samplers) {
         const uint32_t n_nodes = llama_sampler_backend_n_nodes(sampler);
         n_sampling_nodes += n_nodes;
-        if (cparams.n_outputs_max_per_seq > 1 || seq_id == LLAMA_SEQ_ID_ALL) {
-            n_sampling_nodes_max = std::max(n_sampling_nodes_max, n_nodes);
+        if (seq_id == LLAMA_SEQ_ID_ALL) {
+            n_sampling_nodes_all = std::max(n_sampling_nodes_all, n_nodes);
+        } else if (cparams.n_outputs_max_per_seq > 1) {
+            n_sampling_nodes_seq = std::max(n_sampling_nodes_seq, n_nodes);
         }
     }
 
-    const uint32_t n_sampling_outputs_max = std::min<uint64_t>(
-            std::min(n_tokens, cparams.n_outputs_max),
-            (uint64_t) cparams.n_seq_max * cparams.n_outputs_max_per_seq);
+    const uint32_t n_outputs_seq = std::min<uint64_t>(n_outputs_ubatch, (uint64_t) cparams.n_seq_max * cparams.n_outputs_max_per_seq);
 
     res += n_sampling_nodes;
-    if (n_sampling_outputs_max > 1) {
-        res += (n_sampling_outputs_max - 1) * n_sampling_nodes_max;
+    if (n_outputs_ubatch > 1) {
+        res += (n_outputs_ubatch - 1) * n_sampling_nodes_all;
+    }
+    if (n_outputs_seq > 1) {
+        res += (n_outputs_seq - 1) * n_sampling_nodes_seq;
+    }
+    // build_sampling's own tensors: the logits padded with the dummy row, and its inputs
+    if (!sampling.samplers.empty()) {
+        res += 8;
     }
     return res;
 }
@@ -3996,13 +4001,13 @@ llama_context_params llama_context_default_params() {
         /*.ctx_other                   =*/ nullptr,
         /*.n_rs_cells                  =*/ 0,
         /*.rs_rollback                 =*/ LLAMA_RS_ROLLBACK_SNAPSHOT,
-        /*.elastic                     =*/ true,
         /*.box_bytes                   =*/ 0,
         /*.box_deferred                =*/ false,
         /*.box_draft                   =*/ false,
         /*.box_draft_type_k            =*/ GGML_TYPE_F16,
         /*.box_draft_type_v            =*/ GGML_TYPE_F16,
         /*.box_draft_model             =*/ nullptr,
+        /*.box_draft_standalone        =*/ false,
     };
 
     return result;

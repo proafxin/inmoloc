@@ -8040,9 +8040,19 @@ struct test_flash_attn_ext_kv_idx : public test_case {
     const int64_t nb;      // queries
     const ggml_type type_K;
     const ggml_type type_V;
+    const int64_t hs_v;    // head size of V, 0 for hs
+    const bool    v_view;  // V is the first hs_v values of the K rows (MLA)
+    const bool    sinks;   // attention sinks, one per Q head
+    const float   max_bias; // ALiBi, the positions of the rows in a second plane of the lists
+    const float   logit_softcap;
+    const int64_t n_dist;   // a relative bias by distance (T5) of n_dist distances, the positions in a second plane too
 
     std::string vars() override {
-        return VARS_TO_STR8(hs, nh, nr, kv, n_group, nb, type_K, type_V);
+        return VARS_TO_STR14(hs, nh, nr, kv, n_group, nb, type_K, type_V, hs_v, v_view, sinks, max_bias, logit_softcap, n_dist);
+    }
+
+    bool positions() const {
+        return max_bias != 0.0f || n_dist > 0;
     }
 
     double max_nmse_err() override {
@@ -8050,8 +8060,10 @@ struct test_flash_attn_ext_kv_idx : public test_case {
     }
 
     test_flash_attn_ext_kv_idx(int64_t hs = 128, int64_t nh = 4, int64_t nr = 4, int64_t kv = 1024, int64_t n_group = 3, int64_t nb = 8,
-            ggml_type type_K = GGML_TYPE_F16, ggml_type type_V = GGML_TYPE_F16)
-        : hs(hs), nh(nh), nr(nr), kv(kv), n_group(n_group), nb(nb), type_K(type_K), type_V(type_V) {}
+            ggml_type type_K = GGML_TYPE_F16, ggml_type type_V = GGML_TYPE_F16, int64_t hs_v = 0, bool v_view = false, bool sinks = false,
+            float max_bias = 0.0f, float logit_softcap = 0.0f, int64_t n_dist = 0)
+        : hs(hs), nh(nh), nr(nr), kv(kv), n_group(n_group), nb(nb), type_K(type_K), type_V(type_V), hs_v(hs_v > 0 ? hs_v : hs), v_view(v_view),
+          sinks(sinks), max_bias(max_bias), logit_softcap(logit_softcap), n_dist(n_dist) {}
 
     int64_t n_idx() const {
         return (kv + n_group - 1)/n_group;
@@ -8064,17 +8076,28 @@ struct test_flash_attn_ext_kv_idx : public test_case {
         ggml_tensor * k = ggml_new_tensor_4d(ctx, type_K, hs, kv, nh, 1);
         ggml_set_name(k, "k");
 
-        ggml_tensor * v = ggml_new_tensor_4d(ctx, type_V, hs, kv, nh, 1);
+        ggml_tensor * v = v_view ? ggml_view_4d(ctx, k, hs_v, kv, nh, 1, k->nb[1], k->nb[2], k->nb[3], 0) :
+            ggml_new_tensor_4d(ctx, type_V, hs_v, kv, nh, 1);
         ggml_set_name(v, "v");
 
-        ggml_tensor * kv_idx = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_idx(), n_group);
+        ggml_tensor * kv_idx = ggml_new_tensor_3d(ctx, GGML_TYPE_I32, n_idx(), n_group, positions() ? 2 : 1);
         ggml_set_name(kv_idx, "kv_idx");
 
         ggml_tensor * q_rng = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, 3, nb);
         ggml_set_name(q_rng, "q_rng");
 
-        ggml_tensor * out = ggml_flash_attn_ext(ctx, q, k, v, nullptr, 1.0f/sqrtf(hs), 0.0f, 0.0f);
+        ggml_tensor * out = ggml_flash_attn_ext(ctx, q, k, v, nullptr, 1.0f/sqrtf(hs), max_bias, logit_softcap);
         ggml_flash_attn_ext_set_kv_idx(out, kv_idx, q_rng);
+        if (n_dist > 0) {
+            ggml_tensor * rel_bias = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_dist, nh*nr);
+            ggml_set_name(rel_bias, "rel_bias");
+            ggml_flash_attn_ext_set_rel_bias(out, rel_bias);
+        }
+        if (sinks) {
+            ggml_tensor * s = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, nh*nr);
+            ggml_set_name(s, "sinks");
+            ggml_flash_attn_ext_add_sinks(out, s);
+        }
         ggml_prec_set_acc(out, GGML_PREC_F32);
         ggml_set_name(out, "out");
 
@@ -8084,10 +8107,16 @@ struct test_flash_attn_ext_kv_idx : public test_case {
     void initialize_tensors(ggml_context * ctx) override {
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
             if (strcmp(t->name, "kv_idx") == 0) {
-                // group g holds the rows g, g + n_group, ...; the entries past its rows are left 0
-                std::vector<int32_t> data(n_idx()*n_group, 0);
+                // group g holds the rows g, g + n_group, ...; the entries past its rows are left 0; with ALiBi the
+                // positions of the rows follow, increasing with gaps
+                const int64_t n_plane = positions() ? 2 : 1;
+                std::vector<int32_t> data(n_idx()*n_group*n_plane, 0);
                 for (int64_t r = 0; r < kv; ++r) {
-                    data[(r % n_group)*n_idx() + r/n_group] = (int32_t) r;
+                    const int64_t i = r/n_group;
+                    data[(r % n_group)*n_idx() + i] = (int32_t) r;
+                    if (n_plane == 2) {
+                        data[(n_group + r % n_group)*n_idx() + i] = (int32_t) (2*i + (i % 3 == 0));
+                    }
                 }
                 ggml_backend_tensor_set(t, data.data(), 0, data.size()*sizeof(int32_t));
             } else if (strcmp(t->name, "q_rng") == 0) {
@@ -11196,12 +11225,107 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
         test_cases.emplace_back(new test_flash_attn_ext_kv_idx(256, 4, 6, 16384, 11, 33, type_K, type_V));
     }
+    // K/V heads of different sizes: MLA (V the start of the K rows), MiMo, Mistral Small 4, at the GQA ratios of the models
+    for (auto [type_K, type_V] : std::vector<std::pair<ggml_type, ggml_type>>{
+            {GGML_TYPE_F16, GGML_TYPE_F16}, {GGML_TYPE_F32, GGML_TYPE_F32}, {GGML_TYPE_Q8_0, GGML_TYPE_Q8_0}}) {
+        for (int64_t nb : { 1, 33 }) {
+            // GQA ratios below the heads of a tile too: the tile has heads left over
+            for (int64_t nr : { 1, 2, 4, 16, 20, 32 }) {
+                test_cases.emplace_back(new test_flash_attn_ext_kv_idx(576, 1, nr, 1024, 3, nb, type_K, type_K, 512, true));
+                test_cases.emplace_back(new test_flash_attn_ext_kv_idx(576, 1, nr, 1024, 3, nb, type_K, type_K, 512, true, true));
+            }
+            for (int64_t nr : { 1, 2, 8 }) {
+                test_cases.emplace_back(new test_flash_attn_ext_kv_idx(512, 1, nr, 1024, 3, nb, type_K, type_V));
+            }
+            for (int64_t nr : { 1, 2, 8, 16 }) {
+                test_cases.emplace_back(new test_flash_attn_ext_kv_idx(192, 4, nr, 1024, 3, nb, type_K, type_V, 128));
+            }
+            for (int64_t nr : { 1, 2, 32 }) {
+                test_cases.emplace_back(new test_flash_attn_ext_kv_idx(320, 1, nr, 1024, 3, nb, type_K, type_K, 256, true));
+            }
+        }
+    }
+    // the heads the vector kernel has no instance for, and f32 rows: read by the tensor core kernel, one query per tile
+    for (auto [type_K, type_V] : std::vector<std::pair<ggml_type, ggml_type>>{
+            {GGML_TYPE_F16, GGML_TYPE_F16}, {GGML_TYPE_F32, GGML_TYPE_F32}}) {
+        for (int64_t hs : { 64, 80, 96, 112, 128, 256 }) {
+            for (int64_t nr : { 1, 3, 8 }) {
+                for (int64_t nb : { 1, 33 }) {
+                    test_cases.emplace_back(new test_flash_attn_ext_kv_idx(hs, 4, nr, 1024, 3, nb, type_K, type_V));
+                    test_cases.emplace_back(new test_flash_attn_ext_kv_idx(hs, 4, nr, 1024, 3, nb, type_K, type_V, 0, false, true));
+                }
+            }
+        }
+    }
+    // ALiBi: f16 rows through the vector kernel, f32 through the tensor core kernel; head counts that are not a power of
+    // 2 take the second series of slopes
+    for (auto [type_K, type_V] : std::vector<std::pair<ggml_type, ggml_type>>{
+            {GGML_TYPE_F16, GGML_TYPE_F16}, {GGML_TYPE_F32, GGML_TYPE_F32}}) {
+        for (int64_t hs : { 64, 128, 256 }) {
+            for (auto [nh, nr] : std::vector<std::pair<int64_t, int64_t>>{ {4, 1}, {6, 1}, {1, 12}, {4, 3} }) {
+                for (int64_t nb : { 1, 33 }) {
+                    test_cases.emplace_back(new test_flash_attn_ext_kv_idx(hs, nh, nr, 1024, 3, nb, type_K, type_V, 0, false, false, 8.0f));
+                }
+            }
+        }
+    }
+    // a relative bias by distance (T5 decoder): f16 rows through the vector kernel, f32 through the tensor core kernel;
+    // the positions have gaps, so distances past the end of the table take its last entry
+    for (auto [type_K, type_V] : std::vector<std::pair<ggml_type, ggml_type>>{
+            {GGML_TYPE_F16, GGML_TYPE_F16}, {GGML_TYPE_F32, GGML_TYPE_F32}}) {
+        for (int64_t hs : { 64, 128 }) {
+            for (auto [nh, nr] : std::vector<std::pair<int64_t, int64_t>>{ {6, 1}, {1, 8}, {2, 3} }) {
+                for (int64_t nb : { 1, 33 }) {
+                    test_cases.emplace_back(new test_flash_attn_ext_kv_idx(hs, nh, nr, 1024, 3, nb, type_K, type_V, 0, false, false, 0.0f, 0.0f, 129));
+                }
+            }
+        }
+    }
+    // the heads neither the vector nor the tensor core kernel has an instance for, read by the kernel of any head size
+    for (auto [type_K, type_V] : std::vector<std::pair<ggml_type, ggml_type>>{
+            {GGML_TYPE_F16, GGML_TYPE_F16}, {GGML_TYPE_BF16, GGML_TYPE_BF16}, {GGML_TYPE_F32, GGML_TYPE_F32}}) {
+        for (int64_t hs : { 8, 40, 48, 72 }) {
+            for (int64_t nr : { 1, 4 }) {
+                for (int64_t nb : { 1, 33 }) {
+                    test_cases.emplace_back(new test_flash_attn_ext_kv_idx(hs, 2, nr, 1024, 3, nb, type_K, type_V));
+                }
+            }
+        }
+        test_cases.emplace_back(new test_flash_attn_ext_kv_idx(48, 2, 4, 1024, 3, 33, type_K, type_V, 0, false, true));
+        test_cases.emplace_back(new test_flash_attn_ext_kv_idx(48, 2, 4, 1024, 3, 33, type_K, type_V, 0, false, false, 0.0f, 30.0f));
+        test_cases.emplace_back(new test_flash_attn_ext_kv_idx(48, 2, 4, 1024, 3, 33, type_K, type_V, 0, false, false, 8.0f));
+        test_cases.emplace_back(new test_flash_attn_ext_kv_idx(48, 2, 4, 1024, 3, 33, type_K, type_V, 0, false, false, 0.0f, 0.0f, 129));
+    }
+    // K/V type pairs without a vector or tensor core instance (e.g. a q8_0 K with an f16 V), read by the kernel of any head
+    // size, which dequantizes the rows as it reads them
+    for (auto [type_K, type_V] : std::vector<std::pair<ggml_type, ggml_type>>{
+            {GGML_TYPE_Q8_0, GGML_TYPE_F16}, {GGML_TYPE_F16, GGML_TYPE_Q8_0}, {GGML_TYPE_Q4_0, GGML_TYPE_F16},
+            {GGML_TYPE_Q4_1, GGML_TYPE_Q5_0}, {GGML_TYPE_Q5_1, GGML_TYPE_BF16}, {GGML_TYPE_IQ4_NL, GGML_TYPE_IQ4_NL}}) {
+        for (int64_t hs : { 64, 128, 256 }) {
+            for (int64_t nb : { 1, 33 }) {
+                test_cases.emplace_back(new test_flash_attn_ext_kv_idx(hs, 2, 4, 1024, 3, nb, type_K, type_V));
+            }
+        }
+        test_cases.emplace_back(new test_flash_attn_ext_kv_idx(256, 2, 4, 1024, 3, 33, type_K, type_V, 0, false, true));
+    }
+    // a logit softcap (Gemma 2, Grok): f16 rows through the vector kernel, f32 through the tensor core kernel
+    for (auto [type_K, type_V] : std::vector<std::pair<ggml_type, ggml_type>>{
+            {GGML_TYPE_F16, GGML_TYPE_F16}, {GGML_TYPE_F32, GGML_TYPE_F32}}) {
+        for (int64_t hs : { 128, 256 }) {
+            for (int64_t nr : { 1, 2, 8 }) {
+                for (int64_t nb : { 1, 33 }) {
+                    test_cases.emplace_back(new test_flash_attn_ext_kv_idx(hs, 4, nr, 1024, 3, nb, type_K, type_V, 0, false, false, 0.0f, 30.0f));
+                    test_cases.emplace_back(new test_flash_attn_ext_kv_idx(hs, 4, nr, 1024, 3, nb, type_K, type_V, 0, false, true,  0.0f, 30.0f));
+                }
+            }
+        }
+    }
 
     // the other K/V cache types, converted to f16 as the rows are loaded
     for (auto [type_K, type_V] : std::vector<std::pair<ggml_type, ggml_type>>{
             {GGML_TYPE_BF16, GGML_TYPE_BF16}, {GGML_TYPE_Q8_0, GGML_TYPE_Q8_0}, {GGML_TYPE_Q4_0, GGML_TYPE_Q4_0},
             {GGML_TYPE_Q4_1, GGML_TYPE_Q4_1}, {GGML_TYPE_Q5_0, GGML_TYPE_Q5_0}, {GGML_TYPE_Q5_1, GGML_TYPE_Q5_1},
-            {GGML_TYPE_Q8_0, GGML_TYPE_F16},  {GGML_TYPE_F16,  GGML_TYPE_Q8_0}}) {
+            {GGML_TYPE_Q8_0, GGML_TYPE_F16},  {GGML_TYPE_F16,  GGML_TYPE_Q8_0}, {GGML_TYPE_F32, GGML_TYPE_F32}}) {
         for (int64_t hs : { 64, 128, 256 }) {
             for (int64_t nr : { 1, 4 }) {
                 for (int64_t nb : { 1, 32, 77 }) {

@@ -30,10 +30,7 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
                      bool   use_box,
                    size_t   box_bytes,
                      bool   box_deferred,
-                     bool   box_draft,
-                ggml_type   box_draft_type_k,
-                ggml_type   box_draft_type_v,
-      const llama_hparams * box_draft_hparams,
+                     const llama_box_draft & box_draft,
                      bool   box_swa) :
     hparams_lid(model.hparams), n_stream(unified ? 1 : n_seq_max) {
 
@@ -41,7 +38,7 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
     if (use_box) {
         // with a SWA cache next to it, the layers it does not filter are the layers of both
         box_own = llama_box_make(model, type_k, type_v, kv_size, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
-                box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v, box_draft_hparams,
+                box_bytes, box_deferred, box_draft,
                 [&](int32_t il) { return box_swa || filter_mla == nullptr || filter_mla(il); }, nullptr,
                 box_layers_lid(model, type_k, filter_lid));
 

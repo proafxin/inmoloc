@@ -1423,9 +1423,6 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                         if (tensor_id_copy(base_id, cur_backend_id, 0) == NULL) {
                             struct ggml_tensor * base_copy = ggml_dup_tensor_layout(sched->ctx, base);
                             ggml_format_name(base_copy, "%s#%s#0", ggml_backend_name(backend), base->name);
-                            // the views read it, which ggml-alloc does not count as uses: keep it for the whole graph
-                            ggml_set_input(base_copy);
-                            ggml_set_output(base_copy);
                             tensor_id_copy(base_id, cur_backend_id, 0) = base_copy;
                             SET_CAUSE(base_copy, "4.cpy");
 
@@ -1435,6 +1432,10 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                             }
                             split->inputs[n_inputs] = base;
                         }
+                        // the views read the copy, which ggml-alloc does not count as uses: keep it for the whole graph,
+                        // also when a direct use of the input made it first
+                        ggml_set_input (tensor_id_copy(base_id, cur_backend_id, 0));
+                        ggml_set_output(tensor_id_copy(base_id, cur_backend_id, 0));
                         if (tensor_id_copy(src_id, cur_backend_id, 0) == NULL) {
                             struct ggml_tensor * view = ggml_view_4d(sched->ctx, tensor_id_copy(base_id, cur_backend_id, 0),
                                     src->ne[0], src->ne[1], src->ne[2], src->ne[3], src->nb[1], src->nb[2], src->nb[3], src->view_offs);

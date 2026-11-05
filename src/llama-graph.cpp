@@ -61,7 +61,8 @@ static void build_attn_inp_kv_idx(
     uint32_t n_group = 0;
     mctx->get_kv_idx_shape(ubatch, n_idx, n_group);
 
-    kv_idx = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_idx, n_group);
+    // with ALiBi a second plane holds the positions of the rows, see ggml_flash_attn_ext_set_kv_idx()
+    kv_idx = ggml_new_tensor_3d(ctx, GGML_TYPE_I32, n_idx, n_group, mctx->kv_idx_planes());
     ggml_set_input(kv_idx);
     ggml_set_name(kv_idx, "attn_inp_kv_idx");
 
@@ -350,9 +351,19 @@ void llm_graph_input_pos_bucket::set_input(const llama_ubatch * ubatch) {
     }
 }
 
-void llm_graph_input_pos_bucket_kv::set_input(const llama_ubatch * ubatch) {
+void llm_graph_input_pos_bucket_dist::set_input(const llama_ubatch * ubatch) {
+    GGML_UNUSED(ubatch);
+
     if (pos_bucket) {
-        mctx->set_input_pos_bucket(pos_bucket, ubatch);
+        GGML_ASSERT(ggml_backend_buffer_is_host(pos_bucket->buffer));
+        GGML_ASSERT(pos_bucket->ne[0] == LLAMA_REL_POS_N_DIST);
+
+        int32_t * data = (int32_t *) pos_bucket->data;
+
+        // the key d positions before the query, as the KV cache would bucket it
+        for (int32_t d = 0; d < LLAMA_REL_POS_N_DIST; ++d) {
+            data[d] = llama_relative_position_bucket(0, d, hparams.n_rel_attn_bkts, false);
+        }
     }
 }
 
@@ -2984,15 +2995,11 @@ ggml_tensor * llm_graph_context::build_inp_pos_bucket_enc() const {
 }
 
 ggml_tensor * llm_graph_context::build_inp_pos_bucket_dec() const {
-    const auto * mctx_cur = static_cast<const llama_kv_cache_context *>(mctx);
-
-    auto inp = std::make_unique<llm_graph_input_pos_bucket_kv>(hparams, mctx_cur);
-
-    const auto n_kv = mctx_cur->get_n_kv();
+    auto inp = std::make_unique<llm_graph_input_pos_bucket_dist>(hparams);
 
     auto & cur = inp->pos_bucket;
 
-    cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, n_kv, n_tokens);
+    cur = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, LLAMA_REL_POS_N_DIST);
     ggml_set_input(cur);
 
     res->add_input(std::move(inp));
@@ -3015,6 +3022,16 @@ ggml_tensor * llm_graph_context::build_pos_bias(ggml_tensor * pos_bucket, ggml_t
     return pos_bias;
 }
 
+ggml_tensor * llm_graph_context::build_pos_bias_dist(ggml_tensor * pos_bucket_dist, ggml_tensor * attn_rel_b) const {
+    // attn_rel_b: [n_head, n_buckets], the rows of the buckets of the distances: [n_head, n_dist]
+    ggml_tensor * pos_bias = ggml_get_rows(ctx0, attn_rel_b, pos_bucket_dist);
+    pos_bias = ggml_cont(ctx0, ggml_transpose(ctx0, pos_bias));
+
+    cb(pos_bias, "pos_bias_dist", -1);
+
+    return pos_bias;
+}
+
 ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * q,
          ggml_tensor * k,
@@ -3029,7 +3046,10 @@ ggml_tensor * llm_graph_context::build_attn_mha(
          ggml_tensor * kv_idx,
          ggml_tensor * q_rng,
          ggml_tensor * kv_hi,
-                bool   no_flash) const {
+                bool   no_flash,
+         ggml_tensor * rel_bias) const {
+    GGML_ASSERT(rel_bias == nullptr || (kv_idx && q_rng));
+
     const bool v_trans = v->nb[1] > v->nb[2];
 
     // split the batch into streams if needed
@@ -3051,12 +3071,14 @@ ggml_tensor * llm_graph_context::build_attn_mha(
             v = ggml_transpose(ctx0, v);
         }
 
-        // this can happen when KV cache is not used (e.g. an embedding model with non-causal attn)
-        if (k->type == GGML_TYPE_F32) {
+        // this can happen when KV cache is not used (e.g. an embedding model with non-causal attn); rows read through
+        // lists are read in place, f32 too: their views do not span the rows of the elastic memory, a copy would not
+        // hold them
+        if (k->type == GGML_TYPE_F32 && kv_idx == nullptr) {
             k = ggml_cast(ctx0, k, GGML_TYPE_F16);
         }
 
-        if (v->type == GGML_TYPE_F32) {
+        if (v->type == GGML_TYPE_F32 && kv_idx == nullptr) {
             v = ggml_cast(ctx0, v, GGML_TYPE_F16);
         }
 
@@ -3073,6 +3095,9 @@ ggml_tensor * llm_graph_context::build_attn_mha(
         // it with kv_hi
         if (kv_idx && q_rng) {
             ggml_flash_attn_ext_set_kv_idx(cur, kv_idx, q_rng);
+            if (rel_bias) {
+                ggml_flash_attn_ext_set_rel_bias(cur, rel_bias);
+            }
         } else if (kv_idx && kv_hi) {
             ggml_flash_attn_ext_set_kv_rows_hi(cur, kv_idx, kv_hi);
         } else if (kv_idx) {
@@ -3283,7 +3308,8 @@ static std::unique_ptr<llm_graph_input_attn_kv> build_attn_inp_kv_impl(
         uint32_t n_group = 0;
         mctx_cur->get_kv_idx_shape(ubatch, n_idx, n_group);
 
-        inp->self_kv_idx = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, n_idx, n_group);
+        // with ALiBi a second plane holds the positions of the rows, see ggml_flash_attn_ext_set_kv_idx()
+        inp->self_kv_idx = ggml_new_tensor_3d(ctx0, GGML_TYPE_I32, n_idx, n_group, mctx_cur->kv_idx_planes());
         ggml_set_input(inp->self_kv_idx);
         ggml_set_name(inp->self_kv_idx, "attn_inp_kv_idx");
 
@@ -3391,12 +3417,18 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * cur = nullptr;
 
-    if (cparams.kv_idx && inp->self_kv_idx && kq_b == nullptr) {
-        // indexed attention: views of all cells, each token reads the cells of its sequence
+    // the elastic memory reads every token through ranges unless the prompt runs read row lists: a batch without runs
+    // (e.g. non-causal attention, see build_attn_runs()) takes the ranges too, the cells have no other layout
+    if (inp->self_kv_idx && (cparams.kv_idx || inp->attn_runs.empty())) {
+        // indexed attention: views of all cells, each token reads the cells of its sequence; a KQ bias is a bias by
+        // distance there, see build_pos_bias_dist()
+        GGML_ASSERT(kq_b == nullptr || (kq_b->ne[0] == LLAMA_REL_POS_N_DIST && kq_b->ne[2] == 1));
+
         ggml_tensor * k = mctx_cur->get_k_all(ctx0, il);
         ggml_tensor * v = mctx_cur->get_v_all(ctx0, il);
 
-        cur = build_attn_mha(q_cur, k, v, nullptr, nullptr, sinks, v_mla, 0, kq_scale, il, inp->self_kv_idx, inp->self_q_rng);
+        cur = build_attn_mha(q_cur, k, v, nullptr, nullptr, sinks, v_mla, 0, kq_scale, il, inp->self_kv_idx, inp->self_q_rng,
+                nullptr, false, kq_b);
     } else if (inp->attn_runs.empty() || kq_b != nullptr) {
         ggml_tensor * q = q_cur;
         ggml_tensor * k = mctx_cur->get_k(ctx0, il);
@@ -4685,7 +4717,7 @@ void llm_graph_context::build_sampling() const {
 
 int32_t llama_relative_position_bucket(llama_pos x, llama_pos y, uint64_t n_buckets, bool bidirectional) {
     // TODO move to hparams if a T5 variant appears that uses a different value
-    const int64_t max_distance = 128;
+    const int64_t max_distance = LLAMA_REL_POS_N_DIST - 1;
 
     if (bidirectional) {
         n_buckets >>= 1;

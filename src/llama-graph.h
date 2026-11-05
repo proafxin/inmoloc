@@ -221,20 +221,21 @@ public:
     const llama_hparams hparams;
 };
 
-class llm_graph_input_pos_bucket_kv : public llm_graph_input_i {
+// the relative distances of the buckets of a causal attention over the KV cache (T5 decoder): from the max distance of
+// llama_relative_position_bucket() on, every distance is in the last bucket
+static constexpr int32_t LLAMA_REL_POS_N_DIST = 129;
+
+// the bucket of each distance, see ggml_flash_attn_ext_set_rel_bias()
+class llm_graph_input_pos_bucket_dist : public llm_graph_input_i {
 public:
-    llm_graph_input_pos_bucket_kv(
-            const llama_hparams & hparams,
-            const llama_kv_cache_context * mctx) : hparams(hparams), mctx(mctx) {}
-    virtual ~llm_graph_input_pos_bucket_kv() = default;
+    llm_graph_input_pos_bucket_dist(const llama_hparams & hparams) : hparams(hparams) {}
+    virtual ~llm_graph_input_pos_bucket_dist() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
 
-    ggml_tensor * pos_bucket = nullptr; // I32 [n_kv, n_batch]
+    ggml_tensor * pos_bucket = nullptr; // I32 [LLAMA_REL_POS_N_DIST]
 
     const llama_hparams hparams;
-
-    const llama_kv_cache_context * mctx;
 };
 
 class llm_graph_input_out_ids : public llm_graph_input_i {
@@ -1303,8 +1304,10 @@ struct llm_graph_context {
 
     ggml_tensor * build_inp_cross_embd() const;
     ggml_tensor * build_inp_pos_bucket_enc() const;
-    ggml_tensor * build_inp_pos_bucket_dec() const;
+    ggml_tensor * build_inp_pos_bucket_dec() const; // the bucket of each distance
     ggml_tensor * build_pos_bias(ggml_tensor * pos_bucket, ggml_tensor * attn_rel_b) const;
+    // the bias of each distance and head, F32 [LLAMA_REL_POS_N_DIST, n_head], see ggml_flash_attn_ext_set_rel_bias()
+    ggml_tensor * build_pos_bias_dist(ggml_tensor * pos_bucket_dist, ggml_tensor * attn_rel_b) const;
 
     //
     // attention
@@ -1325,7 +1328,8 @@ struct llm_graph_context {
                                              // I32 [n_rows], see ggml_flash_attn_ext_set_kv_rows()
             ggml_tensor * q_rng  = nullptr,  // I32 [3, n_tokens]
             ggml_tensor * kv_hi  = nullptr,  // I32 [n_tokens] with a list of rows, see ggml_flash_attn_ext_set_kv_rows_hi()
-                   bool   no_flash = false) const; // attention through matrix products, for sizes with no flash attention kernel
+                   bool   no_flash = false,  // attention through matrix products, for sizes with no flash attention kernel
+            ggml_tensor * rel_bias = nullptr) const; // with q_rng, see ggml_flash_attn_ext_set_rel_bias()
 
     llm_graph_input_attn_no_cache * build_attn_inp_no_cache() const;
 

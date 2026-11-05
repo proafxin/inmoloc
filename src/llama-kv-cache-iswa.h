@@ -31,8 +31,9 @@ public:
         const  layer_share_cb & share,
         // the elastic memory, which holds the cells of both caches: kv_size is its cells then
         const std::shared_ptr<llama_box> & box = nullptr,
-        // the same for a draft context, whose target holds the elastic memory
-        const std::shared_ptr<llama_box> & box_ref = nullptr);
+        // the same for a draft context, whose target holds the elastic memory, its layers in the slots il + box_il_offset
+        const std::shared_ptr<llama_box> & box_ref = nullptr,
+        int32_t box_il_offset = 0);
 
     llama_kv_cache_iswa(
             const llama_model & model,
@@ -52,7 +53,8 @@ public:
         const  layer_reuse_cb & reuse,
         const  layer_share_cb & share,
         const std::shared_ptr<llama_box> & box = nullptr,
-        const std::shared_ptr<llama_box> & box_ref = nullptr);
+        const std::shared_ptr<llama_box> & box_ref = nullptr,
+        int32_t box_il_offset = 0);
 
     ~llama_kv_cache_iswa() = default;
 

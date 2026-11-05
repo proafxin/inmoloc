@@ -28,9 +28,10 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
     const  layer_reuse_cb & reuse,
     const  layer_share_cb & share,
     const std::shared_ptr<llama_box> & box,
-    const std::shared_ptr<llama_box> & box_ref) :
+    const std::shared_ptr<llama_box> & box_ref,
+    int32_t box_il_offset) :
     llama_kv_cache_iswa(model, model.hparams, type_k, type_v, v_trans, offload, swa_full, unified,
-            kv_size, n_seq_max, n_ubatch, n_pad, mem_other, filter, reuse, share, box, box_ref) {
+            kv_size, n_seq_max, n_ubatch, n_pad, mem_other, filter, reuse, share, box, box_ref, box_il_offset) {
 }
 
 llama_kv_cache_iswa::llama_kv_cache_iswa(
@@ -51,7 +52,8 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
     const  layer_reuse_cb & reuse,
     const  layer_share_cb & share,
     const std::shared_ptr<llama_box> & box,
-    const std::shared_ptr<llama_box> & box_ref) : unified(unified) {
+    const std::shared_ptr<llama_box> & box_ref,
+    int32_t box_il_offset) : unified(unified) {
 
     // chain filters
     const layer_filter_cb filter_base = [&](int32_t il) {
@@ -104,14 +106,14 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
     kv_base = std::make_unique<llama_kv_cache>(
             model, hparams, type_k, type_v,
             v_trans, offload, unified, size_base, n_seq_max, n_pad,
-            0, LLAMA_SWA_TYPE_NONE, mem_other_base, filter_base, reuse, share, "", nullptr, 0, box_ref, box);
+            0, LLAMA_SWA_TYPE_NONE, mem_other_base, filter_base, reuse, share, "", nullptr, box_il_offset, box_ref, box);
 
     LLAMA_LOG_INFO("%s: creating     SWA KV cache, size = %u cells\n", __func__, size_swa);
 
     kv_swa = std::make_unique<llama_kv_cache>(
             model, hparams, type_k, type_v,
             v_trans, offload, unified, size_swa, n_seq_max, n_pad,
-            hparams.n_swa, hparams.swa_type, mem_other_swa, filter_swa, reuse, share, "", nullptr, 0, box_ref, box);
+            hparams.n_swa, hparams.swa_type, mem_other_swa, filter_swa, reuse, share, "", nullptr, box_il_offset, box_ref, box);
 }
 
 void llama_kv_cache_iswa::clear(bool data) {

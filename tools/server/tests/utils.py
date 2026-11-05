@@ -535,8 +535,10 @@ IMG_URL_TRUCK = "https://huggingface.co/ggml-org/tinygemma3-GGUF/resolve/main/te
 IMG_URL_CAT = "https://huggingface.co/ggml-org/tinygemma3-GGUF/resolve/main/test/91_cat.png"
 LORA_FILE_URL = "https://huggingface.co/ggml-org/stories15M_MOE/resolve/main/moe_shakespeare15M.gguf"
 MODEL_DRAFT_FILE_URL = "https://huggingface.co/ggml-org/tiny-llamas/resolve/main/stories15M-q4_0.gguf"
+# the DFlash draft of ServerPreset.qwen3_4b
+DFLASH_DRAFT_FILE_URL = "https://huggingface.co/AtomicChat/Qwen3-4B-DFlash-GGUF/resolve/main/Qwen3-4B-DFlash.Q8_0.gguf"
 
-TEST_FILE_URLS = [IMG_URL_TRUCK, IMG_URL_CAT, LORA_FILE_URL, MODEL_DRAFT_FILE_URL]
+TEST_FILE_URLS = [IMG_URL_TRUCK, IMG_URL_CAT, LORA_FILE_URL, MODEL_DRAFT_FILE_URL, DFLASH_DRAFT_FILE_URL]
 
 
 class ServerPreset:
@@ -575,7 +577,8 @@ class ServerPreset:
                 except (RuntimeError, TimeoutError):
                     server.stop()
                     server.offline = False
-                    server.start()
+                    # the download is part of the start: a model of a few GB takes minutes
+                    server.start(timeout_seconds=1800)
                 server.stop()
         except (OSError, RuntimeError) as e:
             print(f"Not all test files are available: {e}")
@@ -623,7 +626,6 @@ class ServerPreset:
         server.n_ctx = 1024
         server.n_batch = 300
         server.n_ubatch = 300
-        server.fa = "on"
         server.seed = 42
         server.server_embeddings = True
         return server
@@ -662,6 +664,22 @@ class ServerPreset:
         server.n_predict = 64
         server.temperature = 0.0
         server.seed = 42
+        return server
+
+    @staticmethod
+    def qwen3_4b() -> ServerProcess:
+        # the target of the DFlash draft of DFLASH_DRAFT_FILE_URL
+        server = ServerProcess()
+        server.offline = True # will be downloaded by load_all()
+        server.model_hf_repo = "ggml-org/Qwen3-4B-GGUF"
+        server.model_hf_file = "Qwen3-4B-Q4_K_M.gguf"
+        server.model_alias = "qwen3-4b"
+        server.n_ctx = 2048
+        server.n_batch = 512
+        server.n_predict = 64
+        server.temperature = 0.0
+        server.seed = 42
+        server.vram_budget = "6G"
         return server
 
     @staticmethod

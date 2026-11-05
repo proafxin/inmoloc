@@ -1,6 +1,7 @@
 #include "common.cuh"
 #include "fattn-common.cuh"
 #include "fattn-mma-f16.cuh"
+#include "fattn-rows.cuh"
 #include "fattn-tile.cuh"
 #include "fattn-vec.cuh"
 #include "fattn.cuh"
@@ -548,6 +549,7 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
 // Best FlashAttention kernel for a specific GPU:
 enum best_fattn_kernel {
     BEST_FATTN_KERNEL_NONE    =   0,
+    BEST_FATTN_KERNEL_ROWS    =  50, // per query ranges at any head size, see fattn-rows.cuh
     BEST_FATTN_KERNEL_TILE    = 200,
     BEST_FATTN_KERNEL_VEC     = 100,
     BEST_FATTN_KERNEL_MMA_F16 = 400,
@@ -614,12 +616,15 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         float logit_softcap = 0.0f;
         memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
 
-        // ALiBi biases by the distance of the positions, which the lists do not hold
-        if (mask || max_bias != 0.0f || Q->ne[3] != 1) {
+        // ALiBi and a relative bias read the positions of the rows from the second plane of the lists
+        const bool pos_needed = max_bias != 0.0f || dst->src[7] != nullptr;
+        if (mask || Q->ne[3] != 1 || dst->src[5]->ne[2] > 2 || (pos_needed && dst->src[5]->ne[2] != 2)) {
             return BEST_FATTN_KERNEL_NONE;
         }
-        // the vector kernel reads the heads it has an instance for, with the logit softcap at 128 and 256
-        if (K->ne[0] == V->ne[0] && ggml_cuda_get_fattn_vec_case(K->ne[0], K->type, V->type) != nullptr &&
+        // the vector kernel reads the heads it has an instance for, with the logit softcap at 128 and 256; it reads f32
+        // rows through an f16 copy of all of them, which in the elastic memory is the whole of it
+        const bool f32 = K->type == GGML_TYPE_F32 || V->type == GGML_TYPE_F32;
+        if (!f32 && K->ne[0] == V->ne[0] && ggml_cuda_get_fattn_vec_case(K->ne[0], K->type, V->type) != nullptr &&
                 (logit_softcap == 0.0f || K->ne[0] == 128 || K->ne[0] == 256)) {
             return BEST_FATTN_KERNEL_VEC;
         }
@@ -628,8 +633,15 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
                                                        K->ne[0] == 112 || K->ne[0] == 128 || K->ne[0] == 256)) ||
                              (K->ne[0] == 192 && V->ne[0] == 128) || (K->ne[0] == 320 && V->ne[0] == 256) ||
                              (K->ne[0] == 512 && V->ne[0] == 512) || (K->ne[0] == 576 && V->ne[0] == 512);
-        return head_ok && logit_softcap == 0.0f && GGML_CUDA_CC_IS_NVIDIA(cc) && turing_mma_available(cc) &&
-            ggml_cuda_fattn_mma_kv_rows_types_ok(K->type, V->type, K->ne[0]) ? BEST_FATTN_KERNEL_MMA_F16 : BEST_FATTN_KERNEL_NONE;
+        // with a logit softcap it has an instance for the f32 rows at the heads of the softcap models
+        const bool softcap_ok = logit_softcap == 0.0f || (K->type == GGML_TYPE_F32 && V->type == GGML_TYPE_F32 &&
+            K->ne[0] == V->ne[0] && (K->ne[0] == 128 || K->ne[0] == 256 || K->ne[0] == 512));
+        if (head_ok && softcap_ok && GGML_CUDA_CC_IS_NVIDIA(cc) && turing_mma_available(cc) &&
+                ggml_cuda_fattn_mma_kv_rows_types_ok(K->type, V->type, K->ne[0])) {
+            return BEST_FATTN_KERNEL_MMA_F16;
+        }
+        // the other heads (e.g. 8, 40, 48, 72) by the kernel of any head size
+        return ggml_cuda_flash_attn_ext_rows_supported(dst) ? BEST_FATTN_KERNEL_ROWS : BEST_FATTN_KERNEL_NONE;
 #endif // defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
     }
     if (dst->src[5] != nullptr) {
@@ -818,6 +830,7 @@ size_t ggml_cuda_flash_attn_ext_get_alloc_size(int device, const ggml_tensor * d
             need_f16_K = K->type == GGML_TYPE_F32 || f16_fallback;
             need_f16_V = V->type == GGML_TYPE_F32 || f16_fallback;
         } break;
+        case BEST_FATTN_KERNEL_ROWS: // reads the rows as they are
         case BEST_FATTN_KERNEL_NONE:
             break;
     }
@@ -833,6 +846,9 @@ void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("fatal error");
+        case BEST_FATTN_KERNEL_ROWS:
+            ggml_cuda_flash_attn_ext_rows(ctx, dst);
+            break;
         case BEST_FATTN_KERNEL_TILE:
             ggml_cuda_flash_attn_ext_tile(ctx, dst);
             break;

@@ -433,11 +433,8 @@ extern "C" {
         uint32_t n_rs_cells;            // recurrent-state cells shared by all sequences (0 = n_seq_max) [EXPERIMENTAL]
         enum llama_rs_rollback_type rs_rollback; // how the recurrent state rolls back, see llama_rs_rollback_type [EXPERIMENTAL]
 
-        // hold the KV cells and the recurrent states in one elastic memory of the size of n_ctx cells and n_rs_cells
-        // states, where any mix of tokens and states fits, when the model supports it, see llama_memory_box_*
-        bool elastic;
-
-        // the elastic memory takes box_bytes bytes (0 = the size of n_ctx cells and n_rs_cells states)
+        // the KV cells and the recurrent states are held in one elastic memory, where any mix of tokens and states fits,
+        // see llama_memory_box_*; it takes box_bytes bytes (0 = the size of n_ctx cells and n_rs_cells states)
         size_t box_bytes;
 
         // box_bytes is the most the elastic memory can take, and none of it is allocated: once the real context shows
@@ -450,8 +447,10 @@ extern "C" {
         enum ggml_type box_draft_type_k;
         enum ggml_type box_draft_type_v;
 
-        // the MTP head in a GGUF of its own, whose layers the blocks hold; NULL for the MTP layers of this model
+        // the model of the draft whose layers the blocks hold: an MTP head in a GGUF of its own, or with box_draft_standalone
+        // a draft model of its own (all its layers); NULL for the MTP layers of this model
         const struct llama_model * box_draft_model;
+        bool                       box_draft_standalone;
     };
 
     struct llama_model_tensor_override {

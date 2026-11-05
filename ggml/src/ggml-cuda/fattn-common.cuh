@@ -24,6 +24,7 @@ typedef void (* fattn_kernel_t)(
         const char * __restrict__ V,
         const char * __restrict__ mask,
         const char * __restrict__ sinks,
+        const float * __restrict__ rel_bias,
         const int  * __restrict__ KV_max,
         float      * __restrict__ dst,
         float2     * __restrict__ dst_meta,
@@ -799,8 +800,8 @@ static __global__ void flash_attn_stream_k_fixup_uniform(
         max_val = max_val_new;
     }
 
-    // Write back final result:
-    *dst = dst_val / rowsum;
+    // Write back final result: a row that sees no K/V row (an empty range of a list) is 0, like on the CPU
+    *dst = rowsum > 0.0f ? dst_val / rowsum : 0.0f;
 }
 
 // General fixup kernel for the case where the number of blocks per tile is not uniform across tiles
@@ -910,8 +911,8 @@ static __global__ void flash_attn_stream_k_fixup_general(
         kbc_stop = kbc;
     }
 
-    // Write back final result:
-    *dst = dst_val / rowsum;
+    // Write back final result: a row that sees no K/V row (an empty range of a list) is 0, like on the CPU
+    *dst = rowsum > 0.0f ? dst_val / rowsum : 0.0f;
 }
 
 template<int D> // D == head size
@@ -1263,6 +1264,7 @@ void launch_fattn(
         V_data,
         q_rng ? (const char *) q_rng->data : mask ? ((const char *) mask->data) : nullptr,
         sinks ? ((const char *) sinks->data) : nullptr,
+        KQV->src[7] ? (const float *) KQV->src[7]->data : nullptr,
         kv_idx ? (const int *) kv_idx->data : kv_rows ? (const int *) kv_rows->data : KV_max.ptr,
         !stream_k && parallel_blocks > 1 ? dst_tmp.ptr : (float *) KQV->data, dst_tmp_meta.ptr,
         scale, max_bias, m0, m1, n_head_log2, logit_softcap,
@@ -1272,7 +1274,10 @@ void launch_fattn(
         // ne32 flags the prefix lengths of a list of rows (ggml_flash_attn_ext_set_kv_rows_hi) with -1, per query ranges with -2
         kv_idx ? kv_idx->ne[0] : mask ? mask->ne[1] : 0,
         kv_idx ? -2 : rows_hi ? -1 : mask ? mask->ne[2] : 0, kv_idx ? 1 : mask ? mask->ne[3] : 0,
-        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0
+        // per query ranges have no mask: nb31 is the offset in entries of the positions of the rows (ALiBi, relative
+        // bias), 0 without, nb32 the distances of the relative bias (ggml_flash_attn_ext_set_rel_bias)
+        kv_idx ? (kv_idx->ne[2] == 2 ? int32_t(kv_idx->nb[2] / sizeof(int32_t)) : 0) : mask ? mask->nb[1] : 0,
+        kv_idx ? (KQV->src[7] ? int32_t(KQV->src[7]->ne[0]) : 0) : mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0
     );
     CUDA_CHECK(cudaGetLastError());
 

@@ -28,6 +28,7 @@ static __global__ void flash_attn_ext_vec(
         const char * V_ptr,
         const char * mask_ptr,
         const char * sinks_ptr,
+        const float * rel_bias_ptr,
         const int  * KV_max_ptr,
         float      * dst_ptr,
         float2     * dst_meta_ptr,
@@ -57,7 +58,7 @@ static __global__ void flash_attn_ext_vec(
 
     // Skip unused kernel variants for faster compilation:
     if (use_logit_softcap && !(D == 128 || D == 256)) {
-        GGML_UNUSED_VARS(Q, K, V, mask, sinks, KV_max, dst, dst_meta, scale,
+        GGML_UNUSED_VARS(Q, K, V, mask, sinks, rel_bias_ptr, KV_max, dst, dst_meta, scale,
             max_bias, m0, m1, n_head_log2, logit_softcap,
             ne00, ne01, ne02, ne03,
                   nb01, nb02, nb03,
@@ -136,6 +137,13 @@ static __global__ void flash_attn_ext_vec(
     const half * maskh  = (const half  *) (mask + nb33*(sequence % ne33) + nb31*ic0);
 
     const float slope = get_alibi_slope(max_bias, head, n_head_log2, m0, m1);
+
+    // indexed attention with ALiBi: the columns are heads, each with its slope, see ggml_flash_attn_ext_set_kv_idx()
+    float slope_col[ncols];
+#pragma unroll
+    for (int j = 0; j < ncols; ++j) {
+        slope_col[j] = use_kv_idx ? get_alibi_slope(max_bias, head + j, n_head_log2, m0, m1) : slope;
+    }
 
     static_assert(D % (2*WARP_SIZE) == 0, "D not divisible by 2*WARP_SIZE == 64.");
     constexpr int nwarps = nthreads / WARP_SIZE;
@@ -272,11 +280,17 @@ static __global__ void flash_attn_ext_vec(
 
     // indexed attention reads the rows through the list of the query, the K/V pointers stay at the first row
     const int32_t * kv_list = nullptr;
+    const int32_t * kv_pos  = nullptr; // ALiBi, relative bias: the positions of the rows of the list, nb31 entries after it
+    int pos_ref = 0;                   // the position of the last row of the range, see ggml_flash_attn_ext_set_kv_idx()
     int k_VKQ_max;
     if constexpr (use_kv_idx) {
         const int32_t * rng = (const int32_t *) mask_ptr + 3*ic0;
         kv_list   = KV_max + int64_t(rng[0])*ne31 + rng[1];
         k_VKQ_max = rng[2] - rng[1];
+        if (nb31 != 0 && k_VKQ_max > 0) {
+            kv_pos  = kv_list + nb31;
+            pos_ref = kv_pos[k_VKQ_max - 1];
+        }
     } else {
         k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
     }
@@ -319,6 +333,15 @@ static __global__ void flash_attn_ext_vec(
 
                 if (use_kv_idx && k_VKQ_0 + i_KQ >= k_VKQ_max) {
                     sum = -INFINITY; // past the end of the list
+                } else if (use_kv_idx && kv_pos) {
+                    // ALiBi, or a relative bias by distance (nb32 distances), see ggml_flash_attn_ext_set_rel_bias()
+                    const int dist = pos_ref - kv_pos[k_VKQ_0 + i_KQ];
+                    if (max_bias > 0.0f) {
+                        sum -= slope_col[j]*float(dist);
+                    }
+                    if (rel_bias_ptr && col_ok(j)) {
+                        sum += rel_bias_ptr[int64_t(head + j)*nb32 + min(max(dist, 0), nb32 - 1)];
+                    }
                 }
 
                 if (mask && col_ok(j)) {
@@ -563,7 +586,7 @@ static __global__ void flash_attn_ext_vec(
         dst_meta[((sequence*int(ne01.z) + q_dst)*ne02 + head_dst)*gridDim.y + blockIdx.y] = make_float2(KQ_max[tid], KQ_sum[tid]);
     }
 #else
-    GGML_UNUSED_VARS(Q_ptr, K_ptr, V_ptr, mask_ptr, sinks_ptr, KV_max_ptr, dst_ptr, dst_meta_ptr, scale,
+    GGML_UNUSED_VARS(Q_ptr, K_ptr, V_ptr, mask_ptr, sinks_ptr, rel_bias_ptr, KV_max_ptr, dst_ptr, dst_meta_ptr, scale,
         max_bias, m0, m1, n_head_log2, logit_softcap,
         ne00, ne01, ne02, ne03,
               nb01, nb02, nb03,

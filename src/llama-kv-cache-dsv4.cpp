@@ -1415,10 +1415,7 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
                    size_t   box_bytes,
                      bool   box_deferred,
                  uint32_t   n_batch,
-                     bool   box_draft,
-                ggml_type   box_draft_type_k,
-                ggml_type   box_draft_type_v,
-      const llama_hparams * box_draft_hparams) :
+                     const llama_box_draft & box_draft) :
     hparams_raw(model.hparams),
     hparams_csa(model.hparams),
     hparams_hca(model.hparams),
@@ -1499,11 +1496,17 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
         const uint32_t n_comp = kv_size/(DSV4_CSA_RATIO*n_block) + kv_size/(DSV4_HCA_RATIO*n_block) + 3;
 
         // the MTP layers have the K-only rows of the draft cache, see llama_kv_cache_dsv4_draft
-        const llama_dsv4_draft_hparams hparams_draft(box_draft_hparams ? *box_draft_hparams : model.hparams);
+        const llama_dsv4_draft_hparams hparams_draft(box_draft.hparams ? *box_draft.hparams : model.hparams);
+
+        llama_box_draft draft = box_draft;
+        draft.hparams = &hparams_draft.hparams_draft;
 
         box = llama_box_make(model, type_k, type_v, kv_size + n_seq_max*n_comp*n_block, GGML_TYPE_F32, GGML_TYPE_F32, n_seq_max, 0, false, offload,
-                box_bytes, box_deferred, box_draft, box_draft_type_k, box_draft_type_v, &hparams_draft.hparams_draft,
-                [&](int32_t il) { return filter_raw(il); }, nullptr, {}, std::move(lid), std::move(pieces), &hparams_raw);
+                box_bytes, box_deferred, draft,
+                [&](int32_t il) { return filter_raw(il);
+
+        // the draft is known by its model, not by the K-only copy of its hparams
+        box->set_draft(box_draft.standalone ? box_draft.hparams : nullptr, box->get_draft_il_offset()); }, nullptr, {}, std::move(lid), std::move(pieces), &hparams_raw);
 
         kv_size   = box->get_n_cells();
         n_seq_max = box->get_n_seq_max();

@@ -30,10 +30,7 @@ public:
                          bool   use_box = false,
                        size_t   box_bytes = 0,
                          bool   box_deferred = false,
-                         bool   box_draft = false,
-                    ggml_type   box_draft_type_k = GGML_TYPE_F16,
-                    ggml_type   box_draft_type_v = GGML_TYPE_F16,
-          const llama_hparams * box_draft_hparams = nullptr);
+                         const llama_box_draft & box_draft = {});
 
     ~llama_kv_cache_dsa_iswa() = default;
 

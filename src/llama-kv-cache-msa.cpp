@@ -48,7 +48,7 @@ llama_kv_cache_msa::llama_kv_cache_msa(
         }
 
         box_own = llama_box_make(model, type_k, type_v, kv_size, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
-                box_bytes, box_deferred, false, GGML_TYPE_F16, GGML_TYPE_F16, nullptr,
+                box_bytes, box_deferred, llama_box_draft{},
                 [&](int32_t il) { return filter == nullptr || filter(il); }, nullptr, std::move(layers_idx));
 
         // the blocks of a sequence are chosen in the rows of that sequence: attention reads copies of them
@@ -113,11 +113,6 @@ void llama_kv_cache_msa::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1
 }
 
 void llama_kv_cache_msa::seq_div(llama_seq_id seq_id, llama_pos p0, llama_pos p1, int d) {
-    // the elastic memory reads a sequence through slots of its positions, one cell each
-    if (kv_base->get_box() && d > 1) {
-        throw std::runtime_error("MSA: the elastic memory keeps one cell per position, positions cannot be divided (group attention)");
-    }
-
     kv_base->seq_div(seq_id, p0, p1, d);
     kv_idx ->seq_div(seq_id, p0, p1, d);
 }
@@ -384,14 +379,15 @@ void llama_kv_cache_msa_context::box_layout(const llama_ubatch & ubatch, int blk
     for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
         const llama_seq_id seq_id = ubatch.seq_id_unq[s];
 
-        const llama_pos p0  = kv->seq_pos_min(seq_id)/blk*blk;
-        const int64_t   len = GGML_PAD((int64_t) (kv->seq_pos_max(seq_id) + 1 - p0), pad);
+        // the cells of the sequence one after the other, from the slot of its first position in its block
+        const int64_t off = kv->seq_pos_min(seq_id) % blk;
+        const int64_t len = GGML_PAD(off + (int64_t) base->get_cells(seq_id).seq_n_cells(seq_id), pad);
 
         n_list += len;
         n_win   = std::max(n_win, len);
     }
 
-    GGML_ASSERT(n_win <= n_win_max);
+    GGML_ASSERT(n_win <= n_win_max && "MSA: a sequence holds more cells than the context window of the model");
 
     n_list += n_win;
 
@@ -424,16 +420,18 @@ void llama_kv_cache_msa_context::set_input_box(ggml_tensor * rows, ggml_tensor *
 
     std::fill(d_bias, d_bias + nblk*n_tokens, 0.0f);
 
+    // a sequence takes a slot for each of its cells, in causal order: the slot of a cell is its rank in the sequence, after
+    // the slots of the positions before the first one in its block. With positions that follow each other the blocks are
+    // the blocks of the positions; with positions removed or divided (seq_div) they are blocks of the cached tokens
     struct seq_slots {
-        int64_t   base = 0;
-        llama_pos p0   = 0;
-        llama_pos pos_min = 0;
+        int64_t base = 0;
+        int64_t off  = 0;
+        std::vector<llama_pos> pos;
     };
 
     std::map<llama_seq_id, seq_slots> seqs;
 
-    std::vector<int32_t>   cells;
-    std::vector<llama_pos> pos;
+    std::vector<int32_t> cells;
 
     int64_t n_used = 0;
     for (uint32_t s = 0; s < ubatch->n_seqs_unq; ++s) {
@@ -441,25 +439,21 @@ void llama_kv_cache_msa_context::set_input_box(ggml_tensor * rows, ggml_tensor *
 
         auto & seq = seqs[seq_id];
 
-        base->seq_cells_causal(seq_id, false, cells, pos);
+        base->seq_cells_causal(seq_id, false, cells, seq.pos);
         GGML_ASSERT(!cells.empty());
 
-        seq.base    = n_used;
-        seq.pos_min = pos.front();
-        seq.p0      = pos.front()/blk*blk;
+        seq.base = n_used;
+        seq.off  = seq.pos.front() % blk;
 
-        n_used += GGML_PAD((int64_t) (pos.back() + 1 - seq.p0), pad);
+        n_used += GGML_PAD(seq.off + (int64_t) cells.size(), pad);
 
         GGML_ASSERT(n_used <= n_list);
 
-        // a position without a cell (before the first one, or removed from the middle) has no row: it is not scored, see
-        // ggml_lightning_indexer_heads(), and never seen
+        // the slots before the first cell have no row: they are not scored, see ggml_lightning_indexer_heads()
         std::fill(d_rows + seq.base, d_rows + n_used, -1);
 
         for (size_t c = 0; c < cells.size(); ++c) {
-            GGML_ASSERT((c == 0 || pos[c] > pos[c - 1]) && "MSA: one cell per position");
-
-            d_rows[seq.base + pos[c] - seq.p0] = (int32_t) base->cell_row(cells[c]);
+            d_rows[seq.base + seq.off + c] = (int32_t) base->cell_row(cells[c]);
         }
     }
 
@@ -470,28 +464,24 @@ void llama_kv_cache_msa_context::set_input_box(ggml_tensor * rows, ggml_tensor *
         const auto &    seq = seqs.at(ubatch->seq_id[i][0]);
         const llama_pos p1  = ubatch->pos[i];
 
-        // the masked positions before p1 are a prefix, see llama_kv_cache::causal_range()
-        llama_pos lo = seq.pos_min;
-        llama_pos hi = p1;
-        while (lo < hi) {
-            const llama_pos m = lo + (hi - lo)/2;
-            if (llama_hparams::is_masked_swa(n_swa, swa_type, m, p1)) {
-                lo = m + 1;
-            } else {
-                hi = m;
-            }
-        }
+        const auto & pos = seq.pos;
 
-        GGML_ASSERT(p1 + 1 - seq.p0 <= (llama_pos) (nblk*blk));
+        // the cells up to the token, and of them the first its window sees: the masked ones are a prefix, see
+        // llama_kv_cache::causal_range()
+        const int64_t hi = std::upper_bound(pos.begin(), pos.end(), p1) - pos.begin();
+        const int64_t lo = std::partition_point(pos.begin(), pos.begin() + hi,
+                [&](llama_pos p0) { return llama_hparams::is_masked_swa(n_swa, swa_type, p0, p1); }) - pos.begin();
+
+        GGML_ASSERT(hi > 0 && seq.off + hi <= nblk*blk);
 
         d_win[3*i + 0] = (int32_t) seq.base;
-        d_win[3*i + 1] = (int32_t) (seq.base + lo - seq.p0);
-        d_win[3*i + 2] = (int32_t) (seq.base + p1 + 1 - seq.p0);
+        d_win[3*i + 1] = (int32_t) (seq.base + seq.off + lo);
+        d_win[3*i + 2] = (int32_t) (seq.base + seq.off + hi);
 
         d_off[i] = (int32_t) (seq.base/blk);
 
-        // the blocks of the window around the token
-        const int64_t L = (p1 - seq.p0)/blk;
+        // the blocks of the window around the slot of the token
+        const int64_t L = (seq.off + hi - 1)/blk;
 
         for (int l = 0; l < local && L - l >= 0; ++l) {
             d_bias[i*nblk + L - l] = 1e30f;

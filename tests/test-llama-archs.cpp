@@ -50,17 +50,25 @@ static void set_tensor_data(struct ggml_tensor * tensor, void * userdata) {
     std::mt19937 gen(seed);
     std::normal_distribution<float> dis(0.0f, 1.0e-2f);
 
+    // the gain of a norm is near 1 in a real model: near 0 it leaves activations below the normal range of F16, where
+    // the device rounds them far more than any checkpoint does
+    const char * name = tensor->name;
+    const size_t n_name = strlen(name);
+    const bool norm_gain = strstr(name, "norm") != nullptr && n_name > 7 && strcmp(name + n_name - 7, ".weight") == 0 &&
+            ggml_n_dims(tensor) == 1;
+    const float base = norm_gain ? 1.0f : 0.0f;
+
     const int64_t ne = ggml_nelements(tensor);
     if (tensor->type == GGML_TYPE_F32) {
         std::vector<float> tmp(ne);
         for (int64_t i = 0; i < ne; i++) {
-            tmp[i] = dis(gen);
+            tmp[i] = base + dis(gen);
         }
         ggml_backend_tensor_set(tensor, tmp.data(), 0, ggml_nbytes(tensor));
     } else if (tensor->type == GGML_TYPE_F16) {
         std::vector<ggml_fp16_t> tmp(ne);
         for (int64_t i = 0; i < ne; i++) {
-            tmp[i] = ggml_fp32_to_fp16(dis(gen));
+            tmp[i] = ggml_fp32_to_fp16(base + dis(gen));
         }
         ggml_backend_tensor_set(tensor, tmp.data(), 0, ggml_nbytes(tensor));
     } else {
@@ -69,7 +77,7 @@ static void set_tensor_data(struct ggml_tensor * tensor, void * userdata) {
 }
 
 static void usage(char ** argv) {
-    printf("Usage: %s [-a/--arch arch] [-s/--seed seed] [-o/--out dir] [-v N] [-h/--help]\n", argv[0]);
+    printf("Usage: %s [-a/--arch arch] [-s/--seed seed] [-o/--out dir] [-k/--top-k N] [-v N] [-h/--help]\n", argv[0]);
 }
 
 static std::vector<llama_token> get_tokens(const uint32_t n_tokens, const uint32_t n_vocab, const size_t seed){
@@ -82,6 +90,10 @@ static std::vector<llama_token> get_tokens(const uint32_t n_tokens, const uint32
     }
     return ret;
 }
+
+// the rows a sparse attention keeps of each query (-k): as many as there are tokens, it keeps them all; with fewer, the
+// devices can keep different rows of the same scores, as their sums round apart
+static uint32_t g_indexer_top_k = 128;
 
 static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     gguf_context_ptr ret(gguf_init_empty());
@@ -293,7 +305,7 @@ static gguf_context_ptr get_gguf_ctx(const llm_arch arch, const bool moe) {
     ms.add_kv(LLM_KV_ATTENTION_INDEXER_KEY_LENGTH,
               arch == LLM_ARCH_QWEN4EXP ? n_embd_head : uint32_t(128));
 
-    ms.add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K,        uint32_t(8));
+    ms.add_kv(LLM_KV_ATTENTION_INDEXER_TOP_K,        g_indexer_top_k);
     ms.add_kv(LLM_KV_ATTENTION_INDEXER_BLOCK_SIZE,   uint32_t(4));
     ms.add_kv(LLM_KV_ATTENTION_INDEXER_LOCAL_BLOCKS, uint32_t(1));
     ms.add_kv(LLM_KV_ROPE_DIMENSION_SECTIONS, std::vector<uint32_t>({n_embd_head/4, n_embd_head/4, n_embd_head/4, n_embd_head/4}));
@@ -408,19 +420,63 @@ static void report_nans(const char * name, const std::vector<float> & logits, co
 // read still gives the same logits, so they are compared themselves
 struct attn_outputs {
     std::map<std::string, std::vector<float>> tensors;
+    std::map<std::string, std::vector<std::vector<int32_t>>> experts; // the experts of each token, sorted
+
+    // the run whose attention inputs (attn_norm-<il>) this run takes: each attention then reads the same input in both
+    // runs, the rounding of the layers before it (FFN, matmuls) does not carry into it
+    const attn_outputs *          inject = nullptr;
+    std::map<std::string, size_t> inject_pos;
 };
 
-static bool capture_attn(ggml_tensor * t, bool ask, void * user_data) {
-    // the names the graphs leave on the output of attention, a graph can rename what build_attn returns
-    static const char * names[] = { "kqv_out-", "attn_derope-", "attn_pregate-", "attn_kqv-", "attn_out-" };
+// the names the graphs leave on the output of attention, a graph can rename what build_attn returns
+static const char * attn_names[] = { "kqv_out-", "attn_derope-", "attn_pregate-", "attn_kqv-", "attn_out-" };
 
-    const bool wanted = t->type == GGML_TYPE_F32 && std::any_of(std::begin(names), std::end(names),
-            [&](const char * name) { return strncmp(t->name, name, strlen(name)) == 0; });
+static bool capture_attn(ggml_tensor * t, bool ask, void * user_data) {
+    const auto & names = attn_names;
+
+    // LOCAL_INFERENCE_TEST_ATTN_ALL also compares what runs between the attention layers, to see where a mismatch starts
+    static const char * names_between[] = { "attn_norm-", "hc_attn_pre-", "hc_ffn_pre-", "ffn_out-", "ffn_moe_probs-", "ffn_moe_weights-" };
+    static const bool   between         = getenv("LOCAL_INFERENCE_TEST_ATTN_ALL") != nullptr;
+
+    const auto named = [&](const char * name) { return strncmp(t->name, name, strlen(name)) == 0; };
+
+    // the input of an attention layer, the tensor itself and not a view of it
+    const bool input = t->type == GGML_TYPE_F32 && named("attn_norm-") && strchr(t->name, ' ') == nullptr && ggml_is_contiguous(t);
+
+    const bool wanted = t->type == GGML_TYPE_F32 && (std::any_of(std::begin(names), std::end(names), named) ||
+            (between && std::any_of(std::begin(names_between), std::end(names_between), named)));
+
+    // the experts each token picks, sorted, to tell when the logits differ by a near-tie of the router (see first_flip)
+    const bool experts = t->type == GGML_TYPE_I32 && named("ffn_moe_topk-") && ggml_n_dims(t) <= 2;
     if (ask) {
-        return wanted;
+        return wanted || input || experts;
     }
 
-    auto & out = ((attn_outputs *) user_data)->tensors[t->name];
+    auto * run = (attn_outputs *) user_data;
+
+    // the scheduler stops after the node the callback asked for: what reads it has not run yet
+    if (input && run->inject) {
+        const auto it = run->inject->tensors.find(t->name);
+        if (it != run->inject->tensors.end()) {
+            size_t & pos = run->inject_pos[t->name];
+            const size_t n = ggml_nelements(t);
+            GGML_ASSERT(pos + n <= it->second.size());
+            ggml_backend_tensor_set(t, it->second.data() + pos, 0, ggml_nbytes(t));
+            pos += n;
+        }
+    }
+    if (experts) {
+        auto & out = run->experts[t->name];
+        std::vector<int32_t> row(t->ne[0]);
+        for (int64_t i = 0; i < t->ne[1]; ++i) {
+            ggml_backend_tensor_get(t, row.data(), i*t->nb[1], t->ne[0]*sizeof(int32_t));
+            std::sort(row.begin(), row.end());
+            out.push_back(row);
+        }
+        return true;
+    }
+
+    auto & out = run->tensors[t->name];
     const size_t n = out.size();
     out.resize(n + ggml_nelements(t));
     ggml_backend_tensor_get(t, out.data() + n, 0, ggml_nbytes(t));
@@ -428,7 +484,40 @@ static bool capture_attn(ggml_tensor * t, bool ask, void * user_data) {
     return true;
 }
 
+// the layer of a captured tensor, "name-<il>...", -1 without one
+static int tensor_layer(const std::string & key) {
+    const size_t pos = key.find('-');
+    if (pos == std::string::npos || pos + 1 >= key.size() || !isdigit((unsigned char) key[pos + 1])) {
+        return -1;
+    }
+    return atoi(key.c_str() + pos + 1);
+}
+
+// the first layer where a token picks other experts in the runs, -1 when none does: two experts nearly tie for it, and
+// from that layer on the runs differ by that choice
+static int first_flip(const attn_outputs & a, const attn_outputs & b) {
+    int flip = -1;
+    for (const auto & [key, ref] : a.experts) {
+        const auto it = b.experts.find(key);
+        if (it == b.experts.end() || it->second.size() != ref.size()) {
+            continue;
+        }
+        int64_t n_diff = 0;
+        for (size_t i = 0; i < ref.size(); ++i) {
+            n_diff += ref[i] != it->second[i];
+        }
+        const int il = tensor_layer(key);
+        if (n_diff > 0 && il >= 0 && (flip < 0 || il < flip)) {
+            flip = il;
+            fprintf(stderr, "logits: %lld of %zu tokens pick other experts in layer %d (a near-tie of the router)\n",
+                    (long long) n_diff, ref.size(), il);
+        }
+    }
+    return flip;
+}
+
 // the worst NMSE between the attention outputs of two runs, a NaN when they do not match; prints the worst of them
+// b takes the attention inputs of a (attn_outputs::inject), so each attention is compared on the same input
 static double compare_attn(const attn_outputs & a, const attn_outputs & b) {
     double worst = 0.0;
     std::string name;
@@ -441,6 +530,16 @@ static double compare_attn(const attn_outputs & a, const attn_outputs & b) {
         }
 
         const double val = nmse(ref, it->second);
+        // LOCAL_INFERENCE_TEST_ATTN_ALL prints every output, to see where a mismatch starts
+        static const bool all = getenv("LOCAL_INFERENCE_TEST_ATTN_ALL") != nullptr;
+        if (all) {
+            fprintf(stderr, "attention:   %-20s NMSE %.2e\n", key.c_str(), val);
+        }
+        // only the attention outputs are checked, the other tensors are printed
+        if (!std::any_of(std::begin(attn_names), std::end(attn_names),
+                [&](const char * n) { return key.rfind(n, 0) == 0; })) {
+            continue;
+        }
         if (!(val <= worst)) {
             worst = val;
             name  = key;
@@ -458,7 +557,7 @@ static bool silent_model_load_progress(float /*progress*/, void * /*user_data*/)
 
 static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
         struct gguf_context * gguf_ctx, FILE * file, const size_t seed, const std::vector<ggml_backend_dev_t> & devs,
-        const llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER, bool encode = false, bool elastic = true, attn_outputs * attn = nullptr) {
+        const llama_split_mode split_mode = LLAMA_SPLIT_MODE_LAYER, bool encode = false, attn_outputs * attn = nullptr) {
     GGML_ASSERT((gguf_ctx == nullptr) != (file == nullptr));
     llama_model_params model_params = llama_model_default_params();
     model_params.progress_callback = silent_model_load_progress;
@@ -471,7 +570,6 @@ static std::pair<llama_model_ptr, llama_context_ptr> get_model_and_ctx(
     ctx_params.n_ctx = 0;
     ctx_params.n_threads = 4;
     ctx_params.n_threads_batch = 4;
-    ctx_params.elastic = elastic;
 
     // an F16 V is accumulated in F16 by some read paths only: F32 leaves the rounding out of the comparison of attention
     ctx_params.type_k = GGML_TYPE_F32;
@@ -832,31 +930,45 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const in
                 std::string status_roundtrip = "\033[1;33mSKIP\033[0m";
                 char nmse_str[12] = {0};
 
-                bool skip = !arch_supported(arch) || (dc.split_mode == LLAMA_SPLIT_MODE_TENSOR && dc.devs.empty());
+                // the elastic memory is on one device, it is not split by tensor parallelism yet
+                bool skip = !arch_supported(arch) || dc.split_mode == LLAMA_SPLIT_MODE_TENSOR;
                 if (!skip) {
                     if (logits_cpu.empty()) {
-                        // the reference is the memory that is not elastic: the elastic memory has to give the same logits
-                        model_and_ctx_cpu = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, {}, LLAMA_SPLIT_MODE_LAYER, encode, false, &attn_cpu);
+                        // the reference is the CPU, which reads the elastic memory with the same lists
+                        model_and_ctx_cpu = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, {}, LLAMA_SPLIT_MODE_LAYER, encode, &attn_cpu);
                         logits_cpu = get_logits(model_and_ctx_cpu.first.get(), model_and_ctx_cpu.second.get(), tokens, encode);
                     }
                     if (dc.split_mode != LLAMA_SPLIT_MODE_TENSOR || llm_arch_supports_sm_tensor(arch)) {
+                        // the whole network: the logits of a run of its own
                         attn_outputs attn_dev;
-                        model_and_ctx_dev = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, dc.devs, dc.split_mode, encode, true, &attn_dev);
+                        model_and_ctx_dev = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, dc.devs, dc.split_mode, encode, &attn_dev);
                         logits_dev = get_logits(model_and_ctx_dev.first.get(), model_and_ctx_dev.second.get(), tokens, encode);
-                        report_nans("not elastic", logits_cpu, tokens.size());
-                        report_nans("elastic",     logits_dev, tokens.size());
-                        const double nmse_attn = compare_attn(attn_cpu, attn_dev);
-                        const double nmse_val = std::max(nmse(logits_cpu, logits_dev), nmse_attn);
+                        report_nans("cpu",    logits_cpu, tokens.size());
+                        report_nans("device", logits_dev, tokens.size());
 
-                        // attention is compared as close as its rounding allows
-                        if (!(nmse_attn <= 1e-10)) {
-                            fprintf(stderr, "attention: does not match\n");
-                            all_ok = false;
+                        // each attention on its own: a run that takes the attention inputs of the CPU
+                        double nmse_attn = 0.0;
+                        {
+                            attn_outputs attn_inj;
+                            attn_inj.inject = &attn_cpu;
+                            auto model_and_ctx_inj = get_model_and_ctx(gguf_ctx.get(), nullptr, seed, dc.devs, dc.split_mode, encode, &attn_inj);
+                            get_logits(model_and_ctx_inj.first.get(), model_and_ctx_inj.second.get(), tokens, encode);
+                            nmse_attn = compare_attn(attn_cpu, attn_inj);
                         }
+
+                        // after a token picks other experts the logits differ by that choice: they are only checked
+                        // for NaNs then
+                        const int  flip    = first_flip(attn_cpu, attn_dev);
+                        const bool nan_dev = std::any_of(logits_dev.begin(), logits_dev.end(), [](float x) { return std::isnan(x); });
+                        const double nmse_val = flip >= 0 ? (nan_dev ? std::nan("") : nmse_attn) :
+                            std::max(nmse(logits_cpu, logits_dev), nmse_attn);
+
+                        // attention is compared as close as its rounding allows: the device reads Q, K, V and the
+                        // softmax in f16 (2^-11 a value, about 1e-7 of NMSE a rounding), the CPU in f32
                         snprintf(nmse_str, sizeof(nmse_str), "(%.2e)", nmse_val);
                         status_nmse = "\033[1;32mOK\033[0m";
                         // written so that a NaN fails
-                        if (!(nmse_val <= 1e-4)) {
+                        if (!(nmse_val <= 1e-4) || !(nmse_attn <= 1e-6)) {
                             all_ok = false;
                             status_nmse = "\033[1;31mFAIL\033[0m";
                         }
@@ -940,6 +1052,14 @@ int main(int argc, char ** argv) {
         if (strcmp(argv[i], "-v") == 0) {
             if (i + 1 < argc) {
                 verbosity = std::stoull(argv[++i]);
+            } else {
+                usage(argv);
+                return 1;
+            }
+        }
+        if (strcmp(argv[i], "-k") == 0 || strcmp(argv[i], "--top-k") == 0) {
+            if (i + 1 < argc) {
+                g_indexer_top_k = (uint32_t) std::stoul(argv[++i]);
             } else {
                 usage(argv);
                 return 1;

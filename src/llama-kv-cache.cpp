@@ -109,14 +109,22 @@ llama_kv_cache::llama_kv_cache(
             LLAMA_LOG_WARN("%s: kv_size = %u overridden to %u to match the shared source cache\n", __func__, kv_size, size_other);
             kv_size = size_other;
         }
+
+        // the cells of the source are in its elastic memory, read in its rows: this cache only reads them
+        GGML_ASSERT(box == nullptr);
+        box = other->box;
+        if (box) {
+            this->n_seq_max = box->get_n_seq_max();
+        }
     }
 
     GGML_ASSERT(kv_size % n_pad == 0);
 
     // the cells of the box: one stream, the layout of flash attention, every cell a row of the box
-    GGML_ASSERT(!box || (!v_trans && n_stream == 1 && !other && kv_size == box->get_n_cells()));
+    GGML_ASSERT(!box || (!v_trans && n_stream == 1 && kv_size == box->get_n_cells()));
 
-    if (box) {
+    // the cells of a shared cache are those of its source, which holds the blocks
+    if (box && !other) {
         box->add_user(this, [this](uint32_t b) { return box_block_used(b); });
     }
 
@@ -404,7 +412,7 @@ llama_kv_cache::llama_kv_cache(
 }
 
 llama_kv_cache::~llama_kv_cache() {
-    if (box) {
+    if (box && !other) {
         box->remove_user(this);
     }
 }
@@ -1283,6 +1291,13 @@ llama_kv_cache::slot_info llama_kv_cache::find_slot(const llama_ubatch & ubatch,
 
         res.strm[s] = seq_to_stream[seq_id];
         res.idxs[s].reserve(n_tokens);
+
+        // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
+        // a shared cache writes no cells (see apply_ubatch()): its tokens take no slot
+        if (other) {
+            res.idxs[s].assign(n_tokens, 0);
+            continue;
+        }
 
         const auto & cells = v_cells[seq_to_stream[seq_id]];
 
@@ -2543,8 +2558,13 @@ void llama_kv_cache::fill_kq_mask(ggml_type type, void * data, int64_t n_kv, int
 }
 
 bool llama_kv_cache::kv_idx_supported() const {
-    // one stream, flash attention layout (V not transposed) and no ALiBi bias, which needs the mask values
-    return n_stream == 1 && !v_trans && !hparams.use_alibi;
+    // one stream and the flash attention layout (V not transposed)
+    return n_stream == 1 && !v_trans;
+}
+
+uint32_t llama_kv_cache::kv_idx_planes() const {
+    // ALiBi and the relative bias by distance (T5) read the positions of the rows
+    return hparams.use_alibi || hparams.n_rel_attn_bkts > 0 ? 2 : 1;
 }
 
 void llama_kv_cache::get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const {
@@ -2738,7 +2758,10 @@ void llama_kv_cache::fill_kv_idx(ggml_tensor * kv_idx, int32_t * rng, const llam
 
     int32_t * idx = (int32_t *) kv_idx->data;
 
-    std::fill(idx, idx + n_idx*n_group, 0);
+    // ALiBi: the positions of the rows in a second plane, see ggml_flash_attn_ext_set_kv_idx()
+    int32_t * idx_pos = kv_idx->ne[2] == 2 ? idx + n_idx*n_group : nullptr;
+
+    std::fill(idx, idx + n_idx*n_group*kv_idx->ne[2], 0);
 
     // group of each sequence of the ubatch, its cells in causal order with their positions, and the min position of
     // the sequence in the ubatch
@@ -2777,6 +2800,9 @@ void llama_kv_cache::fill_kv_idx(ggml_tensor * kv_idx, int32_t * rng, const llam
         for (size_t c = 0; c < group_cells[g].size(); ++c) {
             dst[c] = (int32_t) cell_row(group_cells[g][c]);
         }
+        if (idx_pos) {
+            std::copy(group_pos[g].begin(), group_pos[g].end(), idx_pos + group_off);
+        }
 
         group_start.push_back((int32_t) group_off);
         group_off += (int64_t) group_cells[g].size();
@@ -2808,31 +2834,6 @@ void llama_kv_cache::fill_kv_idx(ggml_tensor * kv_idx, int32_t * rng, const llam
         }
         stats_attn.range += n;
         stats_attn.owned += n;
-    }
-}
-
-void llama_kv_cache::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
-    const int64_t n_tokens = ubatch->n_tokens;
-
-    GGML_ASSERT(n_stream == 1 && "TODO: support multiple streams");
-    const auto & cells = v_cells[0];
-
-    GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
-    GGML_ASSERT(!ubatch->equal_seqs()); // TODO: use ubatch->n_seqs instead of failing
-
-    int32_t * data = (int32_t *) dst->data;
-
-    const int32_t n_kv = dst->ne[0];
-
-    for (int h = 0; h < 1; ++h) {
-        for (int i = 0; i < n_tokens; ++i) {
-            for (int j = 0; j < n_kv; ++j) {
-                // the position when the cells is empty is irrelevant - it will be masked out later in the attention
-                const llama_pos p0 = cells.is_empty(j) ? -1 : cells.pos_get(j);
-
-                data[h*(n_kv*n_tokens) + i*n_kv + j] = llama_relative_position_bucket(p0, ubatch->pos[i], hparams.n_rel_attn_bkts, false);
-            }
-        }
     }
 }
 
@@ -3938,6 +3939,10 @@ bool llama_kv_cache_context::has_box() const {
     return kv->get_box() != nullptr;
 }
 
+uint32_t llama_kv_cache_context::kv_idx_planes() const {
+    return kv->kv_idx_planes();
+}
+
 void llama_kv_cache_context::get_kv_idx_shape(const llama_ubatch & ubatch, uint32_t & n_idx, uint32_t & n_group) const {
     kv->get_kv_idx_shape(ubatch, n_idx, n_group);
 
@@ -4018,9 +4023,6 @@ void llama_kv_cache_context::set_input_kq_mask(ggml_tensor * dst, const llama_ub
     kv->set_input_kq_mask(dst, ubatch, causal_attn);
 }
 
-void llama_kv_cache_context::set_input_pos_bucket(ggml_tensor * dst, const llama_ubatch * ubatch) const {
-    kv->set_input_pos_bucket(dst, ubatch);
-}
 
 void llama_kv_cache_context::set_input_k_rot(ggml_tensor * dst) const {
     kv->set_input_k_rot(dst);

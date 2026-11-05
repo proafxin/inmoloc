@@ -1,5 +1,6 @@
 #include "llama-box.h"
 
+#include "llama-graph.h"
 #include "llama-impl.h"
 #include "llama-model.h"
 
@@ -668,6 +669,13 @@ void llama_box::reserve_drop(llama_seq_id seq_id) {
     seq.reserve        = 0;
 }
 
+// the V head attention reads of a layer: a layer without V rows (MLA) reads the compressed KV at the start of its K rows
+static uint32_t llama_box_head_v(const llama_hparams & hparams, const llama_box::attn_layer & attn) {
+    const uint32_t n_lora_kv = hparams.is_swa(attn.il) ? hparams.n_lora_kv_swa : hparams.n_lora_kv;
+
+    return !attn.has_v && n_lora_kv > 0 ? n_lora_kv : hparams.n_embd_head_v(attn.il);
+}
+
 // whether the device reads the rows of a layer in place, through ranges of the cells of each token, as the graph builds
 // its attention (head sizes, softcap, ALiBi); row_lists tells whether it also reads the rows of a prompt through one
 // list, each query seeing a prefix of it, which the tensor core kernels do; the context only describes the ops, nothing
@@ -684,14 +692,18 @@ static bool llama_box_reads_rows(const llama_hparams & hparams, ggml_backend_buf
         return false;
     }
 
+    // the CPU buffer type has no device of its own
     ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
+    if (dev == nullptr && ggml_backend_buft_is_host(buft)) {
+        dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    }
     if (dev == nullptr) {
         return false;
     }
 
-    // an MLA layer reads its V rows as the first of its K rows
+    // an MLA layer reads its V rows as the first of its K rows, the compressed KV
     const int64_t hs_k  = hparams.n_embd_head_k(attn.il);
-    const int64_t hs_v  = attn.has_v ? hparams.n_embd_head_v(attn.il) : hparams.n_embd_head_v_mla();
+    const int64_t hs_v  = llama_box_head_v(hparams, attn);
     const int64_t nh    = hparams.n_head_kv(attn.il);
     const int64_t n_q   = hparams.n_head(attn.il);
     const int64_t nb    = 32;
@@ -712,16 +724,28 @@ static bool llama_box_reads_rows(const llama_hparams & hparams, ggml_backend_buf
         return res;
     };
 
-    ggml_tensor * fa_rows = attention();
-    ggml_flash_attn_ext_set_kv_rows_hi(fa_rows,
-            ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, n_idx), ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, nb));
+    // the relative bias by distance of a T5 decoder, see build_pos_bias_dist()
+    const bool rel_bias = hparams.n_rel_attn_bkts > 0;
+
+    // a prompt reads one list of rows without a softcap, ALiBi and a relative bias only, with them it reads through
+    // ranges like every token, whose lists hold the positions of the rows for ALiBi and the relative bias
+    ggml_tensor * fa_rows = nullptr;
+    if (softcap == 0.0f && max_bias == 0.0f && !rel_bias) {
+        fa_rows = attention();
+        ggml_flash_attn_ext_set_kv_rows_hi(fa_rows,
+                ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, n_idx), ggml_new_tensor_1d(ctx.get(), GGML_TYPE_I32, nb));
+    }
 
     ggml_tensor * fa_idx = attention();
     ggml_flash_attn_ext_set_kv_idx(fa_idx,
-            ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, n_idx, 1), ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, 3, nb));
+            ggml_new_tensor_3d(ctx.get(), GGML_TYPE_I32, n_idx, 1, max_bias != 0.0f || rel_bias ? 2 : 1),
+            ggml_new_tensor_2d(ctx.get(), GGML_TYPE_I32, 3, nb));
+    if (rel_bias) {
+        ggml_flash_attn_ext_set_rel_bias(fa_idx, ggml_new_tensor_2d(ctx.get(), GGML_TYPE_F32, LLAMA_REL_POS_N_DIST, n_q));
+    }
 
     if (row_lists) {
-        *row_lists = ggml_backend_dev_supports_op(dev, fa_rows);
+        *row_lists = fa_rows != nullptr && ggml_backend_dev_supports_op(dev, fa_rows);
 
         if (const char * env = getenv("LOCAL_INFERENCE_BOX_ROW_LISTS"); env && atoi(env) == 0) {
             *row_lists = false;
@@ -744,10 +768,7 @@ std::unique_ptr<llama_box> llama_box_make(
                      bool   offload,
                    size_t   box_bytes,
                      bool   box_deferred,
-                     bool   box_draft,
-                ggml_type   box_draft_type_k,
-                ggml_type   box_draft_type_v,
-      const llama_hparams * box_draft_hparams,
+                     const llama_box_draft & box_draft,
     const std::function<bool(int32_t)> & filter_attn,
     const std::function<bool(int32_t)> & filter_recr,
     std::vector<llama_box::attn_layer>   extra_attn,
@@ -792,20 +813,29 @@ std::unique_ptr<llama_box> llama_box_make(
                 hparams.is_ple(il) ? hparams.ple_conv_state() : 0 });
     }
 
-    // the layers of an MTP head keep their rows in the blocks, next to the layers of the same tokens; the layers of the
-    // model tell where its head starts, hparams_attn may describe the layers of one kind only
-    const llama_hparams & hd = box_draft_hparams ? *box_draft_hparams : hparams;
+    // the layers of a draft keep their rows in the blocks, next to the layers of the same tokens: the MTP layers of the
+    // model or of an MTP head in a GGUF of its own, at their own slots (the layers of the model tell where its head
+    // starts, hparams_attn may describe the layers of one kind only), or all the layers of a draft model of its own, in
+    // the slots after those of the model and of its indexers (il + n_layer_all)
+    const llama_hparams & hd = box_draft.hparams ? *box_draft.hparams : hparams;
 
-    for (uint32_t il = box_draft_hparams ? hd.n_layer() : model.hparams.n_layer(); box_draft && il < hd.n_layer_all; ++il) {
+    const int32_t  draft_offset = box_draft.standalone ? 2*(int32_t) model.hparams.n_layer_all : 0;
+    const uint32_t draft_begin  = box_draft.standalone ? 0 : box_draft.hparams ? hd.n_layer() : model.hparams.n_layer();
+
+    GGML_ASSERT(!box_draft.standalone || box_draft.hparams);
+
+    for (uint32_t il = draft_begin; box_draft.enabled && il < hd.n_layer_all; ++il) {
         if (!hd.has_kv(il)) {
             continue;
         }
-        GGML_ASSERT(std::none_of(attn.begin(), attn.end(), [&](const auto & l) { return l.il == (int32_t) il; }));
+        const int32_t slot = (int32_t) il + draft_offset;
+        GGML_ASSERT(std::none_of(attn.begin(), attn.end(), [&](const auto & l) { return l.il == slot; }));
 
-        draft.push_back({ (int32_t) il, box_draft_type_k, box_draft_type_v, hd.n_embd_k_gqa(il), hd.n_embd_v_gqa(il), !hd.is_mla() });
+        draft.push_back({ slot, box_draft.type_k, box_draft.type_v, hd.n_embd_k_gqa(il), hd.n_embd_v_gqa(il), !hd.is_mla() });
     }
-    if (box_draft && draft.empty()) {
-        throw std::runtime_error("an MTP draft was asked for, but the model has no MTP layer with a KV cache");
+    if (box_draft.enabled && draft.empty()) {
+        throw std::runtime_error(box_draft.standalone ? "the draft model has no layer with a KV cache" :
+                "an MTP draft was asked for, but the model has no MTP layer with a KV cache");
     }
 
     // the indexer rows take the blocks of the layers without CSA rows
@@ -820,7 +850,7 @@ std::unique_ptr<llama_box> llama_box_make(
         if (!llama_box_reads_rows(hp, buft, l, &lists)) {
             throw std::runtime_error(format("the device %s cannot read the KV rows of layer %d in place (K/V heads %u/%u, types %s/%s%s%s): "
                     "the elastic memory needs flash attention that reads lists of rows for it",
-                    ggml_backend_buft_name(buft), l.il, hp.n_embd_head_k(l.il), l.has_v ? hp.n_embd_head_v(l.il) : hp.n_embd_head_v_mla(),
+                    ggml_backend_buft_name(buft), l.il, hp.n_embd_head_k(l.il), llama_box_head_v(hp, l),
                     ggml_type_name(l.type_k), ggml_type_name(l.has_v ? l.type_v : l.type_k),
                     hp.attn_soft_cap ? ", logit softcap" : "", hp.use_alibi ? ", ALiBi" : ""));
         }
@@ -830,8 +860,11 @@ std::unique_ptr<llama_box> llama_box_make(
     for (size_t i = 0; i < attn.size(); ++i) {
         check(hparams, attn[i], i);
     }
+    // the hparams of a draft layer are those of its layer in the draft
     for (size_t i = 0; i < draft.size(); ++i) {
-        check(hd, draft[i], attn.size() + i);
+        llama_box::attn_layer l = draft[i];
+        l.il -= draft_offset;
+        check(hd, l, attn.size() + i);
     }
 
     // the memory of box_bytes bytes, or of kv_size cells and rs_size states, elastic
@@ -842,6 +875,7 @@ std::unique_ptr<llama_box> llama_box_make(
 
     auto box = std::make_unique<llama_box>(std::move(attn), std::move(recr), draft, box_bytes, kv_size, rs_size, std::move(lid), std::move(pieces));
     box->set_row_lists(row_lists);
+    box->set_draft(box_draft.standalone ? box_draft.hparams : nullptr, draft_offset);
     box->alloc(buft, hparams.no_alloc || box_deferred);
 
     return box;

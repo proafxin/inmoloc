@@ -149,8 +149,9 @@ public:
     void set_input_pos_mask(ggml_tensor * dst, const llama_ubatch * ubatch) const;
 
     // the elastic memory: the list of the slots of the sequences of the ubatch, one after the other, and the window of a
-    // token in it, which starts at the slots of its sequence; a sequence starts at the block of its first position p0,
-    // its position p is the slot base + p - p0; a reserve takes the most there can be
+    // token in it, which starts at the slots of its sequence; the cell of rank r of a sequence (causal order) is the slot
+    // base + p0 % blk + r, p0 its first position, so that the blocks are those of the positions while they follow each
+    // other; a reserve takes the most there can be
     //   n_list: the slots of the list, a whole number of blocks
     //   n_win:  the slots of a window, a whole number of blocks
     void box_layout(const llama_ubatch & ubatch, int blk, int64_t & n_list, int64_t & n_win) const;

@@ -1126,7 +1126,7 @@ bool common_budget_box(
             llama_set_sampler(ctx_dft, LLAMA_SEQ_ID_ALL, chain);
         }
 
-        llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
+        // the outputs of the draft are set, see common_speculative_set_outputs()
         llama_context_reserve(ctx_dft);
 
         // a draft model of its own brings its weights

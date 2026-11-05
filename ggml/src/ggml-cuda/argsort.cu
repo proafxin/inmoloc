@@ -164,7 +164,16 @@ static inline __device__ void ggml_cuda_swap(T & a, T & b) {
     b = tmp;
 }
 
-// One compare-exchange of the bitonic network at (k, j) for column col.
+// whether index a comes before index b in the sorted row: equal values keep the order of their indices, like the radix
+// sort of CUB, which is stable
+template<ggml_sort_order order>
+static inline __device__ bool bitonic_before(const float * x_row, const int a, const int b) {
+    const float xa = x_row[a];
+    const float xb = x_row[b];
+    return (order == GGML_SORT_ORDER_ASC ? xa < xb : xa > xb) || (xa == xb && a < b);
+}
+
+// One compare-exchange of the bitonic network at (k, j) for column col; the padding (>= ncols) goes last.
 template<ggml_sort_order order>
 static inline __device__ void bitonic_step(const float * x_row, int * dst_row, const int ncols, const int col, const int k, const int j) {
     const int ixj = col ^ j;
@@ -173,18 +182,12 @@ static inline __device__ void bitonic_step(const float * x_row, int * dst_row, c
     }
     if ((col & k) == 0) {
         if (dst_row[col] >= ncols ||
-            (dst_row[ixj] < ncols && (order == GGML_SORT_ORDER_ASC ?
-                x_row[dst_row[col]] > x_row[dst_row[ixj]] :
-                x_row[dst_row[col]] < x_row[dst_row[ixj]]))
-        ) {
+            (dst_row[ixj] < ncols && bitonic_before<order>(x_row, dst_row[ixj], dst_row[col]))) {
             ggml_cuda_swap(dst_row[col], dst_row[ixj]);
         }
     } else {
         if (dst_row[ixj] >= ncols ||
-            (dst_row[col] < ncols && (order == GGML_SORT_ORDER_ASC ?
-                x_row[dst_row[col]] < x_row[dst_row[ixj]] :
-                x_row[dst_row[col]] > x_row[dst_row[ixj]]))
-        ) {
+            (dst_row[col] < ncols && bitonic_before<order>(x_row, dst_row[col], dst_row[ixj]))) {
             ggml_cuda_swap(dst_row[col], dst_row[ixj]);
         }
     }
