@@ -37,24 +37,9 @@ jobs:
             ./build/bin/test-recurrent-state-rollback -m build/tests/test-models/$model.gguf -dev none -ngl 0 --rs-rollback replay
           done
 
-  server:
-    name: Server tests
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          python-version: "3.12"
-
-      - name: Build
-        run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF
-          cmake --build build --config Release -j $(nproc) --target local-inference-server
-
-      # the tests download their tiny models from Hugging Face
-      - name: Tests
-        run: uv run --locked --no-dev --group test ./tests/server/tests.sh
+  # No hosted server-test job: the box's indexed attention is CUDA-first (see README "for now it loads
+  # the full model on a cuda GPU"), with no CPU-specific path, and GitHub's hosted runners have no GPU.
+  # Run server tests locally against a real GPU instead; see tests/server/README.md.
 
   cuda:
     name: CUDA build
