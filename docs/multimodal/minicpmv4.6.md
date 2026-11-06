@@ -29,10 +29,10 @@ Unlike older MiniCPM-V variants, MiniCPM-V 4.6 is converted directly through `co
 
 ```bash
 # language model
-python ./convert_hf_to_gguf.py ../MiniCPM-V-4_6 --outfile ../MiniCPM-V-4_6/ggml-model-f16.gguf
+uv run scripts/convert_hf_to_gguf.py ../MiniCPM-V-4_6 --outfile ../MiniCPM-V-4_6/ggml-model-f16.gguf
 
 # multimodal projector (vision tower + window-attention vit_merger + DownsampleMLP merger)
-python ./convert_hf_to_gguf.py ../MiniCPM-V-4_6 --mmproj --outfile ../MiniCPM-V-4_6/mmproj-model-f16.gguf
+uv run scripts/convert_hf_to_gguf.py ../MiniCPM-V-4_6 --mmproj --outfile ../MiniCPM-V-4_6/mmproj-model-f16.gguf
 
 # optional: quantize to Q4_K_M
 ./build/bin/local-inference-quantize ../MiniCPM-V-4_6/ggml-model-f16.gguf ../MiniCPM-V-4_6/ggml-model-Q4_K_M.gguf Q4_K_M

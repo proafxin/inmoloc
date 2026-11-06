@@ -355,12 +355,11 @@ llama_model_kimi_k3::graph::graph(const llama_model & model, const llm_graph_par
 //
 
 // causal conv1d over one of Q/K/V. `qkv` selects which third of the conv state to use
-static ggml_tensor * kimi_k3_conv1d(ggml_cgraph * gf, ggml_context * ctx0,
-                                    ggml_tensor * conv_states_all, ggml_tensor * conv_state_all,
+static ggml_tensor * kimi_k3_conv1d(ggml_context * ctx0, ggml_tensor * conv_state_all,
                                     int64_t qkv, ggml_tensor * x, ggml_tensor * proj_w, ggml_tensor * conv_w,
                                     int64_t d_conv, int64_t head_dim, int64_t n_head,
-                                    int64_t n_seq_tokens, int64_t n_seqs, int64_t n_tokens, int64_t kv_head,
-                                    int64_t mem_size, int64_t K_rs) {
+                                    int64_t n_seq_tokens, int64_t n_seqs, int64_t n_tokens,
+                                    int64_t K_rs, std::vector<ggml_tensor *> & last) {
     const int64_t d_inner         = head_dim * n_head;
     const int64_t conv_state_size = (d_conv - 1) * d_inner;
     const int64_t n_embd_r_total  = 3 * conv_state_size;
@@ -380,12 +379,10 @@ static ggml_tensor * kimi_k3_conv1d(ggml_cgraph * gf, ggml_context * ctx0,
         const int64_t s_idx = std::max<int64_t>(0, n_seq_tokens - s);
         ggml_tensor * conv_x_s = ggml_view_3d(ctx0, conv_x, d_conv - 1, d_inner, n_seqs,
             conv_x->nb[1], conv_x->nb[2], s_idx * conv_x->nb[0]);
-        ggml_build_forward_expand(gf,
-            ggml_cpy(ctx0, conv_x_s,
-                ggml_view_3d(ctx0, conv_states_all, d_conv - 1, d_inner, n_seqs,
-                    (d_conv - 1)   * ggml_element_size(conv_states_all),
-                    n_embd_r_total * ggml_element_size(conv_states_all),
-                    ((s * mem_size + kv_head) * n_embd_r_total + qkv * conv_state_size) * ggml_element_size(conv_states_all))));
+
+        // a store of the whole row by the caller: this part of it, [conv_state_size, n_seqs], for slot s
+        ggml_tensor * part = ggml_reshape_2d(ctx0, ggml_cont(ctx0, conv_x_s), conv_state_size, n_seqs);
+        last[s] = last[s] ? ggml_concat(ctx0, last[s], part, 0) : part;
     }
 
     ggml_tensor * conv_weight = ggml_reshape_2d(ctx0, conv_w, d_conv, d_inner);
@@ -402,17 +399,21 @@ ggml_tensor * llama_model_kimi_k3::graph::build_kda_layer(
         int64_t d_inner, int64_t n_seq_tokens, int64_t n_seqs, int il) {
 
     const auto * mctx_cur = inp_rs->mctx;
-    const auto   kv_head  = mctx_cur->get_head();
 
     ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
-    ggml_tensor * conv_state_all  = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs);
+    ggml_tensor * conv_state_all  = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs, nullptr, il);
 
-    const int64_t mem_size = mctx_cur->get_size();
-    const int64_t K_rs     = (int64_t) cparams.n_rs_seq + 1;
+    const int64_t K_rs = (int64_t) cparams.n_rs_seq + 1;
 
-    ggml_tensor * Qcur = kimi_k3_conv1d(gf, ctx0, conv_states_all, conv_state_all, 0, cur, layer.wq, layer.ssm_q_conv, d_conv, head_dim, n_head_kda, n_seq_tokens, n_seqs, n_tokens, kv_head, mem_size, K_rs);
-    ggml_tensor * Kcur = kimi_k3_conv1d(gf, ctx0, conv_states_all, conv_state_all, 1, cur, layer.wk, layer.ssm_k_conv, d_conv, head_dim, n_head_kda, n_seq_tokens, n_seqs, n_tokens, kv_head, mem_size, K_rs);
-    ggml_tensor * Vcur = kimi_k3_conv1d(gf, ctx0, conv_states_all, conv_state_all, 2, cur, layer.wv, layer.ssm_v_conv, d_conv, head_dim, n_head_kda, n_seq_tokens, n_seqs, n_tokens, kv_head, mem_size, K_rs);
+    std::vector<ggml_tensor *> last(K_rs, nullptr);
+
+    ggml_tensor * Qcur = kimi_k3_conv1d(ctx0, conv_state_all, 0, cur, layer.wq, layer.ssm_q_conv, d_conv, head_dim, n_head_kda, n_seq_tokens, n_seqs, n_tokens, K_rs, last);
+    ggml_tensor * Kcur = kimi_k3_conv1d(ctx0, conv_state_all, 1, cur, layer.wk, layer.ssm_k_conv, d_conv, head_dim, n_head_kda, n_seq_tokens, n_seqs, n_tokens, K_rs, last);
+    ggml_tensor * Vcur = kimi_k3_conv1d(ctx0, conv_state_all, 2, cur, layer.wv, layer.ssm_v_conv, d_conv, head_dim, n_head_kda, n_seq_tokens, n_seqs, n_tokens, K_rs, last);
+
+    for (int64_t s = 0; s < K_rs; ++s) {
+        ggml_build_forward_expand(gf, build_rs_store(inp_rs, conv_states_all, last[s], il, (uint32_t) s));
+    }
     cb(Qcur, "kda_q_conv", il);
     cb(Kcur, "kda_k_conv", il);
     cb(Vcur, "kda_v_conv", il);
@@ -449,14 +450,12 @@ ggml_tensor * llama_model_kimi_k3::graph::build_kda_layer(
     ggml_tensor * cur_3d = ggml_reshape_3d(ctx0, cur, cur->ne[0], n_seq_tokens, n_seqs);
 
     ggml_tensor * ssm_states_all = mctx_cur->get_s_l(il);
-    ggml_tensor * state = build_rs(inp_rs, ssm_states_all, hparams.n_embd_s(), n_seqs);
-    state = ggml_reshape_4d(ctx0, state, head_dim, head_dim, n_head_kda, n_seqs);
 
     const float eps_norm = hparams.f_norm_rms_eps;
     Qcur = build_gdn_l2_norm(ctx0, Qcur, eps_norm);
     Kcur = build_gdn_l2_norm(ctx0, Kcur, eps_norm);
 
-    ggml_tensor * output = build_recurrent_attn(inp_rs, ssm_states_all, Qcur, Kcur, Vcur, g1, beta, state, il);
+    ggml_tensor * output = build_recurrent_attn(inp_rs, ssm_states_all, Qcur, Kcur, Vcur, g1, beta, il);
     output = ggml_cont(ctx0, output);
     cb(output, "kda_scan_out", il);
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("BitnetForCausalLM", "BitNetForCausalLM")
@@ -13,10 +15,10 @@ from .base import ModelBase, TextModel, gguf
 class BitnetModel(TextModel):
     model_arch = gguf.MODEL_ARCH.BITNET
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_sentencepiece()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.LINEAR)
         self.gguf_writer.add_rope_scaling_factor(1.0)
@@ -35,15 +37,18 @@ class BitnetModel(TextModel):
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         new_name = self.map_tensor_name(name)
 
-        if any(self.match_model_tensor_name(new_name, key, bid) for key in [
-            gguf.MODEL_TENSOR.ATTN_Q,
-            gguf.MODEL_TENSOR.ATTN_K,
-            gguf.MODEL_TENSOR.ATTN_V,
-            gguf.MODEL_TENSOR.ATTN_OUT,
-            gguf.MODEL_TENSOR.FFN_UP,
-            gguf.MODEL_TENSOR.FFN_DOWN,
-            gguf.MODEL_TENSOR.FFN_GATE,
-        ]):
+        if any(
+            self.match_model_tensor_name(new_name, key, bid)
+            for key in [
+                gguf.MODEL_TENSOR.ATTN_Q,
+                gguf.MODEL_TENSOR.ATTN_K,
+                gguf.MODEL_TENSOR.ATTN_V,
+                gguf.MODEL_TENSOR.ATTN_OUT,
+                gguf.MODEL_TENSOR.FFN_UP,
+                gguf.MODEL_TENSOR.FFN_DOWN,
+                gguf.MODEL_TENSOR.FFN_GATE,
+            ]
+        ):
             # transform weight into 1/0/-1 (in fp32)
             data_torch = self.weight_quant(data_torch)
 

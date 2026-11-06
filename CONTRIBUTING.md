@@ -5,7 +5,7 @@ Issues and pull requests are welcome at https://github.com/proafxin/inmoloc.
 ## Before you start
 
 - For anything larger than a fix, open an issue first to discuss the design. Changes to the scheduler, the KV cache, the memory projection or the attention paths affect each other, and are easier to get right before code is written.
-- inmoloc is built for serving many requests at once from one GPU (see [README.md](README.md) and [docs/differences-from-llama.cpp.md](docs/differences-from-llama.cpp.md)). Judge a change by what it does for concurrent serving, and by what it costs in startup time and memory.
+- inmoloc is built for serving many requests at once on GPUs, from one consumer GPU to multi-GPU production (see [README.md](README.md)). Judge a change by what it does for concurrent serving, and by what it costs in startup time and memory.
 - Model support comes from llama.cpp. To add a model that llama.cpp supports, port its commits from the `upstream` remote rather than writing it anew.
 
 ## Pull requests
@@ -16,7 +16,7 @@ Issues and pull requests are welcome at https://github.com/proafxin/inmoloc.
 - Test what you change:
   - CUDA kernels: `test-backend-ops` for the ops you touched, e.g. `test-backend-ops -o FLASH_ATTN_EXT -b CUDA0`
   - unit tests: `ctest --test-dir build -L main`; the recurrent state rollback also with `test-recurrent-state-rollback --rs-rollback replay` (see `.github/workflows/ci.yml`)
-  - server: the pytest suite in `tools/server/tests` (`./tools/server/tests/tests.sh`, see its README), which includes preemption and prefix sharing; `scripts/bench-server-concurrency.py` for throughput and latency
+  - server: the pytest suite in `tests/server` (`./tests/server/tests.sh`, see its README), which includes preemption and prefix sharing; `scripts/bench-server-concurrency.py` for throughput and latency
   - KV cache quality at long context: `scripts/kv-quality.py`, against a server with the reference cache type and one with the type under test
 - A change to serving speed needs numbers: compare with and without it on the same workload, alternating runs on fresh servers, with nothing else using the GPU.
 

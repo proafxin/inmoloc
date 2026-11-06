@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
+from conversion.base import ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register("GptOssForCausalLM")
@@ -18,7 +20,7 @@ class GptOssModel(TextModel):
     # TODO: remove once MXFP4 is supported more generally
     def dequant_model(self):
         if self._is_mxfp4:
-            return
+            return None
         return super().dequant_model()
 
     def transform_nibble_layout(self, tensor):
@@ -43,10 +45,9 @@ class GptOssModel(TextModel):
         out = blk_a | blk_b
         out_h = out & 0xF0
         out_l = out & 0x0F
-        out = (out_h >> 4) | (out_l << 4)
-        return out
+        return (out_h >> 4) | (out_l << 4)
 
-    def repack_mxfp4(self, new_name: str, blocks: Tensor, scales: Tensor):
+    def repack_mxfp4(self, new_name: str, blocks: Tensor, scales: Tensor) -> None:
         assert blocks.dtype == torch.uint8
         assert scales.dtype == torch.uint8
         scales = scales.unsqueeze(-1)
@@ -122,10 +123,10 @@ class GptOssModel(TextModel):
         else:
             yield from super().modify_tensors(data_torch, name, bid)
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_gpt2()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_sliding_window(self.hparams["sliding_window"])
         self.gguf_writer.add_expert_feed_forward_length(self.hparams["intermediate_size"])

@@ -27,7 +27,7 @@ echo "Model path: ${EMBEDDING_MODEL_PATH}"
 echo "Model name: ${MODEL_NAME}"
 echo "Data  type: ${TYPE}"
 echo "Converted model path:: ${CONVERTED_MODEL}"
-python ../../convert_hf_to_gguf.py --verbose \
+python ../../scripts/convert_hf_to_gguf.py --verbose \
     ${EMBEDDING_MODEL_PATH} \
     --outfile ${CONVERTED_MODEL} \
     --outtype ${TYPE} \

@@ -44,7 +44,7 @@ def choose_pages(pdf_dir: Path, n: int, seed: int) -> list[tuple[Path, int]]:
     for pdf in sorted(pdf_dir.rglob("*.pdf")):
         try:
             count = page_count(pdf)
-        except Exception:  # noqa: BLE001
+        except Exception:  # ruff: ignore[blind-except]
             continue
         candidates.extend((pdf, p) for p in range(1, count + 1))
     if not candidates:
@@ -62,8 +62,22 @@ def render(pages: list[tuple[Path, int]], dpi: int, cache: Path) -> list[Path]:
         if not target.exists():
             prefix = cache / f"tmp_{stem}_{page}"
             subprocess.run(
-                ["pdftoppm", "-r", str(dpi), "-png", "-singlefile", "-f", str(page), "-l", str(page), str(pdf), str(prefix)],
-                check=True, capture_output=True, timeout=120,
+                [
+                    "pdftoppm",
+                    "-r",
+                    str(dpi),
+                    "-png",
+                    "-singlefile",
+                    "-f",
+                    str(page),
+                    "-l",
+                    str(page),
+                    str(pdf),
+                    str(prefix),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=120,
             )
             (cache / f"{prefix.name}.png").rename(target)
         out.append(target)
@@ -78,7 +92,7 @@ def wait_ready(url: str, timeout: float) -> float:
             with urllib.request.urlopen(f"{url}/health", timeout=2) as r:
                 if r.status == 200:
                     return time.time() - start
-        except Exception:  # noqa: BLE001
+        except Exception:  # ruff: ignore[blind-except]
             pass
         time.sleep(0.25)
     sys.exit(f"{url} not ready after {timeout:.0f}s")
@@ -88,10 +102,15 @@ def ocr_request(url: str, model: str, image: Path, prompt: str, max_tokens: int)
     b64 = base64.b64encode(image.read_bytes()).decode()
     body = {
         "model": model,
-        "messages": [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-            {"type": "text", "text": prompt},
-        ]}],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
         "max_tokens": max_tokens,
         "temperature": 0.0,
         "stream": False,
@@ -105,19 +124,26 @@ def ocr_request(url: str, model: str, image: Path, prompt: str, max_tokens: int)
             data = json.loads(r.read())
         usage = data.get("usage", {})
         return {
-            "ok": True, "latency": time.time() - t0, "text": data["choices"][0]["message"]["content"],
-            "completion_tokens": usage.get("completion_tokens", 0), "prompt_tokens": usage.get("prompt_tokens", 0),
+            "ok": True,
+            "latency": time.time() - t0,
+            "text": data["choices"][0]["message"]["content"],
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "prompt_tokens": usage.get("prompt_tokens", 0),
         }
     except urllib.error.HTTPError as e:
-        return {"ok": False, "latency": time.time() - t0, "error": f"HTTP {e.code}: {e.read()[:160].decode(errors='replace')}"}
-    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "latency": time.time() - t0,
+            "error": f"HTTP {e.code}: {e.read()[:160].decode(errors='replace')}",
+        }
+    except Exception as e:  # ruff: ignore[blind-except]
         return {"ok": False, "latency": time.time() - t0, "error": f"{type(e).__name__}: {e}"}
 
 
 class Sampler(threading.Thread):
     """Peak GPU memory (of the container's processes if --container is set) and host RAM of that container."""
 
-    def __init__(self, container: str | None):
+    def __init__(self, container: str | None) -> None:
         super().__init__(daemon=True)
         self.container = container
         self.stop = threading.Event()
@@ -133,15 +159,23 @@ class Sampler(threading.Thread):
     def gpu_used(self) -> float:
         """GPU memory in MiB: that of the container's processes if --container is set, else the whole GPU."""
         if not self.container:
-            out = subprocess.run(
-                ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5,
-            ).stdout.strip().splitlines()[0]
+            out = (
+                subprocess.run(
+                    ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                .stdout.strip()
+                .splitlines()[0]
+            )
             return float(out)
         pids = self.container_pids()
         out = subprocess.run(
             ["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         ).stdout
         total = 0.0
         for line in out.strip().splitlines():
@@ -150,23 +184,31 @@ class Sampler(threading.Thread):
                 total += float(mem)
         return total
 
-    def run(self):
+    def run(self) -> None:
         while not self.stop.is_set():
             try:
                 self.gpu_peak = max(self.gpu_peak, self.gpu_used())
-            except Exception:  # noqa: BLE001
+            except Exception:  # ruff: ignore[blind-except]
                 pass
             if self.container:
                 try:
-                    out = subprocess.run(
-                        ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", self.container],
-                        capture_output=True, text=True, timeout=10,
-                    ).stdout.split("/")[0].strip()
+                    out = (
+                        subprocess.run(
+                            ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", self.container],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        .stdout.split("/")[0]
+                        .strip()
+                    )
                     m = re.match(r"([\d.]+)\s*([KMG]i?B)", out)
                     if m:
-                        scale = {"KiB": 1 / 1024, "KB": 1 / 1024, "MiB": 1, "MB": 1, "GiB": 1024, "GB": 1024}[m.group(2)]
+                        scale = {"KiB": 1 / 1024, "KB": 1 / 1024, "MiB": 1, "MB": 1, "GiB": 1024, "GB": 1024}[
+                            m.group(2)
+                        ]
                         self.ram_peak = max(self.ram_peak, float(m.group(1)) * scale)
-                except Exception:  # noqa: BLE001
+                except Exception:  # ruff: ignore[blind-except]
                     pass
             self.stop.wait(1.0)
 
@@ -175,7 +217,7 @@ def pct(values: list[float], p: float) -> float:
     if not values:
         return 0.0
     values = sorted(values)
-    return values[min(len(values) - 1, int(round(p / 100 * (len(values) - 1))))]
+    return values[min(len(values) - 1, round(p / 100 * (len(values) - 1)))]
 
 
 def run_level(args, images: list[Path], level: int, sink: list) -> dict:
@@ -190,22 +232,29 @@ def run_level(args, images: list[Path], level: int, sink: list) -> dict:
     sampler.stop.set()
     ok = [r for r in results if r["ok"]]
     bad = [r for r in results if not r["ok"]]
-    for img, r in zip(work, results):
+    for img, r in zip(work, results, strict=False):
         sink.append({"level": level, "page": img.name, **r})
     errors = sorted({r["error"][:90] for r in bad})
     return {
-        "level": level, "requests": n, "ok": len(ok), "failed": len(bad), "wall_s": wall,
+        "level": level,
+        "requests": n,
+        "ok": len(ok),
+        "failed": len(bad),
+        "wall_s": wall,
         "tok_s": sum(r["completion_tokens"] for r in ok) / wall if wall else 0,
         "req_s": len(ok) / wall if wall else 0,
-        "lat_p50": pct([r["latency"] for r in ok], 50), "lat_p95": pct([r["latency"] for r in ok], 95),
-        "gpu_peak_mib": sampler.gpu_peak, "ram_peak_mib": sampler.ram_peak, "errors": errors,
+        "lat_p50": pct([r["latency"] for r in ok], 50),
+        "lat_p95": pct([r["latency"] for r in ok], 95),
+        "gpu_peak_mib": sampler.gpu_peak,
+        "ram_peak_mib": sampler.ram_peak,
+        "errors": errors,
     }
 
 
 def compare(a_path: str, b_path: str) -> None:
     def load(p):
         rows = {}
-        for line in Path(p).read_text().splitlines():
+        for line in Path(p).read_text(encoding="utf-8").splitlines():
             r = json.loads(line)
             if r.get("ok") and r["level"] == 1:
                 rows.setdefault(r["page"], r["text"])
@@ -217,7 +266,10 @@ def compare(a_path: str, b_path: str) -> None:
         sys.exit("no pages in common at concurrency 1")
     sims = [difflib.SequenceMatcher(None, a[p], b[p]).ratio() for p in common]
     exact = sum(a[p] == b[p] for p in common)
-    print(f"{len(common)} pages in common: {exact} identical, mean similarity {statistics.mean(sims):.4f}, min {min(sims):.4f}")
+    print(
+        f"{len(common)} pages in common: {exact} identical, mean similarity {statistics.mean(sims):.4f}, "
+        f"min {min(sims):.4f}"
+    )
 
 
 def main() -> None:
@@ -262,13 +314,18 @@ def main() -> None:
             sys.exit(f"warm-up request failed, not starting the load: {r['error']}")
 
     rows, sink = [], []
-    print(f"{'level':>5} {'reqs':>5} {'ok':>4} {'fail':>4} {'wall s':>7} {'tok/s':>7} {'req/s':>6} "
-          f"{'p50 s':>6} {'p95 s':>6} {'GPU MiB':>8} {'RAM MiB':>8}")
+    print(
+        f"{'level':>5} {'reqs':>5} {'ok':>4} {'fail':>4} {'wall s':>7} {'tok/s':>7} {'req/s':>6} "
+        f"{'p50 s':>6} {'p95 s':>6} {'GPU MiB':>8} {'RAM MiB':>8}"
+    )
     for level in args.levels:
         r = run_level(args, images, level, sink)
         rows.append(r)
-        print(f"{r['level']:>5} {r['requests']:>5} {r['ok']:>4} {r['failed']:>4} {r['wall_s']:>7.1f} {r['tok_s']:>7.0f} "
-              f"{r['req_s']:>6.2f} {r['lat_p50']:>6.1f} {r['lat_p95']:>6.1f} {r['gpu_peak_mib']:>8.0f} {r['ram_peak_mib']:>8.0f}")
+        print(
+            f"{r['level']:>5} {r['requests']:>5} {r['ok']:>4} {r['failed']:>4} {r['wall_s']:>7.1f} {r['tok_s']:>7.0f} "
+            f"{r['req_s']:>6.2f} {r['lat_p50']:>6.1f} {r['lat_p95']:>6.1f} {r['gpu_peak_mib']:>8.0f} "
+            f"{r['ram_peak_mib']:>8.0f}"
+        )
         for e in r["errors"]:
             print(f"        error: {e}")
 

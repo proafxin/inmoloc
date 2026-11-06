@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import math
 import re
+from typing import TYPE_CHECKING, Any
 
 import torch
 
-from typing import TYPE_CHECKING, Any, Callable, Iterable
-
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, gguf
-
-from .deepseek import DeepseekV2Model
+from conversion.base import MmprojModel, ModelBase, gguf
+from conversion.deepseek import DeepseekV2Model
 
 
 @ModelBase.register("Dots3NoteForCausalLM", "Dots3NoteForConditionalGeneration", "Dots3NoteTextForCausalLM")
@@ -28,7 +28,7 @@ class Dots3NoteModel(DeepseekV2Model):
         type(self)._n_main_layers = self.hparams["num_hidden_layers"]
         return super().index_tensors(remote_hf_model_id=remote_hf_model_id)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         hparams = self.hparams
@@ -57,7 +57,8 @@ class Dots3NoteModel(DeepseekV2Model):
             raise ValueError("dots3-note conversion does not support use_dynamic_rsf/moe_gating_fp32")
         for key in ("attention_gate_type", "swa_attention_gate_type"):
             if hparams.get(key, "headwise") != "headwise":
-                raise ValueError(f"dots3-note conversion only supports headwise attention gate, got {key}={hparams.get(key)!r}")
+                msg = f"dots3-note conversion only supports headwise attention gate, got {key}={hparams.get(key)!r}"
+                raise ValueError(msg)
         if hparams["swa_qk_nope_head_dim"] + hparams["swa_qk_rope_head_dim"] != hparams.get("swa_head_dim", 256):
             raise ValueError("swa_head_dim must equal swa_qk_nope_head_dim + swa_qk_rope_head_dim")
         if hparams["swa_qk_rope_head_dim"] != hparams["qk_rope_head_dim"]:
@@ -72,8 +73,9 @@ class Dots3NoteModel(DeepseekV2Model):
             return True
         return self.layer_types[bid] == "sliding_attention"
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model)
         special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
         tokens, toktypes, tokpre = self.get_vocab_base()
@@ -93,20 +95,28 @@ class Dots3NoteModel(DeepseekV2Model):
             return None
 
         assert cls._n_main_layers is not None
-        is_mtp = name.startswith("model.mtp.") or \
-            ((m := re.match(r"model\.layers\.(\d+)\.", name)) is not None and int(m.group(1)) >= cls._n_main_layers)
+        is_mtp = name.startswith("model.mtp.") or (
+            (m := re.match(r"model\.layers\.(\d+)\.", name)) is not None and int(m.group(1)) >= cls._n_main_layers
+        )
 
         # --no-mtp: drop the NextN/MTP block; --mtp: keep only that block plus the shared embeddings/norm/lm_head
         if is_mtp and cls.no_mtp:
             return None
-        if cls.mtp_only and not is_mtp and name not in (
-            "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight",
+        if (
+            cls.mtp_only
+            and not is_mtp
+            and name
+            not in {
+                "model.embed_tokens.weight",
+                "model.norm.weight",
+                "lm_head.weight",
+            }
         ):
             return None
 
         return name, gen
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         hparams = self.hparams
 
         # head_count is a per-layer array because the two layer kinds have different head counts
@@ -142,7 +152,7 @@ class Dots3NoteModel(DeepseekV2Model):
         self.gguf_writer.add_indexer_top_k(hparams["index_topk"])
         self.gguf_writer.add_indexer_types([not self._is_swa_layer(il) for il in range(n_layer)])
 
-    def prepare_metadata(self, vocab_only: bool):
+    def prepare_metadata(self, vocab_only: bool) -> None:
         from_dir = self.fname_out.is_dir()
         super().prepare_metadata(vocab_only=vocab_only)
 
@@ -151,8 +161,14 @@ class Dots3NoteModel(DeepseekV2Model):
 
         output_type: str = self.ftype.name.partition("_")[2]
         fname_default: str = gguf.naming_convention(
-            self.metadata.name, self.metadata.basename, self.metadata.finetune,
-            self.metadata.version, size_label=None, output_type=output_type, model_type=None)
+            self.metadata.name,
+            self.metadata.basename,
+            self.metadata.finetune,
+            self.metadata.version,
+            size_label=None,
+            output_type=output_type,
+            model_type=None,
+        )
         self.fname_out = self.fname_out.parent / f"mtp-{fname_default}.gguf"
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
@@ -165,10 +181,10 @@ class Dots3NoteModel(DeepseekV2Model):
         # this also covers the indexer wq_b, which reads the same rescaled q_lora activation
         if self.apply_lora_rescale and bid is not None:
             if name.endswith("q_a_layernorm.weight"):
-                data_torch = data_torch * math.sqrt(self.hparams["hidden_size"] / self.hparams["q_lora_rank"])
+                data_torch *= math.sqrt(self.hparams["hidden_size"] / self.hparams["q_lora_rank"])
             elif name.endswith("kv_a_layernorm.weight"):
                 rank = self.hparams["swa_kv_lora_rank"] if self._is_swa_layer(bid) else self.hparams["kv_lora_rank"]
-                data_torch = data_torch * math.sqrt(self.hparams["hidden_size"] / rank)
+                data_torch *= math.sqrt(self.hparams["hidden_size"] / rank)
 
         # MLA absorption: split kv_b_proj into k_b (transposed) and v_b, per-layer-kind geometry
         if name.endswith("kv_b_proj.weight"):
@@ -202,7 +218,7 @@ class Dots3NoteMmprojModel(MmprojModel):
     has_vision_encoder = True
     has_audio_encoder = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         assert self.hparams_vision is not None
         assert self.hparams_audio is not None
@@ -224,7 +240,12 @@ class Dots3NoteMmprojModel(MmprojModel):
             raise ValueError("unsupported dots3-note vision config variant")
 
         aud = self.hparams_audio
-        if not aud.get("use_conv2d_stem") or not aud.get("use_rope") or not aud.get("use_rms_norm") or aud.get("use_causal"):
+        if (
+            not aud.get("use_conv2d_stem")
+            or not aud.get("use_rope")
+            or not aud.get("use_rms_norm")
+            or aud.get("use_causal")
+        ):
             raise ValueError("unsupported dots3-note audio config variant")
         if aud["whisper_config"].get("activation_function") != "swiglu":
             raise ValueError("dots3-note audio conversion requires the swiglu activation")
@@ -246,7 +267,7 @@ class Dots3NoteMmprojModel(MmprojModel):
             cfg["num_hidden_layers"] = whisper["encoder_layers"]
         return cfg
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         assert self.hparams_vision is not None
         assert self.hparams_audio is not None
@@ -302,17 +323,20 @@ class Dots3NoteMmprojModel(MmprojModel):
                         ename = f"vision_encoder.blocks.{bid}.mlp.experts.{xid}.{w_name}.weight"
                         datas.append(buf.pop(ename))
                     merged = torch.stack(datas, dim=0)
-                    yield from super().modify_tensors(merged, f"vision_encoder.blocks.{bid}.mlp.experts.{w_name}.weight", bid)
+                    yield from super().modify_tensors(
+                        merged, f"vision_encoder.blocks.{bid}.mlp.experts.{w_name}.weight", bid
+                    )
             return
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
         if self._vis_experts is not None:
-            leftover = [k for d in self._vis_experts.values() for k in d.keys()]
+            leftover = [k for d in self._vis_experts.values() for k in d]
             if leftover:
-                raise ValueError(f"unprocessed vision experts: {leftover}")
+                msg = f"unprocessed vision experts: {leftover}"
+                raise ValueError(msg)
 
     def tensor_force_quant(self, name, new_name, bid, n_dims):
         # FP32 routing is load-bearing for the vision MoE (near-tied expert scores)

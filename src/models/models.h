@@ -105,7 +105,6 @@ struct llm_build_delta_net_base : public llm_graph_context {
             ggml_tensor *        v,
             ggml_tensor *        g,
             ggml_tensor *        b,
-            ggml_tensor *        s,
             int                  il);
 
     ggml_tensor * build_recurrent_attn(
@@ -116,7 +115,6 @@ struct llm_build_delta_net_base : public llm_graph_context {
             ggml_tensor *        v,
             ggml_tensor *        g,
             ggml_tensor *        b,
-            ggml_tensor *        s,
             int                  il);
 };
 
@@ -1280,13 +1278,18 @@ struct llama_model_deepseek4 : public llama_model_base {
                 ggml_tensor * inp_pos,
                 int il) const;
 
-        ggml_tensor * build_top_k_mask(
-                ggml_tensor * kq_mask,
-                ggml_tensor * top_k,
-                const char * name,
+        // the elastic memory: reads the raw and the compressed rows of a layer in place, through a list per token
+        ggml_tensor * build_box_attention(
+                llm_graph_input_dsv4_raw * inp_attn,
+                ggml_tensor * q,
+                ggml_tensor * kv,
+                ggml_tensor * list,
+                ggml_tensor * rng,
+                ggml_tensor * sinks,
+                float kq_scale,
                 int il) const;
 
-        ggml_tensor * build_csa_lid_attention(
+        ggml_tensor * build_csa_box_attention(
                 const llama_model & model,
                 llm_graph_input_dsv4 * inp_dsv4,
                 llm_graph_input_dsv4_raw * inp_attn,
@@ -1295,23 +1298,6 @@ struct llama_model_deepseek4 : public llama_model_base {
                 ggml_tensor * qr,
                 ggml_tensor * cur,
                 ggml_tensor * inp_pos,
-                ggml_tensor * sinks,
-                float kq_scale,
-                int il) const;
-
-        ggml_tensor * build_hca_attention(
-                llm_graph_input_dsv4 * inp_dsv4,
-                llm_graph_input_dsv4_raw * inp_attn,
-                ggml_tensor * q,
-                ggml_tensor * kv,
-                ggml_tensor * sinks,
-                float kq_scale,
-                int il) const;
-
-        ggml_tensor * build_raw_attention(
-                llm_graph_input_dsv4_raw * inp_attn,
-                ggml_tensor * q,
-                ggml_tensor * kv,
                 ggml_tensor * sinks,
                 float kq_scale,
                 int il) const;
@@ -2238,12 +2224,20 @@ struct llama_model_minimax_m3 : public llama_model_base {
     struct graph : public llm_graph_context {
         graph(const llama_model & model, const llm_graph_params & params);
 
-        ggml_tensor * build_attn_msa_fa(
-                ggml_tensor * q_cur,   // [D, HQ, S] f32
-                ggml_tensor * k,       // [D, n_keys, 1, C]  C = HKV or HKV*n_stream
-                ggml_tensor * v,       // [D, n_keys, 1, C]
-                ggml_tensor * mask,    // [n_keys, R, 1, C] f16, R = HQ*T/(Gp*C)
-                int64_t Gp, float kq_scale, int il) const;
+        // the elastic memory: scores the indexer rows of the window of each token and reads the selected K/V rows of each
+        // head group in place
+        ggml_tensor * build_attn_msa_box(
+                ggml_tensor * q_cur,   // [D, HQ, T] f32
+                ggml_tensor * k,       // [D, HKV, n_rows, 1]
+                ggml_tensor * v,       // [D, HKV, n_rows, 1]
+                ggml_tensor * iq,      // [n_idx, Hd, T]
+                ggml_tensor * ik,      // [n_idx, 1, n_rows, 1]
+                ggml_tensor * rows,    // I32 [n_list, 1]
+                ggml_tensor * win,     // I32 [3, T]
+                ggml_tensor * off,     // I32 [1, 1, T]
+                ggml_tensor * bias,    // F32 [n_win/blk, T]
+                ggml_tensor * q_base,  // I32 [2, T]
+                int64_t n_win, int64_t blk, int64_t K, float kq_scale, int il) const;
     };
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
 };
@@ -2368,7 +2362,7 @@ struct llama_model_qwen35 : public llama_model_base {
 struct llama_model_qwen4exp : public llama_model_base {
     llama_model_qwen4exp(const struct llama_model_params & params) : llama_model_base(params) {}
 
-    class llm_graph_input_qsa;
+    class llm_graph_input_kpool;
 
     void load_arch_hparams(llama_model_loader & ml) override;
     void load_arch_tensors(llama_model_loader & ml) override;
@@ -2395,31 +2389,31 @@ struct llama_model_qwen4exp : public llama_model_base {
         ggml_tensor * build_layer_attn(
               llm_graph_input_attn_kv * inp_attn,
   const llama_memory_hybrid_idx_context * mctx_hyb,
+          llm_graph_input_kpool * inp_kpool,
                     ggml_tensor * cur,
                     ggml_tensor * inp_pos,
                             int * sections,
                             int   il);
 
-        // dense self-attention restricted to the cells that top_k names
+        // dense self-attention over the cells that the QSA mask keeps
         ggml_tensor * build_attn_qsa(
         llm_graph_input_attn_kv * inp,
                     ggml_tensor * q_cur,
                     ggml_tensor * k_cur,
                     ggml_tensor * v_cur,
-                    ggml_tensor * top_k,
+                    ggml_tensor * sel,
+                    ggml_tensor * sel_rng,
                           float   kq_scale,
                             int   il);
 
-        // the QSA cache layout inputs do not depend on the layer, only on its compress ratio,
-        // so the layers sharing a ratio share one input set
-        std::map<uint32_t, llm_graph_input_qsa *> qsa_inps;
+        llm_graph_input_kpool * build_inp_kpool(const llama_memory_hybrid_idx_context * mctx_hyb);
 
-        // QSA: token indices this layer's queries may attend to, or nullptr for dense
-        ggml_tensor * build_qsa_top_k(
+        // QSA: what this layer's queries may attend to, a mask of the cells or lists of rows (elastic memory)
+        ggml_tensor * build_qsa_sel(
   const llama_memory_hybrid_idx_context * mctx_hyb,
+          llm_graph_input_kpool * inp_kpool,
                     ggml_tensor * cur,
                     ggml_tensor * inp_pos,
-                    ggml_tensor * kq_mask,
                             int * sections,
                             int   il);
 
@@ -2438,8 +2432,9 @@ struct llama_model_qwen4exp : public llama_model_base {
                     ggml_tensor * gate,
                             int   layer);
 
-        // build_rs writes the state tensor in place, so one gather per cache tensor is reused
-        std::map<ggml_tensor *, ggml_tensor *> rs_rows;
+        // build_rs writes the state tensor in place, so one gather per cache tensor is reused; the layer tells apart the
+        // rows of the one view the elastic memory has for all the layers
+        std::map<std::pair<ggml_tensor *, int>, ggml_tensor *> rs_rows;
 
         // one conv history per cache tensor: delta-net and PLE each have their own
         ggml_tensor * build_conv_state_at(

@@ -1084,6 +1084,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "DSV4_HC_COMB",
     "DSV4_HC_PRE",
     "DSV4_HC_POST",
+    "ARGSORT_OFF",
 
     "UNARY",
 
@@ -1101,7 +1102,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1199,6 +1200,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "dsv4_hc_comb(mixes, scale, base)",
     "dsv4_hc_pre(x, weights)",
     "dsv4_hc_post(x, residual, post, comb)",
+    "argsort_off(x, off)",
 
     "unary(x)",
 
@@ -1216,7 +1218,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -1963,10 +1965,15 @@ struct ggml_tensor * ggml_format_name(struct ggml_tensor * tensor, const char * 
 struct ggml_tensor * ggml_view_tensor(
         struct ggml_context * ctx,
         struct ggml_tensor  * src) {
-    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, src->type, GGML_MAX_DIMS, src->ne, src, 0);
+    // the view spans what src spans: the size check of a new tensor counts contiguous rows, which a src with rows that
+    // overlap (a stride less than a row) exceeds, so the view is created with one row and takes the shape of src after
+    const int64_t ne[GGML_MAX_DIMS] = { src->ne[0], MIN(src->ne[1], 1), MIN(src->ne[2], 1), MIN(src->ne[3], 1) };
+
+    struct ggml_tensor * result = ggml_new_tensor_impl(ctx, src->type, GGML_MAX_DIMS, ne, src, 0);
     ggml_format_name(result, "%s (view)", src->name);
 
     for (int i = 0; i < GGML_MAX_DIMS; i++) {
+        result->ne[i] = src->ne[i];
         result->nb[i] = src->nb[i];
     }
 
@@ -5454,6 +5461,33 @@ struct ggml_tensor * ggml_argsort_top_k(
     return result;
 }
 
+// ggml_argsort_top_k_off
+
+struct ggml_tensor * ggml_argsort_top_k_off(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * a,
+        int                   k,
+        struct ggml_tensor  * off) {
+    GGML_ASSERT(a->type == GGML_TYPE_F32 && a->ne[0] >= k && a->ne[0] <= INT32_MAX);
+    GGML_ASSERT(off->type == GGML_TYPE_I32 && off->ne[0] == 1);
+    GGML_ASSERT(a->ne[1] % off->ne[1] == 0 && a->ne[2] % off->ne[2] == 0 && a->ne[3] % off->ne[3] == 0);
+
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_I32, GGML_MAX_DIMS, a->ne);
+
+    ggml_set_op_params_i32(result, 0, (int32_t) GGML_SORT_ORDER_DESC);
+
+    result->op     = GGML_OP_ARGSORT_OFF;
+    result->src[0] = a;
+    result->src[1] = off;
+
+    result = ggml_view_4d(ctx, result,
+                k, result->ne[1], result->ne[2], result->ne[3],
+                   result->nb[1], result->nb[2], result->nb[3],
+                0);
+
+    return result;
+}
+
 // ggml_top_k
 
 struct ggml_tensor * ggml_top_k(
@@ -5518,9 +5552,8 @@ struct ggml_tensor * ggml_flash_attn_ext(
         GGML_ASSERT(q->ne[3] % mask->ne[3] == 0);
     }
 
-    if (max_bias > 0.0f) {
-        GGML_ASSERT(mask);
-    }
+    // ALiBi reads the distances from the mask, or without one from the positions of the rows that
+    // ggml_flash_attn_ext_set_kv_idx() adds, which checks them
 
     // permute(0, 2, 1, 3)
     int64_t ne[4] = { v->ne[0], q->ne[2], q->ne[1], q->ne[3] };
@@ -5593,7 +5626,6 @@ void ggml_flash_attn_ext_set_kv_idx(
 
     float max_bias = 0.0f;
     memcpy(&max_bias, (const float *) a->op_params + 1, sizeof(float));
-    GGML_ASSERT(max_bias == 0.0f && "kv_idx does not support ALiBi");
 
     const struct ggml_tensor * q = a->src[0];
     const struct ggml_tensor * k = a->src[1];
@@ -5601,13 +5633,35 @@ void ggml_flash_attn_ext_set_kv_idx(
     GGML_ASSERT(q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1);
 
     GGML_ASSERT(kv_idx->type == GGML_TYPE_I32 && ggml_is_contiguous(kv_idx));
-    GGML_ASSERT(kv_idx->ne[2] == 1 && kv_idx->ne[3] == 1);
+    // ALiBi reads the positions of the rows from the second plane, which a relative bias reads too
+    if ((max_bias != 0.0f && kv_idx->ne[2] != 2) || kv_idx->ne[2] > 2 || kv_idx->ne[3] != 1) {
+        GGML_ABORT("%s: the list %s [%lld, %lld, %lld, %lld] (view of %s) does not match max_bias = %f: ALiBi needs the positions in a second plane",
+                __func__, kv_idx->name, (long long) kv_idx->ne[0], (long long) kv_idx->ne[1], (long long) kv_idx->ne[2],
+                (long long) kv_idx->ne[3], kv_idx->view_src ? kv_idx->view_src->name : "-", max_bias);
+    }
 
     GGML_ASSERT(q_rng->type == GGML_TYPE_I32 && ggml_is_contiguous(q_rng));
     GGML_ASSERT(q_rng->ne[0] == 3 && q_rng->ne[1] >= q->ne[1] && q_rng->ne[2] == 1 && q_rng->ne[3] == 1);
 
     a->src[5] = kv_idx;
     a->src[6] = q_rng;
+}
+
+void ggml_flash_attn_ext_set_rel_bias(
+        struct ggml_tensor * a,
+        struct ggml_tensor * rel_bias) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(a->src[6] != NULL && a->src[5]->ne[2] == 2 && "the relative bias reads the positions of the ranges");
+    GGML_ASSERT(a->src[7] == NULL);
+
+    float max_bias = 0.0f;
+    memcpy(&max_bias, (const float *) a->op_params + 1, sizeof(float));
+    GGML_ASSERT(max_bias == 0.0f && "a relative bias takes the place of ALiBi");
+
+    GGML_ASSERT(rel_bias->type == GGML_TYPE_F32 && ggml_is_contiguous(rel_bias));
+    GGML_ASSERT(rel_bias->ne[0] >= 1 && rel_bias->ne[1] == a->src[0]->ne[2] && rel_bias->ne[2] == 1 && rel_bias->ne[3] == 1);
+
+    a->src[7] = rel_bias;
 }
 
 void ggml_flash_attn_ext_set_kv_rows(
@@ -5621,13 +5675,35 @@ void ggml_flash_attn_ext_set_kv_rows(
     const struct ggml_tensor * v    = a->src[2];
     const struct ggml_tensor * mask = a->src[3];
     GGML_ASSERT(q->ne[3] == 1 && k->ne[3] == 1 && v->ne[3] == 1);
-    GGML_ASSERT(mask == NULL || mask->ne[0] == k->ne[1]);
-
     GGML_ASSERT(rows->type == GGML_TYPE_I32 && ggml_is_contiguous(rows));
     GGML_ASSERT(rows->ne[1] == 1 && rows->ne[2] == 1 && rows->ne[3] == 1);
+    // a list padded with -1 may be longer than the mask: nothing reads the mask at the padding
+    GGML_ASSERT(mask == NULL || mask->ne[0] <= rows->ne[0]);
 
     // src[6] stays NULL, which tells this mode apart from ggml_flash_attn_ext_set_kv_idx()
     a->src[5] = rows;
+}
+
+void ggml_flash_attn_ext_set_kv_rows_hi(
+        struct ggml_tensor * a,
+        struct ggml_tensor * rows,
+        struct ggml_tensor * hi) {
+    GGML_ASSERT(a->src[3] == NULL && "the prefix lengths replace the mask");
+
+    ggml_flash_attn_ext_set_kv_rows(a, rows);
+
+    float max_bias      = 0.0f;
+    float logit_softcap = 0.0f;
+    memcpy(&max_bias,      (const float *) a->op_params + 1, sizeof(float));
+    memcpy(&logit_softcap, (const float *) a->op_params + 2, sizeof(float));
+    GGML_ASSERT(max_bias == 0.0f && logit_softcap == 0.0f);
+
+    GGML_ASSERT(hi->type == GGML_TYPE_I32 && ggml_is_contiguous(hi));
+    GGML_ASSERT(hi->ne[0] >= a->src[0]->ne[1] && hi->ne[1] == 1 && hi->ne[2] == 1 && hi->ne[3] == 1);
+
+    // the prefix lengths take the place of the mask, flagged in op_params[5]
+    a->src[3] = hi;
+    ggml_set_op_params_i32(a, 5, 1);
 }
 
 // ggml_flash_attn_back
@@ -6465,6 +6541,61 @@ struct ggml_tensor * ggml_gated_delta_net(
     return result;
 }
 
+struct ggml_tensor * ggml_gated_delta_net_rows(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * g,
+        struct ggml_tensor  * beta,
+        struct ggml_tensor  * state,
+        struct ggml_tensor  * rows_in,
+        struct ggml_tensor  * rows_out,
+        struct ggml_tensor  * after) {
+    GGML_ASSERT(ggml_is_contiguous_rows(q));
+    GGML_ASSERT(ggml_is_contiguous_rows(k));
+    GGML_ASSERT(ggml_is_contiguous_rows(v));
+    GGML_ASSERT(ggml_is_contiguous(g));
+    GGML_ASSERT(ggml_is_contiguous(beta));
+    GGML_ASSERT(ggml_is_contiguous_rows(state));
+
+    GGML_ASSERT(q->type == GGML_TYPE_F32 && k->type == GGML_TYPE_F32 && v->type == GGML_TYPE_F32);
+    GGML_ASSERT(g->type == GGML_TYPE_F32 && beta->type == GGML_TYPE_F32 && state->type == GGML_TYPE_F32);
+
+    const int64_t S_v      = v->ne[0];
+    const int64_t H        = v->ne[1];
+    const int64_t n_tokens = v->ne[2];
+    const int64_t n_seqs   = v->ne[3];
+
+    GGML_ASSERT(g->ne[0] == 1 || g->ne[0] == S_v);
+    GGML_ASSERT(beta->ne[0] == 1);
+
+    // a row holds the state of one sequence: [S_v, S_v, H]
+    GGML_ASSERT(state->ne[0] == S_v*S_v*H);
+
+    GGML_ASSERT(rows_in->type == GGML_TYPE_I32 && ggml_is_contiguous(rows_in) && rows_in->ne[0] == n_seqs);
+    GGML_ASSERT(rows_out == NULL || (rows_out->type == GGML_TYPE_I32 && ggml_is_contiguous(rows_out) && rows_out->ne[0] == n_seqs));
+
+    const int64_t ne[4] = { S_v * H, n_tokens * n_seqs, 1, 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    ggml_set_op_params_i32(result, 0, 1); // K
+    ggml_set_op_params_i32(result, 1, 1); // the rows mode
+
+    result->op     = GGML_OP_GATED_DELTA_NET;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = v;
+    result->src[3] = g;
+    result->src[4] = beta;
+    result->src[5] = state;
+    result->src[6] = rows_in;
+    result->src[7] = rows_out;
+    result->src[8] = after;
+
+    return result;
+}
+
 // ggml_lightning_indexer
 
 struct ggml_tensor * ggml_lightning_indexer(
@@ -6497,6 +6628,62 @@ struct ggml_tensor * ggml_lightning_indexer(
     result->src[1] = k;
     result->src[2] = weights;
     result->src[3] = mask;
+
+    return result;
+}
+
+// the windows of the list of rows, see ggml_lightning_indexer_rows()
+static void ggml_lightning_indexer_check_rows(const struct ggml_tensor * q, const struct ggml_tensor * k, const struct ggml_tensor * rows, const struct ggml_tensor * rng) {
+    GGML_ASSERT(q->type == GGML_TYPE_F32);
+    GGML_ASSERT(rows->type == GGML_TYPE_I32 && ggml_is_contiguous(rows) && rows->ne[1] == 1 && rows->ne[2] == 1 && rows->ne[3] == 1);
+    GGML_ASSERT(rng->type == GGML_TYPE_I32 && ggml_is_contiguous(rng) && rng->ne[0] == 3 && rng->ne[1] == q->ne[2] && rng->ne[2] == 1 && rng->ne[3] == 1);
+    GGML_ASSERT(q->ne[0] == k->ne[0] && k->ne[1] == 1 && q->ne[3] == 1 && k->ne[3] == 1);
+}
+
+struct ggml_tensor * ggml_lightning_indexer_rows(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * weights,
+        struct ggml_tensor  * rows,
+        struct ggml_tensor  * rng,
+        int64_t               n_win) {
+    ggml_lightning_indexer_check_rows(q, k, rows, rng);
+    GGML_ASSERT(weights->type == GGML_TYPE_F32 && q->ne[1] == weights->ne[0] && q->ne[2] == weights->ne[1]);
+    GGML_ASSERT(n_win > 0);
+
+    int64_t ne[4] = { n_win, q->ne[2], 1, 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    result->op     = GGML_OP_LIGHTNING_INDEXER;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = weights;
+    result->src[4] = rows;
+    result->src[5] = rng;
+
+    return result;
+}
+
+struct ggml_tensor * ggml_lightning_indexer_heads(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * rows,
+        struct ggml_tensor  * rng,
+        int64_t               n_win) {
+    ggml_lightning_indexer_check_rows(q, k, rows, rng);
+    GGML_ASSERT(n_win > 0);
+
+    int64_t ne[4] = { n_win, q->ne[1], q->ne[2], 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    // no weights tells this mode apart
+    result->op     = GGML_OP_LIGHTNING_INDEXER;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[4] = rows;
+    result->src[5] = rng;
 
     return result;
 }

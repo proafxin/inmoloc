@@ -40,31 +40,52 @@ def get_uid_gid():
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(
         description="Build llama.cpp for Snapdragon using cross-compilation docker containers or natively."
     )
-    parser.add_argument("--target", default="android", help="Compilation target and deployment definition (e.g. android[:serial]/adb[:serial], linux:[user@]host/lnx:[user@]host/ubuntu:[user@]host, windows/wos) (default: android)")
+    parser.add_argument(
+        "--target",
+        default="android",
+        help="Compilation target and deployment definition (e.g. android[:serial]/adb[:serial], linux:[user@]host/lnx:[user@]host/ubuntu:[user@]host, windows/wos) (default: android)",
+    )
     parser.add_argument("--build-dir", help="Build directory name (defaults to build-TARGET[-dbg], e.g. build-android)")
     parser.add_argument("--install-dir", help="Install directory name (defaults to pkg-TARGET[-dbg], e.g. pkg-android)")
     parser.add_argument("--jobs", "-j", type=int, help="Number of build jobs (defaults to CPU thread count)")
-    parser.add_argument("--no-docker", action="store_true", help="Build natively on the host instead of in a docker container")
+    parser.add_argument(
+        "--no-docker", action="store_true", help="Build natively on the host instead of in a docker container"
+    )
     parser.add_argument("--preset", help="Override the CMake preset to use")
-    parser.add_argument("--debug", action="store_true", help="Build in debug mode (uses -debug presets instead of -release)")
+    parser.add_argument(
+        "--debug", action="store_true", help="Build in debug mode (uses -debug presets instead of -release)"
+    )
 
     # Push options
-    parser.add_argument("--push", action="store_true", help="Push built package to the target device via ADB or SSH/SCP")
-    parser.add_argument("--target-dir", help="Target directory on the device (default: /data/local/tmp/llama.cpp for Android, ~/llama.cpp for Linux)")
+    parser.add_argument(
+        "--push", action="store_true", help="Push built package to the target device via ADB or SSH/SCP"
+    )
+    parser.add_argument(
+        "--target-dir",
+        help="Target directory on the device (default: /data/local/tmp/llama.cpp for Android, ~/llama.cpp for Linux)",
+    )
 
     # Toolchain options
-    parser.add_argument("--toolchain-version", default="v0.7", help="Docker toolchain image version/tag (default: v0.7)")
-    parser.add_argument("--toolchain-url", default="ghcr.io/snapdragon-toolchain", help="Docker toolchain registry URL/namespace (default: ghcr.io/snapdragon-toolchain)")
+    parser.add_argument(
+        "--toolchain-version", default="v0.7", help="Docker toolchain image version/tag (default: v0.7)"
+    )
+    parser.add_argument(
+        "--toolchain-url",
+        default="ghcr.io/snapdragon-toolchain",
+        help="Docker toolchain registry URL/namespace (default: ghcr.io/snapdragon-toolchain)",
+    )
 
     args = parser.parse_args()
 
     target_type, target_val = parse_target(args.target)
     if not target_type:
-        logger.error(f"Error: Invalid target format '{args.target}'. Must be android[:serial]/adb[:serial], linux:[user@]host/lnx:[user@]host/ubuntu:[user@]host, or windows/wos.")
+        logger.error(
+            f"Error: Invalid target format '{args.target}'. Must be android[:serial]/adb[:serial], linux:[user@]host/lnx:[user@]host/ubuntu:[user@]host, or windows/wos."
+        )
         sys.exit(1)
 
     if target_type == "windows":
@@ -89,7 +110,11 @@ def main():
             else:
                 preset = f"arm64-android-snapdragon-{config_type}"
         else:
-            preset = f"arm64-linux-snapdragon-{config_type}" if target_type == "linux" else f"arm64-android-snapdragon-{config_type}"
+            preset = (
+                f"arm64-linux-snapdragon-{config_type}"
+                if target_type == "linux"
+                else f"arm64-android-snapdragon-{config_type}"
+            )
 
     target_prefix = args.target.split(":", 1)[0]
     suffix = "-dbg" if is_debug else ""
@@ -172,10 +197,15 @@ def main():
         )
 
         docker_cmd = [
-            "docker", "run", "--rm",
-            "--volume", f"{repo_root}:/workspace",
-            "--workdir", "/workspace",
-            "--platform", "linux/amd64"
+            "docker",
+            "run",
+            "--rm",
+            "--volume",
+            f"{repo_root}:/workspace",
+            "--workdir",
+            "/workspace",
+            "--platform",
+            "linux/amd64",
         ]
         uid_gid = get_uid_gid()
         if uid_gid:
@@ -209,7 +239,7 @@ def main():
         if target_type == "android":
             logger.info("\nPushing built artifacts to Android device via ADB...")
             adb_cmd = ["adb"]
-            if target_val: # serial
+            if target_val:  # serial
                 adb_cmd += ["-s", target_val]
 
             # Clean stale package files on device
@@ -235,7 +265,9 @@ def main():
         elif target_type == "linux":
             ssh_host = target_val
             if not ssh_host:
-                logger.error("Error: SSH host not specified in target (e.g. use linux:user@host, lnx:user@host, or ubuntu:user@host). Cannot deploy.")
+                logger.error(
+                    "Error: SSH host not specified in target (e.g. use linux:user@host, lnx:user@host, or ubuntu:user@host). Cannot deploy."
+                )
                 sys.exit(1)
             logger.info(f"\nDeploying built artifacts to Linux device {ssh_host} via SSH/SCP...")
 

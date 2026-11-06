@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
+from conversion.base import ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register("CohereForCausalLM")
@@ -17,7 +19,7 @@ from .base import ModelBase, TextModel, gguf, logger
 class CommandR2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.COMMAND_R
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         # max_position_embeddings = 8192 in config.json but model was actually
@@ -25,7 +27,7 @@ class CommandR2Model(TextModel):
         # aya-23 models don't have model_max_length specified
         self.hparams["max_position_embeddings"] = self.find_hparam(["model_max_length", "max_position_embeddings"])
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_logit_scale(self.hparams["logit_scale"])
         self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.NONE)
@@ -37,7 +39,7 @@ class CommandR2Model(TextModel):
 class Cohere2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.COHERE2
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         self.gguf_writer.add_logit_scale(self.hparams["logit_scale"])
@@ -55,7 +57,8 @@ class Cohere2Model(TextModel):
         # the actual weight only contains 0-value tensors as bias, we can skip them
         if name.endswith(".bias"):
             if torch.any(data_torch != 0):
-                raise ValueError(f"Bias tensor {name!r} is not zero.")
+                msg = f"Bias tensor {name!r} is not zero."
+                raise ValueError(msg)
             logger.debug(f"Skipping bias tensor {name!r} for Cohere2 conversion.")
             return
 
@@ -67,11 +70,9 @@ class Cohere2Model(TextModel):
 class Cohere2MoeModel(TextModel):
     model_arch = gguf.MODEL_ARCH.COHERE2MOE
     _n_main_layers: int | None = None
-    _expert_tensor_re = re.compile(
-        r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(down_proj|gate_proj|up_proj)\.weight"
-    )
+    _expert_tensor_re = re.compile(r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(down_proj|gate_proj|up_proj)\.weight")
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         if (n_nextn := int(self.hparams.get("num_nextn_predict_layers", 0) or 0)) > 0 and not self.no_mtp:
             self.block_count += n_nextn
@@ -88,7 +89,7 @@ class Cohere2MoeModel(TextModel):
         special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
         special_vocab.add_to_gguf(self.gguf_writer)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         hparams = self.hparams
         expert_intermediate_size = hparams["intermediate_size"]
         mlp_layer_types = hparams.get("mlp_layer_types")
@@ -128,11 +129,20 @@ class Cohere2MoeModel(TextModel):
         name, gen = titem
 
         if cls._n_main_layers is not None:
-            is_mtp = (m := re.match(r"model\.layers\.(\d+)\.", name)) is not None and int(m.group(1)) >= cls._n_main_layers
+            is_mtp = (m := re.match(r"model\.layers\.(\d+)\.", name)) is not None and int(
+                m.group(1)
+            ) >= cls._n_main_layers
             if is_mtp and cls.no_mtp:
                 return None
-            if cls.mtp_only and not is_mtp and name not in (
-                "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight",
+            if (
+                cls.mtp_only
+                and not is_mtp
+                and name
+                not in {
+                    "model.embed_tokens.weight",
+                    "model.norm.weight",
+                    "lm_head.weight",
+                }
             ):
                 return None
 
@@ -141,7 +151,8 @@ class Cohere2MoeModel(TextModel):
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         if name.endswith(".bias"):
             if torch.any(data_torch != 0):
-                raise ValueError(f"Bias tensor {name!r} is not zero.")
+                msg = f"Bias tensor {name!r} is not zero."
+                raise ValueError(msg)
             logger.debug(f"Skipping bias tensor {name!r}.")
             return
 
@@ -174,9 +185,10 @@ class Cohere2MoeModel(TextModel):
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
 
-        experts = [k for d in self._experts for k in d.keys()]
+        experts = [k for d in self._experts for k in d]
         if len(experts) > 0:
-            raise ValueError(f"Unprocessed experts: {experts}")
+            msg = f"Unprocessed experts: {experts}"
+            raise ValueError(msg)

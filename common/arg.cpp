@@ -417,7 +417,8 @@ common_models_handler common_models_handler_init(const common_params & params, l
 }
 
 bool common_models_handler_is_preset_repo(const common_models_handler & handler) {
-    return !handler.plan.preset.url.empty();
+    // a preset from the cache has no url
+    return !handler.plan.preset.local_path.empty();
 }
 
 static std::vector<common_download_task> build_url_tasks(const common_params_model & model, common_download_opts opts) {
@@ -1627,8 +1628,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_examples({LLAMA_EXAMPLE_LOOKUP, LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-c", "--ctx-size"}, "N",
-        string_format("size of the prompt context (default: %d, 0 = loaded from model); in the server, the most the KV cache "
-                      "holds, 0 = sized from --vram-budget and --ctx-typical", params.n_ctx),
+        string_format("size of the prompt context (default: %d, 0 = loaded from model)", params.n_ctx),
         [](common_params & params, int value) {
             params.n_ctx = value;
             if (value == 0) {
@@ -1636,7 +1636,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 params.fit_params_min_ctx = UINT32_MAX;
             }
         }
-    ).set_env("LOCAL_INFERENCE_ARG_CTX_SIZE"));
+    ).set_env("LOCAL_INFERENCE_ARG_CTX_SIZE").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-n", "--predict", "--n-predict"}, "N",
         string_format(
@@ -1647,7 +1647,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, int value) {
             params.n_predict = value;
         }
-    ).set_env("LOCAL_INFERENCE_ARG_N_PREDICT"));
+    ).set_env("LOCAL_INFERENCE_ARG_N_PREDICT").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-b", "--batch-size"}, "N",
         string_format("logical maximum batch size (default: %d)", params.n_batch),
@@ -1704,24 +1704,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LOCAL_INFERENCE_ARG_CACHE_RAM").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
-        {"-kvu", "--kv-unified"},
-        {"-no-kvu", "--no-kv-unified"},
-        "use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto)",
-        [](common_params & params, bool value) {
-            params.kv_unified = value;
-        }
-    ).set_env("LOCAL_INFERENCE_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_PERPLEXITY, LLAMA_EXAMPLE_BATCHED, LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_PARALLEL}));
-    add_opt(common_arg(
-        {"-kvu", "--kv-unified"},
-        {"-no-kvu", "--no-kv-unified"},
-        "the requests processed at once always share one KV cache; accepted for compatibility",
-        [](common_params & params, bool value) {
-            if (!value) {
-                throw std::invalid_argument("error: the server always shares one KV cache between the requests it processes at once, --no-kv-unified is not supported\n");
+        {"--max-output-tokens"}, "N",
+        "required with the elastic memory: the most tokens a request generates; a request's max_tokens is capped at it, "
+        "and a request without max_tokens uses it",
+        [](common_params & params, int value) {
+            if (value <= 0) {
+                throw std::invalid_argument("error: --max-output-tokens must be positive\n");
             }
-            params.kv_unified = true;
+            params.max_output_tokens = value;
         }
-    ).set_env("LOCAL_INFERENCE_ARG_KV_UNIFIED").set_examples({LLAMA_EXAMPLE_SERVER}));
+    ).set_env("LOCAL_INFERENCE_ARG_MAX_OUTPUT_TOKENS").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--prefix-share"},
         {"--no-prefix-share"},
@@ -1739,17 +1731,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 throw std::invalid_argument("error: --prefix-share-min must be >= 1\n");
             }
             params.prefix_share_min = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}));
-    add_opt(common_arg(
-        {"--prompt-cap"}, "N",
-        "prompt tokens processed per iteration while other requests generate, so their next token is not held up by\n"
-        "a whole batch of prompt (default: -1 = what fills one ubatch next to the generated tokens, 0 = no cap)",
-        [](common_params & params, int value) {
-            if (value < -1) {
-                throw std::invalid_argument("error: --prompt-cap must be -1, 0 or positive\n");
-            }
-            params.prompt_cap = value;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
@@ -1775,7 +1756,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.ctx_shift = value;
         }
-    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY}).set_env("LOCAL_INFERENCE_ARG_CONTEXT_SHIFT"));
+    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_IMATRIX, LLAMA_EXAMPLE_PERPLEXITY}).set_env("LOCAL_INFERENCE_ARG_CONTEXT_SHIFT"));
     add_opt(common_arg(
         {"--chunks"}, "N",
         string_format("max number of chunks to process (default: %d, -1 = all)", params.n_chunks),
@@ -1797,7 +1778,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                                throw std::runtime_error(
                                    string_format("error: unknown value for --flash-attn: '%s'\n", value.c_str()));
                            }
-                       }).set_env("LOCAL_INFERENCE_ARG_FLASH_ATTN"));
+                       }).set_env("LOCAL_INFERENCE_ARG_FLASH_ATTN").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"-p", "--prompt"}, "PROMPT",
         "prompt to start generation with; for system message, use -sys",
@@ -2570,35 +2551,22 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             LOG_WRN("DEPRECATED: --defrag-thold is deprecated and no longer necessary to specify\n");
         }
     ).set_env("LOCAL_INFERENCE_ARG_DEFRAG_THOLD"));
-    if (ex == LLAMA_EXAMPLE_SERVER) {
-        // this is to make sure this option appears in the server-specific section of the help message
-        add_opt(common_arg(
-            {"-np", "--parallel"}, "N",
-            string_format("most requests processed at once; the memory budget may lower it (default: %d, -1 = as many as fit)", params.n_parallel),
-            [](common_params & params, int value) {
-                if (value == 0) {
-                    throw std::invalid_argument("error: invalid value for n_parallel\n");
-                }
-                params.n_parallel = value;
-            }
-        ).set_env("LOCAL_INFERENCE_ARG_N_PARALLEL").set_examples({LLAMA_EXAMPLE_SERVER}));
-    } else {
-        add_opt(common_arg(
-            {"-np", "--parallel"}, "N",
-            string_format("number of parallel sequences to decode (default: %d)", params.n_parallel),
-            [](common_params & params, int value) {
-                params.n_parallel = value;
-            }
-        ).set_env("LOCAL_INFERENCE_ARG_N_PARALLEL"));
-    }
+    add_opt(common_arg(
+        {"-np", "--parallel"}, "N",
+        string_format("number of parallel sequences to decode (default: %d)", params.n_parallel),
+        [](common_params & params, int value) {
+            params.n_parallel = value;
+        }
+    ).set_env("LOCAL_INFERENCE_ARG_N_PARALLEL").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--vram-budget"}, "SIZE",
         "device memory the server may use, summed over the devices the model runs on, e.g. 10G, 10240M or 10240 (MiB);\n"
         "the weights, the vision encoder, the draft model, the KV cache, the per-request state, the compute buffers and\n"
-        "the memory the process holds outside them (e.g. the CUDA context) are measured; a model with memory per request\n"
-        "(e.g. recurrent state, which depends on --rs-rollback) runs the most requests at once (at most --parallel)\n"
-        "whose typical requests (--ctx-typical) fit in the KV cache; a model without it runs --parallel requests that\n"
-        "share the KV cache, as many at once as their sizes allow; the memory left goes to the cache (at most --ctx-size)\n"
+        "the memory the process holds outside them (e.g. the CUDA context) are measured; with the elastic memory, what the\n"
+        "fixed costs leave is one region that holds the running requests, as many as fit; otherwise a\n"
+        "model with memory per request (e.g. recurrent state, which depends on --rs-rollback) runs the most requests at\n"
+        "once that fit in the KV cache, a model without it runs requests that share the KV cache, as many at once as\n"
+        "their sizes allow, and the memory left goes to the cache\n"
         "(default: the free device memory; a larger budget is lowered to it)",
         [](common_params & params, const std::string & value) {
             size_t pos = 0;
@@ -2619,19 +2587,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.vram_budget = (size_t) (num*mul);
         }
     ));
-    add_opt(common_arg(
-        {"--ctx-typical"}, "N",
-        "tokens a typical request holds (prompt and output); for a model with memory per request (e.g. recurrent state)\n"
-        "the memory budget runs the most requests at once whose typical requests fit in the KV cache, and gives the\n"
-        "memory left to the cache; a model without it runs --parallel requests that share the cache whatever their size\n"
-        "(default: the longest request the budget holds)",
-        [](common_params & params, int value) {
-            if (value < 1) {
-                throw std::invalid_argument("error: --ctx-typical must be positive\n");
-            }
-            params.n_ctx_typical = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--rs-rollback"}, "{snapshot,replay}",
         "how the recurrent state of a hybrid or recurrent model rolls back rejected speculative tokens:\n"
@@ -2998,7 +2953,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                     string_format("error: unknown value for --fit: '%s'\n", value.c_str()));
             }
         }
-    ).set_env("LOCAL_INFERENCE_ARG_FIT"));
+    ).set_env("LOCAL_INFERENCE_ARG_FIT").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         { "-fitp", "--fit-print" }, "[on|off]",
         string_format("print the estimated required memory ('on' or 'off', default: '%s')", params.fit_params_print ? "on" : "off"),
@@ -3037,14 +2992,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 params.fit_params_target[i] = std::stoull(split_arg[i]) * 1024*1024;
             }
         }
-    ).set_env("LOCAL_INFERENCE_ARG_FIT_TARGET"));
+    ).set_env("LOCAL_INFERENCE_ARG_FIT_TARGET").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         { "-fitc", "--fit-ctx" }, "N",
         string_format("minimum ctx size that can be set by --fit option, default: %" PRIu32, params.fit_params_min_ctx),
         [](common_params & params, int value) {
             params.fit_params_min_ctx = value;
         }
-    ).set_env("LOCAL_INFERENCE_ARG_FIT_CTX"));
+    ).set_env("LOCAL_INFERENCE_ARG_FIT_CTX").set_excludes({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--check-tensors"},
         string_format("check model tensor data for invalid values (default: %s)", params.check_tensors ? "true" : "false"),
@@ -4321,6 +4276,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.speculative.draft.backend_sampling = value;
         }
     ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_BACKEND_SAMPLING"));
+    add_opt(common_arg(
+        {"--spec-draft-sampling"}, "{greedy,probabilistic}",
+        string_format("how the draft is sampled: greedy takes its argmax, probabilistic samples it and has "
+                      "the target verify by rejection sampling (default: %s)",
+                      params.speculative.draft.probabilistic ? "probabilistic" : "greedy"),
+        [](common_params & params, const std::string & value) {
+            if (value == "greedy") {
+                params.speculative.draft.probabilistic = false;
+            } else if (value == "probabilistic") {
+                params.speculative.draft.probabilistic = true;
+            } else {
+                throw std::invalid_argument("invalid value, must be one of: greedy, probabilistic");
+            }
+        }
+    ).set_spec().set_examples({LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}).set_env("LOCAL_INFERENCE_ARG_SPEC_DRAFT_SAMPLING"));
     add_opt(common_arg(
         {"--spec-draft-device", "-devd", "--device-draft"}, "<dev1,dev2,..>",
         "comma-separated list of devices to use for offloading the draft model (none = don't offload, default: follows --device)\n"

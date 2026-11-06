@@ -195,6 +195,10 @@ static common_json api_get(const std::string & url,
                            const std::string & token) {
     auto [cli, parts] = common_http_client(url);
 
+    // metadata only, and a failed lookup falls back to the cache: a stalled one must not hold up the start of a server
+    cli.set_connection_timeout(10, 0);
+    cli.set_read_timeout(10, 0);
+
     httplib::Headers headers = {
         {"User-Agent", "local-inference/" + std::string(llama_build_info())},
         {"Accept", "application/json"}

@@ -10,7 +10,7 @@ Vulnerabilities in the third-party code under `vendor/` should be reported to th
 
 ### Covered
 
-- `src/`, `ggml/`, `common/`, `gguf-py/`
+- `src/`, `ggml/`, `common/`, `gguf/`
 - `tools/server/`, excluding the web UI, features marked experimental, and features not meant for untrusted environments (router mode, MCP)
 
 Denial-of-service bugs are looked at case by case and are not generally treated as vulnerabilities.

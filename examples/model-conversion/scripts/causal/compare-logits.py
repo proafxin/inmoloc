@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 
-import sys
-import numpy as np
-from pathlib import Path
 import os
+import sys
+from pathlib import Path
+
+import numpy as np
 
 # Add utils directory to path for direct script execution
 sys.path.insert(0, str(Path(__file__).parent.parent / "utils"))
-from common import get_model_name_from_env_path, compare_tokens, exit_with_warning  # type: ignore[import-not-found, ty:unresolved-import]
+from common import compare_tokens, exit_with_warning, get_model_name_from_env_path  # type: ignore[import-not-found, ty:unresolved-import]
 
-def quick_logits_check(pytorch_file, llamacpp_file):
+
+def quick_logits_check(pytorch_file, llamacpp_file) -> bool:
     """Lightweight sanity check before NMSE"""
 
     try:
@@ -38,13 +40,14 @@ def quick_logits_check(pytorch_file, llamacpp_file):
 
     return True
 
-def main():
-    model_path = os.environ.get('MODEL_PATH')
-    model_name = get_model_name_from_env_path('MODEL_PATH')
+
+def main() -> None:
+    model_path = os.environ.get("MODEL_PATH")
+    model_name = get_model_name_from_env_path("MODEL_PATH")
     data_dir = Path("data")
     pytorch_file = data_dir / f"pytorch-{model_name}.bin"
 
-    llamacpp_model_name = get_model_name_from_env_path('CONVERTED_MODEL')
+    llamacpp_model_name = get_model_name_from_env_path("CONVERTED_MODEL")
     print(f"Using converted model: {llamacpp_model_name}")
     llamacpp_file = data_dir / f"llamacpp-{llamacpp_model_name}.bin"
 
@@ -81,7 +84,8 @@ def main():
         print("       Ok to proceed with NMSE check...")
         sys.exit(0)
     else:
-        exit_with_warning(f"❌ NOK: Top 10 predictions don't match - generation will differ", model_path)
+        exit_with_warning("❌ NOK: Top 10 predictions don't match - generation will differ", model_path)
+
 
 if __name__ == "__main__":
     main()

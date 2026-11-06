@@ -80,10 +80,129 @@ int server_queue::post(std::vector<server_task> && tasks, bool front) {
     return 0;
 }
 
+//
+// server_box_queue
+//
+
+static constexpr uint64_t box_seq_none = UINT64_MAX;
+
+void server_box_queue::update(size_t cost) {
+    size_t i = shards.size() + cost;
+
+    tree[i] = shards[cost].empty() ? head(box_seq_none, cost) : head(shards[cost].front().seq, cost);
+
+    for (i /= 2; i >= 1; i /= 2) {
+        tree[i] = std::min(tree[2*i], tree[2*i + 1]);
+    }
+}
+
+void server_box_queue::push(server_task && task) {
+    const size_t cost = (size_t) task.n_box_cost;
+
+    // room for this cost: the shards double, and the tree is built again
+    if (cost >= shards.size()) {
+        size_t n = std::max<size_t>(shards.size(), 256);
+        while (n <= cost) {
+            n *= 2;
+        }
+
+        shards.resize(n);
+        tree.assign(2*n, head(box_seq_none, 0));
+
+        for (size_t c = 0; c < n; ++c) {
+            tree[n + c] = shards[c].empty() ? head(box_seq_none, c) : head(shards[c].front().seq, c);
+        }
+        for (size_t i = n; i-- > 1;) {
+            tree[i] = std::min(tree[2*i], tree[2*i + 1]);
+        }
+    }
+
+    if (task.n_box_seq == 0) {
+        task.n_box_seq = seq_next++;
+    }
+
+    auto & s = shards[cost];
+
+    // a task that had to wait again goes back to its place, ahead of the later ones
+    auto it = s.begin();
+    while (it != s.end() && it->seq < task.n_box_seq) {
+        ++it;
+    }
+
+    const int      id  = task.id;
+    const uint64_t seq = task.n_box_seq;
+
+    index[id] = { cost, s.insert(it, entry{ seq, std::move(task) }) };
+
+    update(cost);
+}
+
+bool server_box_queue::pop(int64_t n_free, server_task & task) {
+    if (n_free <= 0 || index.empty()) {
+        return false;
+    }
+
+    // the earliest head of the costs up to n_free
+    const size_t n = shards.size();
+
+    size_t l = n;
+    size_t r = n + std::min<size_t>((size_t) n_free, n - 1) + 1;
+
+    head best(box_seq_none, 0);
+
+    for (; l < r; l /= 2, r /= 2) {
+        if (l & 1) {
+            best = std::min(best, tree[l++]);
+        }
+        if (r & 1) {
+            best = std::min(best, tree[--r]);
+        }
+    }
+
+    if (best.first == box_seq_none) {
+        return false;
+    }
+
+    auto & s = shards[best.second];
+
+    task = std::move(s.front().task);
+
+    index.erase(task.id);
+    s.pop_front();
+
+    update(best.second);
+
+    return true;
+}
+
+void server_box_queue::erase(int id) {
+    const auto it = index.find(id);
+    if (it == index.end()) {
+        return;
+    }
+
+    const size_t cost = it->second.first;
+
+    shards[cost].erase(it->second.second);
+    index.erase(it);
+
+    update(cost);
+}
+
+//
+// server_queue
+//
+
+static bool waits_for_memory(const server_task & task);
+
 void server_queue::defer(server_task && task) {
     std::unique_lock<std::mutex> lock(mutex_tasks);
     QUE_DBG("defer task, id = %d\n", task.id);
-    queue_tasks_deferred.push_back(std::move(task));
+    if (task.n_box_cost > 0 && waits_for_memory(task)) {
+        queue_tasks_box.push(std::move(task));
+    } else {
+        queue_tasks_deferred.push_back(std::move(task));
+    }
     time_last_task = ggml_time_ms();
     condition_tasks.notify_one();
 }
@@ -152,6 +271,26 @@ void server_queue::pop_deferred_tasks(const std::vector<int> & ids) {
     }
     time_last_task = ggml_time_ms();
     condition_tasks.notify_one();
+}
+
+size_t server_queue::pop_deferred_fit(int64_t n_free) {
+    std::unique_lock<std::mutex> lock(mutex_tasks);
+    std::vector<server_task> tasks;
+    server_task task;
+    while (queue_tasks_box.pop(n_free, task)) {
+        n_free -= task.n_box_cost;
+        tasks.push_back(std::move(task));
+    }
+    if (tasks.empty()) {
+        return 0;
+    }
+    QUE_DBG("pop %zu deferred tasks that fit\n", tasks.size());
+    for (size_t i = tasks.size(); i-- > 0;) {
+        queue_tasks.emplace_front(std::move(tasks[i]));
+    }
+    time_last_task = ggml_time_ms();
+    condition_tasks.notify_one();
+    return tasks.size();
 }
 
 void server_queue::wait_until_no_sleep() {
@@ -418,6 +557,7 @@ void server_queue::cleanup_pending_task(int id_target) {
     queue_tasks_deferred.erase(
         std::remove_if(queue_tasks_deferred.begin(),  queue_tasks_deferred.end(),  rm_func),
         queue_tasks_deferred.end());
+    queue_tasks_box.erase(id_target);
     // a task declined while yielding is not in queue_tasks yet, but it can still be cancelled
     queue_tasks_unhandled.erase(
         std::remove_if(queue_tasks_unhandled.begin(), queue_tasks_unhandled.end(), rm_func),
@@ -428,90 +568,112 @@ void server_queue::cleanup_pending_task(int id_target) {
 // server_response
 //
 
-void server_response::add_waiting_task_id(int id_task) {
-    RES_DBG("add task %d to waiting list. current waiting = %d (before add)\n", id_task, (int) waiting_task_ids.size());
+std::shared_ptr<server_response::waiter> server_response::find_waiter(int id_task) {
+    std::unique_lock<std::mutex> lock(mutex_waiters);
+    const auto it = waiters.find(id_task);
+    return it == waiters.end() ? nullptr : it->second;
+}
 
-    std::unique_lock<std::mutex> lock(mutex_results);
-    waiting_task_ids.insert(id_task);
+std::shared_ptr<server_response::waiter> server_response::waiter_for(const std::unordered_set<int> & id_tasks) {
+    std::unique_lock<std::mutex> lock(mutex_waiters);
+    for (const auto & id_task : id_tasks) {
+        const auto it = waiters.find(id_task);
+        if (it != waiters.end()) {
+            return it->second;
+        }
+    }
+    return std::make_shared<waiter>();
+}
+
+server_task_result_ptr server_response::take_result(waiter & w, const std::unordered_set<int> & id_tasks) {
+    for (auto it = w.results.begin(); it != w.results.end(); ++it) {
+        if (id_tasks.find((*it)->id) != id_tasks.end()) {
+            server_task_result_ptr res = std::move(*it);
+            w.results.erase(it);
+            return res;
+        }
+    }
+    return nullptr;
+}
+
+void server_response::add_waiting_task_id(int id_task) {
+    add_waiting_task_ids({ id_task });
 }
 
 void server_response::add_waiting_task_ids(const std::unordered_set<int> & id_tasks) {
-    std::unique_lock<std::mutex> lock(mutex_results);
+    // the tasks of one reader share its waiter, so that it waits on one condition variable for all of them
+    auto w = waiter_for(id_tasks);
 
+    std::unique_lock<std::mutex> lock(mutex_waiters);
     for (const auto & id_task : id_tasks) {
-        RES_DBG("add task %d to waiting list. current waiting = %d (before add)\n", id_task, (int) waiting_task_ids.size());
-        waiting_task_ids.insert(id_task);
+        RES_DBG("add task %d to waiting list. current waiting = %d (before add)\n", id_task, (int) waiters.size());
+        waiters.emplace(id_task, w);
     }
 }
 
 void server_response::remove_waiting_task_id(int id_task) {
-    RES_DBG("remove task %d from waiting list. current waiting = %d (before remove)\n", id_task, (int) waiting_task_ids.size());
-
-    std::unique_lock<std::mutex> lock(mutex_results);
-    waiting_task_ids.erase(id_task);
-    // make sure to clean up all pending results
-    queue_results.erase(
-        std::remove_if(queue_results.begin(), queue_results.end(), [id_task](const server_task_result_ptr & res) {
-            return res->id == id_task;
-        }),
-        queue_results.end());
+    remove_waiting_task_ids({ id_task });
 }
 
 void server_response::remove_waiting_task_ids(const std::unordered_set<int> & id_tasks) {
-    std::unique_lock<std::mutex> lock(mutex_results);
+    std::vector<std::shared_ptr<waiter>> removed;
+    {
+        std::unique_lock<std::mutex> lock(mutex_waiters);
+        for (const auto & id_task : id_tasks) {
+            RES_DBG("remove task %d from waiting list. current waiting = %d (before remove)\n", id_task, (int) waiters.size());
+            const auto it = waiters.find(id_task);
+            if (it != waiters.end()) {
+                removed.push_back(it->second);
+                waiters.erase(it);
+            }
+        }
+    }
 
-    for (const auto & id_task : id_tasks) {
-        RES_DBG("remove task %d from waiting list. current waiting = %d (before remove)\n", id_task, (int) waiting_task_ids.size());
-        waiting_task_ids.erase(id_task);
+    // make sure to clean up all pending results
+    for (const auto & w : removed) {
+        std::unique_lock<std::mutex> lock(w->mutex);
+        w->results.erase(
+            std::remove_if(w->results.begin(), w->results.end(), [&](const server_task_result_ptr & res) {
+                return id_tasks.find(res->id) != id_tasks.end();
+            }),
+            w->results.end());
     }
 }
 
 server_task_result_ptr server_response::recv(const std::unordered_set<int> & id_tasks) {
+    auto w = waiter_for(id_tasks);
+
+    std::unique_lock<std::mutex> lock(w->mutex);
     while (true) {
-        std::unique_lock<std::mutex> lock(mutex_results);
-        condition_results.wait(lock, [&]{
-            if (!running) {
-                RES_DBG("%s : queue result stop\n", "recv");
-                std::terminate(); // we cannot return here since the caller is HTTP code
-            }
-            return !queue_results.empty();
-        });
-
-        for (size_t i = 0; i < queue_results.size(); i++) {
-            if (id_tasks.find(queue_results[i]->id) != id_tasks.end()) {
-                server_task_result_ptr res = std::move(queue_results[i]);
-                queue_results.erase(queue_results.begin() + i);
-                return res;
-            }
+        if (!running) {
+            RES_DBG("%s : queue result stop\n", "recv");
+            std::terminate(); // we cannot return here since the caller is HTTP code
         }
+        if (auto res = take_result(*w, id_tasks)) {
+            return res;
+        }
+        w->cond.wait(lock);
     }
-
-    // should never reach here
 }
 
 server_task_result_ptr server_response::recv_with_timeout(const std::unordered_set<int> & id_tasks, int timeout) {
-    while (true) {
-        std::unique_lock<std::mutex> lock(mutex_results);
+    auto w = waiter_for(id_tasks);
 
-        for (int i = 0; i < (int) queue_results.size(); i++) {
-            if (id_tasks.find(queue_results[i]->id) != id_tasks.end()) {
-                server_task_result_ptr res = std::move(queue_results[i]);
-                queue_results.erase(queue_results.begin() + i);
-                return res;
-            }
+    std::unique_lock<std::mutex> lock(w->mutex);
+    while (true) {
+        if (auto res = take_result(*w, id_tasks)) {
+            return res;
         }
 
-        std::cv_status cr_res = condition_results.wait_for(lock, std::chrono::seconds(timeout));
+        std::cv_status cr_res = w->cond.wait_for(lock, std::chrono::seconds(timeout));
         if (!running) {
             RES_DBG("%s : queue result stop\n", __func__);
             std::terminate(); // we cannot return here since the caller is HTTP code
         }
         if (cr_res == std::cv_status::timeout) {
-            return nullptr;
+            return take_result(*w, id_tasks);
         }
     }
-
-    // should never reach here
 }
 
 server_task_result_ptr server_response::recv(int id_task) {
@@ -522,32 +684,53 @@ server_task_result_ptr server_response::recv(int id_task) {
 void server_response::send(server_task_result_ptr && result) {
     RES_DBG("sending result for task id = %d\n", result->id);
 
-    std::unique_lock<std::mutex> lock(mutex_results);
-    for (const auto & id_task : waiting_task_ids) {
-        if (result->id == id_task) {
-            RES_DBG("task id = %d pushed to result queue\n", result->id);
-
-            queue_results.emplace_back(std::move(result));
-            condition_results.notify_all();
-            return;
-        }
+    // a result for a task nobody waits for is dropped
+    auto w = find_waiter(result->id);
+    if (!w) {
+        return;
     }
+
+    RES_DBG("task id = %d pushed to result queue\n", result->id);
+    {
+        std::unique_lock<std::mutex> lock(w->mutex);
+        w->results.emplace_back(std::move(result));
+    }
+    w->cond.notify_all();
 }
 
 void server_response::broadcast(server_task_result_ptr && result) {
-    std::unique_lock<std::mutex> lock(mutex_results);
-    for (const auto & id_task : waiting_task_ids) {
+    std::vector<std::pair<int, std::shared_ptr<waiter>>> targets;
+    {
+        std::unique_lock<std::mutex> lock(mutex_waiters);
+        targets.assign(waiters.begin(), waiters.end());
+    }
+    for (const auto & [id_task, w] : targets) {
         RES_DBG("task id = %d pushed to result queue\n", id_task);
         server_task_result_ptr res_copy(result->clone());
         res_copy->id = id_task; // override id with target task id
-        queue_results.emplace_back(std::move(res_copy));
+        {
+            std::unique_lock<std::mutex> lock(w->mutex);
+            w->results.emplace_back(std::move(res_copy));
+        }
+        w->cond.notify_all();
     }
-    condition_results.notify_all();
 }
 
 void server_response::terminate() {
     running = false;
-    condition_results.notify_all();
+
+    std::vector<std::shared_ptr<waiter>> all;
+    {
+        std::unique_lock<std::mutex> lock(mutex_waiters);
+        for (const auto & [id_task, w] : waiters) {
+            all.push_back(w);
+        }
+    }
+    for (const auto & w : all) {
+        // take the waiter's lock so that a reader between its check and its wait does not miss the notification
+        std::unique_lock<std::mutex> lock(w->mutex);
+        w->cond.notify_all();
+    }
 }
 
 //

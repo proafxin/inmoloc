@@ -43,7 +43,7 @@ else
     CMD_ARGS=("python")
 fi
 
-CMD_ARGS+=("../../convert_hf_to_gguf.py" "--verbose")
+CMD_ARGS+=("../../scripts/convert_hf_to_gguf.py" "--verbose")
 CMD_ARGS+=("${MODEL_PATH}")
 CMD_ARGS+=("--outfile" "${CONVERTED_MODEL}")
 CMD_ARGS+=("--outtype" "${TYPE}")

@@ -1,5 +1,6 @@
 #include "llama-memory-hybrid-iswa.h"
 
+#include "llama-box.h"
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-context.h"
@@ -13,34 +14,26 @@ llama_memory_hybrid_iswa::llama_memory_hybrid_iswa(
                             /* attn */
                 ggml_type   type_k,
                 ggml_type   type_v,
-                     bool   v_trans,
                      bool   swa_full,
-                 uint32_t   kv_size,
                  uint32_t   n_ubatch,
                  uint32_t   n_pad,
-                            /* recurrent */
-                ggml_type   type_r,
-                ggml_type   type_s,
-                 uint32_t   rs_size,
                             /* common */
                  uint32_t   n_seq_max,
                  uint32_t   n_rs_seq,
                      bool   rs_replay,
                      bool   offload,
-                     bool   unified,
                             /* layer filters */
     const layer_filter_cb & filter_attn,
-    const layer_filter_cb & filter_recr) :
+    const layer_filter_cb & filter_recr,
+    const std::shared_ptr<llama_box> & box) :
     hparams(model.hparams),
     mem_attn(new llama_kv_cache_iswa(
         model,
         type_k,
         type_v,
-        v_trans,
         offload,
         swa_full,
-        unified,
-        kv_size,
+        box->get_n_cells(),
         n_seq_max,
         n_ubatch,
         n_pad,
@@ -49,21 +42,36 @@ llama_memory_hybrid_iswa::llama_memory_hybrid_iswa(
             [&](int32_t il) { return !hparams.is_recr(il); }
             : filter_attn,
         nullptr,
-        nullptr
+        nullptr,
+        box
     )),
     mem_recr(new llama_memory_recurrent(
         model,
-        type_r,
-        type_s,
-        offload,
-        rs_size,
-        n_seq_max,
         n_rs_seq,
         rs_replay,
         filter_recr == nullptr ?
             [&](int32_t il) { return hparams.is_recr(il); }
-            : filter_recr
-    )) {}
+            : filter_recr,
+        box.get()
+    )) {
+    // an admitted request keeps the state its admission took, see llama_box::reserve()
+    mem_recr->box_keep = [this](llama_seq_id seq_id) {
+        return mem_recr->box->seq_admitted(seq_id);
+    };
+}
+
+bool llama_memory_hybrid_iswa::box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) {
+    const auto box = get_box_shared();
+
+    std::function<int32_t()> state_alloc = nullptr;
+    if (mem_recr->seq_tails[seq_id] < 0) {
+        state_alloc = [&]() -> int32_t {
+            return mem_recr->box_state_take(seq_id) ? mem_recr->seq_tails[seq_id] : -1;
+        };
+    }
+
+    return box->reserve(seq_id, n_input, n_output, state_alloc);
+}
 
 llama_memory_context_ptr llama_memory_hybrid_iswa::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {
     do {
@@ -79,15 +87,13 @@ llama_memory_context_ptr llama_memory_hybrid_iswa::init_batch(llama_batch_allocr
                 // if all tokens are output, split by sequence
                 ubatch = balloc.split_seq(n_ubatch);
             } else {
-                // Use non-sequential split when KV cache is unified (needed for hellaswag/winogrande/multiple-choice)
-                const bool unified = (mem_attn->get_base()->get_n_stream() == 1);
-
                 // [TAG_RECURRENT_ROLLBACK_SPLITS]
                 // the trailing (1 + n_rs_seq) tokens of each seq must stay in the same ubatch
                 //   so that the rollback snapshots remain valid
                 const uint32_t n_rs_seq = mem_recr->n_rs_seq;
 
-                ubatch = balloc.split_equal(n_ubatch, !unified, n_rs_seq > 0 ? n_rs_seq + 1 : 0);
+                // non-sequential: the cells are shared by the sequences (needed for hellaswag/winogrande/multiple-choice)
+                ubatch = balloc.split_equal(n_ubatch, false, n_rs_seq > 0 ? n_rs_seq + 1 : 0);
             }
 
             if (ubatch.n_tokens == 0) {
@@ -100,6 +106,11 @@ llama_memory_context_ptr llama_memory_hybrid_iswa::init_batch(llama_batch_allocr
         if (balloc.get_n_used() < balloc.get_n_tokens()) {
             // failed to find a suitable split
             break;
+        }
+
+        // the box first gives the seqs their states, the caches take their blocks
+        if (!mem_recr->box_prepare(ubatches)) {
+            return std::make_unique<llama_memory_hybrid_iswa_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
         }
 
         // prepare the recurrent batches first
@@ -143,8 +154,9 @@ bool llama_memory_hybrid_iswa::get_can_shift() const {
 }
 
 void llama_memory_hybrid_iswa::clear(bool data) {
-    mem_attn->clear(data);
+    // the recurrent states go back to the box first: the attention caches own the box and clearing them resets it
     mem_recr->clear(data);
+    mem_attn->clear(data);
 }
 
 bool llama_memory_hybrid_iswa::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {

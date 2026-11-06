@@ -156,7 +156,7 @@ llama_model_t5::graph<false>::graph(const llama_model & model, const llm_graph_p
             auto [Qcur, Kcur, Vcur] = build_qkv(model.layers[il], cur, n_embd_head, n_head, n_head_kv, il);
 
             ggml_tensor * attn_rel_b = model.layers[il].attn_rel_b ? model.layers[il].attn_rel_b : model.layers[0].attn_rel_b;
-            ggml_tensor * kq_b = build_pos_bias(pos_bucket_dec, attn_rel_b);
+            ggml_tensor * kq_b = build_pos_bias_dist(pos_bucket_dec, attn_rel_b);
 
             cur = build_attn(inp_attn_self,
                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,

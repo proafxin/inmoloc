@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
+from conversion.base import ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register("DbrxForCausalLM")
@@ -13,7 +15,7 @@ from .base import ModelBase, TextModel, gguf, logger
 class DbrxModel(TextModel):
     model_arch = gguf.MODEL_ARCH.DBRX
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         ffn_config = self.hparams["ffn_config"]
         attn_config = self.hparams["attn_config"]
         self.gguf_writer.add_block_count(self.block_count)
@@ -47,12 +49,14 @@ class DbrxModel(TextModel):
         # But llama.cpp moe graph works differently
         # AND the dimensions in ggml are typically in the reverse order of the pytorch dimensions
         # so (n_expert, n_ff, n_embd) in pytorch is {n_embd, n_ff, n_expert} in ggml_tensor
-        exp_tensor_names = {"ffn.experts.mlp.w1": None,       # LLM_TENSOR_FFN_GATE_EXPS ggml_tensor->ne{n_embd, n_ff,   n_expert}
-                            "ffn.experts.mlp.w2": (0, 2, 1),  # LLM_TENSOR_FFN_DOWN_EXPS ggml_tensor->ne{n_ff,   n_embd, n_expert}
-                            "ffn.experts.mlp.v1": None}       # LLM_TENSOR_FFN_UP_EXPS   ggml_tensor->ne{n_embd, n_ff,   n_expert}
+        exp_tensor_names = {
+            "ffn.experts.mlp.w1": None,  # LLM_TENSOR_FFN_GATE_EXPS ggml_tensor->ne{n_embd, n_ff,   n_expert}
+            "ffn.experts.mlp.w2": (0, 2, 1),  # LLM_TENSOR_FFN_DOWN_EXPS ggml_tensor->ne{n_ff,   n_embd, n_expert}
+            "ffn.experts.mlp.v1": None,
+        }  # LLM_TENSOR_FFN_UP_EXPS   ggml_tensor->ne{n_embd, n_ff,   n_expert}
         experts = False
 
-        for exp_tensor_name in exp_tensor_names.keys():
+        for exp_tensor_name in exp_tensor_names:
             if name.find(exp_tensor_name) != -1 and name.find(".weight") == -1:
                 experts = True
                 data_torch = data_torch.view(n_expert, n_ff, n_embd)
@@ -70,7 +74,9 @@ class DbrxModel(TextModel):
 
         yield from super().modify_tensors(data_torch, new_name, bid)
 
-    def tensor_force_quant(self, name: str, new_name: str, bid: int | None, n_dims: int) -> gguf.GGMLQuantizationType | bool:
+    def tensor_force_quant(
+        self, name: str, new_name: str, bid: int | None, n_dims: int
+    ) -> gguf.GGMLQuantizationType | bool:
         del name, new_name, bid  # unused
 
         return n_dims > 1

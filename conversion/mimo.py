@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 import re
-
-from typing import Any, Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, TextModel, gguf
+import pathlib
+
+from conversion.base import MmprojModel, ModelBase, TextModel, gguf
 
 
 @ModelBase.register("MiMoV2FlashForCausalLM", "MiMoV2ForCausalLM")
@@ -22,16 +25,16 @@ class MimoV2Model(TextModel):
     # The HF config does not expose the count, so it's hardcoded to match the count found in the safetensors.
     _n_nextn = 3
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         self.block_count = self.hparams["num_hidden_layers"] + self._n_nextn
         self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
 
     @staticmethod
-    def _tp_aware_qkv_dequant(weight: Tensor, scale_inv: Tensor,
-                              n_q: int, n_kv: int, hd: int, vhd: int,
-                              bs: int = 128) -> Tensor:
+    def _tp_aware_qkv_dequant(
+        weight: Tensor, scale_inv: Tensor, n_q: int, n_kv: int, hd: int, vhd: int, bs: int = 128
+    ) -> Tensor:
         # MiMo-V2.5 (TP=4) and V2.5-Pro (TP=8) ship qkv_proj sharded across TP
         # ranks; per rank, rows are stacked as [Q_per | K_per | V_per].
         # weight_scale_inv has ceil(rows_per_rank/bs) block-rows per rank (last
@@ -45,7 +48,8 @@ class MimoV2Model(TextModel):
         v_size = n_kv * vhd
         total_rows = q_size + k_size + v_size
         if weight.shape[0] != total_rows:
-            raise ValueError(f"qkv_proj weight rows {weight.shape[0]} != q+k+v {total_rows}")
+            msg = f"qkv_proj weight rows {weight.shape[0]} != q+k+v {total_rows}"
+            raise ValueError(msg)
 
         # detect TP from scale_inv block count, descending order so larger matches first
         tp = None
@@ -58,9 +62,8 @@ class MimoV2Model(TextModel):
                 tp = cand
                 break
         if tp is None:
-            raise ValueError(
-                f"qkv_proj: cannot detect TP - scale_inv rows {scale_inv.shape[0]}, "
-                f"q+k+v {total_rows}")
+            msg = f"qkv_proj: cannot detect TP - scale_inv rows {scale_inv.shape[0]}, q+k+v {total_rows}"
+            raise ValueError(msg)
 
         q_per = q_size // tp
         k_per = k_size // tp
@@ -94,7 +97,7 @@ class MimoV2Model(TextModel):
             vs.append(dequant[base + q_per + k_per : base + rows_per_rank])
         return torch.cat(qs + ks + vs, dim=0)
 
-    def dequant_model(self):
+    def dequant_model(self) -> None:
         # Capture raw FP8 (weight, scale_inv) lambdas for qkv_proj BEFORE super
         # rewrites them with the existing dequant. Replace super's lambda after
         # it runs so scale_inv removal still happens via the standard path.
@@ -129,12 +132,11 @@ class MimoV2Model(TextModel):
             # MTP layers (bid >= n_layer_text) use SWA-style attention dims
             is_swa = True if bid >= n_layer_text else hybrid[bid] == 1
             n_kv = self.hparams["swa_num_key_value_heads" if is_swa else "num_key_value_heads"]
-            self.model_tensors[weight_name] = (
-                lambda w_fn=w_fn, s_fn=s_fn, n_q=n_q, n_kv=n_kv, hd=hd, vhd=vhd:
-                    MimoV2Model._tp_aware_qkv_dequant(w_fn(), s_fn(), n_q, n_kv, hd, vhd)
+            self.model_tensors[weight_name] = lambda w_fn=w_fn, s_fn=s_fn, n_q=n_q, n_kv=n_kv, hd=hd, vhd=vhd: (
+                MimoV2Model._tp_aware_qkv_dequant(w_fn(), s_fn(), n_q, n_kv, hd, vhd)
             )
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         assert self.hparams["swa_head_dim"] == self.hparams["head_dim"]
@@ -220,14 +222,15 @@ class MimoV2Model(TextModel):
                 return
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
 
         if self._experts is not None:
             # flatten `list[dict[str, Tensor]]` into `list[str]`
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)
 
 
 @ModelBase.register("MiMoV2ForCausalLM")
@@ -239,7 +242,7 @@ class MiMoV2VisionAudioModel(MmprojModel):
     _rvq_codebook_sizes: list[int] | None = None
     _code_embd: dict[int, Tensor] | None = None
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         assert self.hparams_vision is not None
         hp = self.hparams_vision
@@ -265,7 +268,7 @@ class MiMoV2VisionAudioModel(MmprojModel):
     def get_audio_config(self) -> dict[str, Any] | None:
         if self._audio_tok_hparams is None:
             path = self.dir_model / "audio_tokenizer" / "config.json"
-            with open(path, "r", encoding="utf-8") as f:
+            with pathlib.Path(path).open("r", encoding="utf-8") as f:
                 cfg = json.load(f)
             # aliases so MmprojModel.find_aparam() / n_block_keys can resolve them
             cfg["hidden_size"] = cfg["d_model"]
@@ -274,7 +277,7 @@ class MiMoV2VisionAudioModel(MmprojModel):
             self._audio_tok_hparams = cfg
         return self._audio_tok_hparams
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         self.gguf_writer.add_clip_vision_projector_type(gguf.VisionProjectorType.MIMOVL)
@@ -311,10 +314,10 @@ class MiMoV2VisionAudioModel(MmprojModel):
 
     def tensor_force_quant(self, name, new_name, bid, n_dims):
         # for audio encoder: keep codebook in F32
-        if new_name in (
+        if new_name in {
             gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.A_ENC_RVQ_CODEBOOK] + ".weight",
             gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.A_MM_CODE_EMBD] + ".weight",
-        ):
+        }:
             return gguf.GGMLQuantizationType.F32
         if ("encoder.conv" in name or "encoder.down_sample_layer" in name) and name.endswith(".weight"):
             return gguf.GGMLQuantizationType.F32
@@ -323,7 +326,7 @@ class MiMoV2VisionAudioModel(MmprojModel):
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
         name, _ = item
-        if name.startswith("visual.") or name.startswith("speech_embeddings.") or name.startswith("audio_encoder."):
+        if name.startswith(("visual.", "speech_embeddings.", "audio_encoder.")):
             return super().filter_tensors(item)
         return None
 
@@ -333,9 +336,10 @@ class MiMoV2VisionAudioModel(MmprojModel):
         if name == "visual.patch_embed.proj.weight":
             _, _, kt, _, _ = data_torch.shape
             if kt != 2:
-                raise ValueError(f"unexpected temporal_patch_size: {kt}")
+                msg = f"unexpected temporal_patch_size: {kt}"
+                raise ValueError(msg)
             embd_name = gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_ENC_EMBD_PATCH]
-            yield (embd_name + ".weight",   data_torch[:, :, 0, ...])
+            yield (embd_name + ".weight", data_torch[:, :, 0, ...])
             yield (embd_name + ".weight.1", data_torch[:, :, 1, ...])
             return
 

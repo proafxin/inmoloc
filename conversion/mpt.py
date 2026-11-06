@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("MPTForCausalLM")
@@ -13,7 +15,7 @@ from .base import ModelBase, TextModel, gguf
 class MPTModel(TextModel):
     model_arch = gguf.MODEL_ARCH.MPT
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         try:
             self._set_vocab_gpt2()
         except Exception:
@@ -24,7 +26,7 @@ class MPTModel(TextModel):
             self.gguf_writer.add_eos_token_id(1)
             self.gguf_writer.add_unk_token_id(0)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         self.gguf_writer.add_context_length(self.hparams["max_seq_len"])
         self.gguf_writer.add_embedding_length(self.hparams["d_model"])
         self.gguf_writer.add_block_count(self.block_count)

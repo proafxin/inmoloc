@@ -16,7 +16,7 @@ try:
     import git
     from tabulate import tabulate
 except ImportError as e:
-    print("the following Python libraries are required: GitPython, tabulate.") # noqa: NP100
+    print("the following Python libraries are required: GitPython, tabulate.")  # noqa: NP100
     raise e
 
 
@@ -24,36 +24,120 @@ logger = logging.getLogger("compare-llama-bench")
 
 # All local-inference-bench SQL fields
 LLAMA_BENCH_DB_FIELDS = [
-    "build_commit", "build_number", "cpu_info",       "gpu_info",   "backends",     "model_filename",
-    "model_type",   "model_size",   "model_n_params", "n_batch",    "n_ubatch",     "n_threads",
-    "cpu_mask",     "cpu_strict",   "poll",           "type_k",     "type_v",       "n_gpu_layers",
-    "split_mode",   "main_gpu",     "no_kv_offload",  "flash_attn", "tensor_split", "tensor_buft_overrides",
-    "load_mode",    "embeddings",   "no_op_offload",  "n_prompt",   "n_gen",        "n_depth",
-    "test_time",    "avg_ns",       "stddev_ns",      "avg_ts",     "stddev_ts",    "n_cpu_moe",
-    "fit_target",   "fit_min_ctx"
+    "build_commit",
+    "build_number",
+    "cpu_info",
+    "gpu_info",
+    "backends",
+    "model_filename",
+    "model_type",
+    "model_size",
+    "model_n_params",
+    "n_batch",
+    "n_ubatch",
+    "n_threads",
+    "cpu_mask",
+    "cpu_strict",
+    "poll",
+    "type_k",
+    "type_v",
+    "n_gpu_layers",
+    "split_mode",
+    "main_gpu",
+    "no_kv_offload",
+    "flash_attn",
+    "tensor_split",
+    "tensor_buft_overrides",
+    "load_mode",
+    "embeddings",
+    "no_op_offload",
+    "n_prompt",
+    "n_gen",
+    "n_depth",
+    "test_time",
+    "avg_ns",
+    "stddev_ns",
+    "avg_ts",
+    "stddev_ts",
+    "n_cpu_moe",
+    "fit_target",
+    "fit_min_ctx",
 ]
 
 LLAMA_BENCH_DB_TYPES = [
-    "TEXT",    "INTEGER", "TEXT",    "TEXT",    "TEXT",    "TEXT",
-    "TEXT",    "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER",
-    "TEXT",    "INTEGER", "INTEGER", "TEXT",    "TEXT",    "INTEGER",
-    "TEXT",    "INTEGER", "INTEGER", "INTEGER", "TEXT",    "TEXT",
-    "TEXT", "INTEGER", "INTEGER", "INTEGER", "INTEGER", "INTEGER",
-    "TEXT",    "INTEGER", "INTEGER", "REAL",    "REAL",    "INTEGER",
-    "INTEGER", "INTEGER"
+    "TEXT",
+    "INTEGER",
+    "TEXT",
+    "TEXT",
+    "TEXT",
+    "TEXT",
+    "TEXT",
+    "INTEGER",
+    "INTEGER",
+    "INTEGER",
+    "INTEGER",
+    "INTEGER",
+    "TEXT",
+    "INTEGER",
+    "INTEGER",
+    "TEXT",
+    "TEXT",
+    "INTEGER",
+    "TEXT",
+    "INTEGER",
+    "INTEGER",
+    "INTEGER",
+    "TEXT",
+    "TEXT",
+    "TEXT",
+    "INTEGER",
+    "INTEGER",
+    "INTEGER",
+    "INTEGER",
+    "INTEGER",
+    "TEXT",
+    "INTEGER",
+    "INTEGER",
+    "REAL",
+    "REAL",
+    "INTEGER",
+    "INTEGER",
+    "INTEGER",
 ]
 
 # All test-backend-ops SQL fields
 TEST_BACKEND_OPS_DB_FIELDS = [
-    "test_time", "build_commit", "backend_name",  "op_name", "op_params", "test_mode",
-    "supported", "passed",       "error_message", "time_us", "flops",     "bandwidth_gb_s",
-    "memory_kb", "n_runs"
+    "test_time",
+    "build_commit",
+    "backend_name",
+    "op_name",
+    "op_params",
+    "test_mode",
+    "supported",
+    "passed",
+    "error_message",
+    "time_us",
+    "flops",
+    "bandwidth_gb_s",
+    "memory_kb",
+    "n_runs",
 ]
 
 TEST_BACKEND_OPS_DB_TYPES = [
-    "TEXT",    "TEXT",    "TEXT", "TEXT", "TEXT", "TEXT",
-    "INTEGER", "INTEGER", "TEXT", "REAL", "REAL", "REAL",
-    "INTEGER", "INTEGER"
+    "TEXT",
+    "TEXT",
+    "TEXT",
+    "TEXT",
+    "TEXT",
+    "TEXT",
+    "INTEGER",
+    "INTEGER",
+    "TEXT",
+    "REAL",
+    "REAL",
+    "REAL",
+    "INTEGER",
+    "INTEGER",
 ]
 
 assert len(LLAMA_BENCH_DB_FIELDS) == len(LLAMA_BENCH_DB_TYPES)
@@ -61,16 +145,38 @@ assert len(TEST_BACKEND_OPS_DB_FIELDS) == len(TEST_BACKEND_OPS_DB_TYPES)
 
 # Properties by which to differentiate results per commit for local-inference-bench:
 LLAMA_BENCH_KEY_PROPERTIES = [
-    "cpu_info", "gpu_info", "backends", "n_gpu_layers", "n_cpu_moe", "tensor_buft_overrides", "model_filename", "model_type",
-    "n_batch", "n_ubatch", "embeddings", "cpu_mask", "cpu_strict", "poll", "n_threads", "type_k", "type_v",
-    "load_mode", "no_kv_offload", "split_mode", "main_gpu", "tensor_split", "flash_attn", "n_prompt", "n_gen", "n_depth",
-    "fit_target", "fit_min_ctx"
+    "cpu_info",
+    "gpu_info",
+    "backends",
+    "n_gpu_layers",
+    "n_cpu_moe",
+    "tensor_buft_overrides",
+    "model_filename",
+    "model_type",
+    "n_batch",
+    "n_ubatch",
+    "embeddings",
+    "cpu_mask",
+    "cpu_strict",
+    "poll",
+    "n_threads",
+    "type_k",
+    "type_v",
+    "load_mode",
+    "no_kv_offload",
+    "split_mode",
+    "main_gpu",
+    "tensor_split",
+    "flash_attn",
+    "n_prompt",
+    "n_gen",
+    "n_depth",
+    "fit_target",
+    "fit_min_ctx",
 ]
 
 # Properties by which to differentiate results per commit for test-backend-ops:
-TEST_BACKEND_OPS_KEY_PROPERTIES = [
-    "backend_name", "op_name", "op_params", "test_mode"
-]
+TEST_BACKEND_OPS_KEY_PROPERTIES = ["backend_name", "op_name", "op_params", "test_mode"]
 
 # Properties that are boolean and are converted to Yes/No for the table:
 LLAMA_BENCH_BOOL_PROPERTIES = ["embeddings", "cpu_strict", "no_kv_offload", "flash_attn"]
@@ -78,19 +184,45 @@ TEST_BACKEND_OPS_BOOL_PROPERTIES = ["supported", "passed"]
 
 # Header names for the table (local-inference-bench):
 LLAMA_BENCH_PRETTY_NAMES = {
-    "cpu_info": "CPU", "gpu_info": "GPU", "backends": "Backends", "n_gpu_layers": "GPU layers",
-    "tensor_buft_overrides": "Tensor overrides", "model_filename": "File", "model_type": "Model", "model_size": "Model size [GiB]",
-    "model_n_params": "Num. of par.", "n_batch": "Batch size", "n_ubatch": "Microbatch size", "embeddings": "Embeddings",
-    "cpu_mask": "CPU mask", "cpu_strict": "CPU strict", "poll": "Poll", "n_threads": "Threads", "type_k": "K type", "type_v": "V type",
-    "load_mode": "Load mode", "no_kv_offload": "NKVO", "split_mode": "Split mode", "main_gpu": "Main GPU", "tensor_split": "Tensor split",
+    "cpu_info": "CPU",
+    "gpu_info": "GPU",
+    "backends": "Backends",
+    "n_gpu_layers": "GPU layers",
+    "tensor_buft_overrides": "Tensor overrides",
+    "model_filename": "File",
+    "model_type": "Model",
+    "model_size": "Model size [GiB]",
+    "model_n_params": "Num. of par.",
+    "n_batch": "Batch size",
+    "n_ubatch": "Microbatch size",
+    "embeddings": "Embeddings",
+    "cpu_mask": "CPU mask",
+    "cpu_strict": "CPU strict",
+    "poll": "Poll",
+    "n_threads": "Threads",
+    "type_k": "K type",
+    "type_v": "V type",
+    "load_mode": "Load mode",
+    "no_kv_offload": "NKVO",
+    "split_mode": "Split mode",
+    "main_gpu": "Main GPU",
+    "tensor_split": "Tensor split",
     "flash_attn": "FlashAttention",
 }
 
 # Header names for the table (test-backend-ops):
 TEST_BACKEND_OPS_PRETTY_NAMES = {
-    "backend_name": "Backend", "op_name": "GGML op", "op_params": "Op parameters", "test_mode": "Mode",
-    "supported": "Supported", "passed": "Passed", "error_message": "Error",
-    "flops": "FLOPS", "bandwidth_gb_s": "Bandwidth (GB/s)", "memory_kb": "Memory (KB)", "n_runs": "Runs"
+    "backend_name": "Backend",
+    "op_name": "GGML op",
+    "op_params": "Op parameters",
+    "test_mode": "Mode",
+    "supported": "Supported",
+    "passed": "Passed",
+    "error_message": "Error",
+    "flops": "FLOPS",
+    "bandwidth_gb_s": "Bandwidth (GB/s)",
+    "memory_kb": "Memory (KB)",
+    "n_runs": "Runs",
 }
 
 DEFAULT_SHOW_LLAMA_BENCH = ["model_type"]  # Always show these properties by default.
@@ -125,8 +257,7 @@ $ ./scripts/compare-llama-bench.py --tool test-backend-ops -i test-backend-ops.s
 Performance numbers from multiple runs per commit are averaged WITHOUT being weighted by the --repetitions parameter of local-inference-bench.
 """
 
-parser = argparse.ArgumentParser(
-    description=DESCRIPTION, formatter_class=argparse.RawDescriptionHelpFormatter)
+parser = argparse.ArgumentParser(description=DESCRIPTION, formatter_class=argparse.RawDescriptionHelpFormatter)
 help_b = (
     "The baseline commit to compare performance to. "
     "Accepts either a branch name, tag name, or commit hash. "
@@ -145,7 +276,9 @@ help_t = (
     "This determines the database schema and comparison logic used. "
     "If left unspecified, try to determine from the input file."
 )
-parser.add_argument("-t", "--tool", help=help_t, default=None, choices=[None, "local-inference-bench", "test-backend-ops"])
+parser.add_argument(
+    "-t", "--tool", help=help_t, default=None, choices=[None, "local-inference-bench", "test-backend-ops"]
+)
 help_i = (
     "JSON/JSONL/SQLite/CSV files for comparing commits. "
     "Specify multiple times to use multiple input files (JSON/CSV only). "
@@ -250,11 +383,11 @@ class LlamaBenchData:
         seen_hexsha8 = set()
         while heap:
             depth, current_commit = heapq.heappop(heap)
-            current_hexsha8 = commit.hexsha[:self.build_len]
+            current_hexsha8 = commit.hexsha[: self.build_len]
             if current_hexsha8 in self.builds:
                 return current_hexsha8
             for parent in commit.parents:
-                parent_hexsha8 = parent.hexsha[:self.build_len]
+                parent_hexsha8 = parent.hexsha[: self.build_len]
                 if parent_hexsha8 not in seen_hexsha8:
                     seen_hexsha8.add(parent_hexsha8)
                     heapq.heappush(heap, (depth + 1, parent))
@@ -263,13 +396,13 @@ class LlamaBenchData:
     def get_all_parent_hexsha8s(self, commit: git.Commit) -> Sequence[str]:
         """Helper method to recursively get hexsha8 values for all parents of a commit."""
         unvisited = [commit]
-        visited   = []
+        visited = []
 
         while unvisited:
             current_commit = unvisited.pop(0)
-            visited.append(current_commit.hexsha[:self.build_len])
+            visited.append(current_commit.hexsha[: self.build_len])
             for parent in current_commit.parents:
-                if parent.hexsha[:self.build_len] not in visited:
+                if parent.hexsha[: self.build_len] not in visited:
                     unvisited.append(parent)
 
         return visited
@@ -279,10 +412,10 @@ class LlamaBenchData:
         if self.repo is None:
             return hexsha8
         for h in self.repo.heads:
-            if h.commit.hexsha[:self.build_len] == hexsha8:
+            if h.commit.hexsha[: self.build_len] == hexsha8:
                 return h.name
         for t in self.repo.tags:
-            if t.commit.hexsha[:self.build_len] == hexsha8:
+            if t.commit.hexsha[: self.build_len] == hexsha8:
                 return t.name
         return hexsha8
 
@@ -292,17 +425,17 @@ class LlamaBenchData:
             return None
         for h in self.repo.heads:
             if h.name == name:
-                return h.commit.hexsha[:self.build_len]
+                return h.commit.hexsha[: self.build_len]
         for t in self.repo.tags:
             if t.name == name:
-                return t.commit.hexsha[:self.build_len]
+                return t.commit.hexsha[: self.build_len]
         for remote in self.repo.remotes:
             for ref in remote.refs:
                 if ref.name == name or ref.remote_head == name:
-                    return ref.commit.hexsha[:self.build_len]
+                    return ref.commit.hexsha[: self.build_len]
         for c in self.repo.iter_commits("--all"):
-            if c.hexsha[:self.build_len] == name[:self.build_len]:
-                return c.hexsha[:self.build_len]
+            if c.hexsha[: self.build_len] == name[: self.build_len]:
+                return c.hexsha[: self.build_len]
         return None
 
     def builds_timestamp(self, reverse: bool = False) -> Union[Iterator[tuple], Sequence[tuple]]:
@@ -342,17 +475,27 @@ class LlamaBenchDataSQLite3(LlamaBenchData):
             else:
                 assert False
 
-            self.cursor.execute(f"CREATE TABLE {self.table_name}({', '.join(' '.join(x) for x in zip(db_fields, db_types))});")
+            self.cursor.execute(
+                f"CREATE TABLE {self.table_name}({', '.join(' '.join(x) for x in zip(db_fields, db_types))});"
+            )
 
     def _builds_init(self):
         if self.connection:
-            self.build_len_min = self.cursor.execute(f"SELECT MIN(LENGTH(build_commit)) from {self.table_name};").fetchone()[0]
-            self.build_len_max = self.cursor.execute(f"SELECT MAX(LENGTH(build_commit)) from {self.table_name};").fetchone()[0]
+            self.build_len_min = self.cursor.execute(
+                f"SELECT MIN(LENGTH(build_commit)) from {self.table_name};"
+            ).fetchone()[0]
+            self.build_len_max = self.cursor.execute(
+                f"SELECT MAX(LENGTH(build_commit)) from {self.table_name};"
+            ).fetchone()[0]
 
             if self.build_len_min != self.build_len_max:
-                logger.warning("Data contains commit hashes of differing lengths. It's possible that the wrong commits will be compared. "
-                               "Try purging the the database of old commits.")
-                self.cursor.execute(f"UPDATE {self.table_name} SET build_commit = SUBSTRING(build_commit, 1, {self.build_len_min});")
+                logger.warning(
+                    "Data contains commit hashes of differing lengths. It's possible that the wrong commits will be compared. "
+                    "Try purging the the database of old commits."
+                )
+                self.cursor.execute(
+                    f"UPDATE {self.table_name} SET build_commit = SUBSTRING(build_commit, 1, {self.build_len_min});"
+                )
 
             builds = self.cursor.execute(f"SELECT DISTINCT build_commit FROM {self.table_name};").fetchall()
             self.builds = list(map(lambda b: b[0], builds))  # list[tuple[str]] -> list[str]
@@ -360,7 +503,8 @@ class LlamaBenchDataSQLite3(LlamaBenchData):
 
     def builds_timestamp(self, reverse: bool = False) -> Union[Iterator[tuple], Sequence[tuple]]:
         data = self.cursor.execute(
-            f"SELECT build_commit, test_time FROM {self.table_name} ORDER BY test_time;").fetchall()
+            f"SELECT build_commit, test_time FROM {self.table_name} ORDER BY test_time;"
+        ).fetchall()
         return reversed(data) if reverse else data
 
     def get_rows(self, properties: list[str], hexsha8_baseline: str, hexsha8_compare: str) -> Sequence[tuple]:
@@ -371,33 +515,48 @@ class LlamaBenchDataSQLite3(LlamaBenchData):
         else:
             assert False
 
-    def _get_rows_llama_bench(self, properties: list[str], hexsha8_baseline: str, hexsha8_compare: str) -> Sequence[tuple]:
+    def _get_rows_llama_bench(
+        self, properties: list[str], hexsha8_baseline: str, hexsha8_compare: str
+    ) -> Sequence[tuple]:
         select_string = ", ".join(
-            [f"tb.{p}" for p in properties] + ["tb.n_prompt", "tb.n_gen", "tb.n_depth", "AVG(tb.avg_ts)", "AVG(tc.avg_ts)"])
+            [f"tb.{p}" for p in properties]
+            + ["tb.n_prompt", "tb.n_gen", "tb.n_depth", "AVG(tb.avg_ts)", "AVG(tc.avg_ts)"]
+        )
         equal_string = " AND ".join(
-            [f"tb.{p} = tc.{p}" for p in LLAMA_BENCH_KEY_PROPERTIES] + [
-                f"tb.build_commit = '{hexsha8_baseline}'", f"tc.build_commit = '{hexsha8_compare}'"]
+            [f"tb.{p} = tc.{p}" for p in LLAMA_BENCH_KEY_PROPERTIES]
+            + [f"tb.build_commit = '{hexsha8_baseline}'", f"tc.build_commit = '{hexsha8_compare}'"]
         )
         group_order_string = ", ".join([f"tb.{p}" for p in properties] + ["tb.n_gen", "tb.n_prompt", "tb.n_depth"])
-        query = (f"SELECT {select_string} FROM {self.table_name} tb JOIN {self.table_name} tc ON {equal_string} "
-                 f"GROUP BY {group_order_string} ORDER BY {group_order_string};")
+        query = (
+            f"SELECT {select_string} FROM {self.table_name} tb JOIN {self.table_name} tc ON {equal_string} "
+            f"GROUP BY {group_order_string} ORDER BY {group_order_string};"
+        )
         return self.cursor.execute(query).fetchall()
 
-    def _get_rows_test_backend_ops(self, properties: list[str], hexsha8_baseline: str, hexsha8_compare: str) -> Sequence[tuple]:
+    def _get_rows_test_backend_ops(
+        self, properties: list[str], hexsha8_baseline: str, hexsha8_compare: str
+    ) -> Sequence[tuple]:
         # For test-backend-ops, we compare FLOPS and bandwidth metrics (prioritizing FLOPS over bandwidth)
         select_string = ", ".join(
-            [f"tb.{p}" for p in properties] + [
-                "AVG(tb.flops)", "AVG(tc.flops)",
-                "AVG(tb.bandwidth_gb_s)", "AVG(tc.bandwidth_gb_s)"
-            ])
+            [f"tb.{p}" for p in properties]
+            + ["AVG(tb.flops)", "AVG(tc.flops)", "AVG(tb.bandwidth_gb_s)", "AVG(tc.bandwidth_gb_s)"]
+        )
         equal_string = " AND ".join(
-            [f"tb.{p} = tc.{p}" for p in TEST_BACKEND_OPS_KEY_PROPERTIES] + [
-                f"tb.build_commit = '{hexsha8_baseline}'", f"tc.build_commit = '{hexsha8_compare}'",
-                "tb.supported = 1", "tc.supported = 1", "tb.passed = 1", "tc.passed = 1"]  # Only compare successful tests
+            [f"tb.{p} = tc.{p}" for p in TEST_BACKEND_OPS_KEY_PROPERTIES]
+            + [
+                f"tb.build_commit = '{hexsha8_baseline}'",
+                f"tc.build_commit = '{hexsha8_compare}'",
+                "tb.supported = 1",
+                "tc.supported = 1",
+                "tb.passed = 1",
+                "tc.passed = 1",
+            ]  # Only compare successful tests
         )
         group_order_string = ", ".join([f"tb.{p}" for p in properties])
-        query = (f"SELECT {select_string} FROM {self.table_name} tb JOIN {self.table_name} tc ON {equal_string} "
-                 f"GROUP BY {group_order_string} ORDER BY {group_order_string};")
+        query = (
+            f"SELECT {select_string} FROM {self.table_name} tb JOIN {self.table_name} tc ON {equal_string} "
+            f"GROUP BY {group_order_string} ORDER BY {group_order_string};"
+        )
         return self.cursor.execute(query).fetchall()
 
 
@@ -425,13 +584,17 @@ class LlamaBenchDataSQLite3File(LlamaBenchDataSQLite3):
                 self.table_name = "llama_bench"
                 tool = "local-inference-bench"
             else:
-                raise RuntimeError(f"Table 'test' not found for tool 'local-inference-bench'. Available tables: {table_names}")
+                raise RuntimeError(
+                    f"Table 'test' not found for tool 'local-inference-bench'. Available tables: {table_names}"
+                )
         elif tool == "test-backend-ops":
             if "test_backend_ops" in table_names:
                 self.table_name = "test_backend_ops"
                 tool = "test-backend-ops"
             else:
-                raise RuntimeError(f"Table 'test_backend_ops' not found for tool 'test-backend-ops'. Available tables: {table_names}")
+                raise RuntimeError(
+                    f"Table 'test_backend_ops' not found for tool 'test-backend-ops'. Available tables: {table_names}"
+                )
         else:
             raise RuntimeError(f"Unknown tool: {tool}")
 
@@ -468,10 +631,13 @@ class LlamaBenchDataJSONL(LlamaBenchDataSQLite3):
                 for k in parsed.keys() - set(db_fields):
                     del parsed[k]
 
-                if (missing_keys := self._check_keys(parsed.keys())):
+                if missing_keys := self._check_keys(parsed.keys()):
                     raise RuntimeError(f"Missing required data key(s) at line {i + 1}: {', '.join(missing_keys)}")
 
-                self.cursor.execute(f"INSERT INTO {self.table_name}({', '.join(parsed.keys())}) VALUES({', '.join('?' * len(parsed))});", tuple(parsed.values()))
+                self.cursor.execute(
+                    f"INSERT INTO {self.table_name}({', '.join(parsed.keys())}) VALUES({', '.join('?' * len(parsed))});",
+                    tuple(parsed.values()),
+                )
 
         self._builds_init()
 
@@ -504,10 +670,13 @@ class LlamaBenchDataJSON(LlamaBenchDataSQLite3):
                     for k in entry.keys() - set(db_fields):
                         del entry[k]
 
-                    if (missing_keys := self._check_keys(entry.keys())):
+                    if missing_keys := self._check_keys(entry.keys()):
                         raise RuntimeError(f"Missing required data key(s) at entry {i + 1}: {', '.join(missing_keys)}")
 
-                    self.cursor.execute(f"INSERT INTO {self.table_name}({', '.join(entry.keys())}) VALUES({', '.join('?' * len(entry))});", tuple(entry.values()))
+                    self.cursor.execute(
+                        f"INSERT INTO {self.table_name}({', '.join(entry.keys())}) VALUES({', '.join('?' * len(entry))});",
+                        tuple(entry.values()),
+                    )
 
         self._builds_init()
 
@@ -542,10 +711,13 @@ class LlamaBenchDataCSV(LlamaBenchDataSQLite3):
                     for k in keys - set(db_fields):
                         del parsed[k]
 
-                    if (missing_keys := self._check_keys(keys)):
+                    if missing_keys := self._check_keys(keys):
                         raise RuntimeError(f"Missing required data key(s) at line {i + 1}: {', '.join(missing_keys)}")
 
-                    self.cursor.execute(f"INSERT INTO {self.table_name}({', '.join(parsed.keys())}) VALUES({', '.join('?' * len(parsed))});", tuple(parsed.values()))
+                    self.cursor.execute(
+                        f"INSERT INTO {self.table_name}({', '.join(parsed.keys())}) VALUES({', '.join('?' * len(parsed))});",
+                        tuple(parsed.values()),
+                    )
 
         self._builds_init()
 
@@ -573,11 +745,11 @@ def format_flops(flops_value: float) -> str:
 
     # Define unit thresholds and names
     units = [
-        (1e12, "T"),   # TeraFLOPS
-        (1e9, "G"),    # GigaFLOPS
-        (1e6, "M"),    # MegaFLOPS
-        (1e3, "k"),    # kiloFLOPS
-        (1, "")        # FLOPS
+        (1e12, "T"),  # TeraFLOPS
+        (1e9, "G"),  # GigaFLOPS
+        (1e6, "M"),  # MegaFLOPS
+        (1e3, "k"),  # kiloFLOPS
+        (1, ""),  # FLOPS
     ]
 
     for threshold, unit in units:
@@ -598,13 +770,7 @@ def format_flops_for_table(flops_value: float, target_unit: str) -> str:
         return "0.00"
 
     # Define unit thresholds based on target unit
-    unit_divisors = {
-        "TFLOPS": 1e12,
-        "GFLOPS": 1e9,
-        "MFLOPS": 1e6,
-        "kFLOPS": 1e3,
-        "FLOPS": 1
-    }
+    unit_divisors = {"TFLOPS": 1e12, "GFLOPS": 1e9, "MFLOPS": 1e6, "kFLOPS": 1e3, "FLOPS": 1}
 
     divisor = unit_divisors.get(target_unit, 1)
     formatted_value = flops_value / divisor
@@ -681,8 +847,10 @@ elif bench_data.repo is not None:
         parser.print_help()
         sys.exit(1)
 else:
-    logger.error("No baseline was provided and the current working directory "
-                 "is not part of a git repository from which a baseline could be inferred.\n")
+    logger.error(
+        "No baseline was provided and the current working directory "
+        "is not part of a git repository from which a baseline could be inferred.\n"
+    )
     parser.print_help()
     sys.exit(1)
 
@@ -706,7 +874,7 @@ if known_args.compare is not None:
 # and that is not a parent of master:
 elif bench_data.repo is not None:
     hexsha8s_master = bench_data.get_all_parent_hexsha8s(bench_data.repo.heads.master.commit)
-    for (hexsha8, _) in bench_data.builds_timestamp(reverse=True):
+    for hexsha8, _ in bench_data.builds_timestamp(reverse=True):
         if hexsha8 not in hexsha8s_master:
             hexsha8_compare = hexsha8
             break
@@ -716,8 +884,10 @@ elif bench_data.repo is not None:
         parser.print_help()
         sys.exit(1)
 else:
-    logger.error("No compare target was provided and the current working directory "
-                 "is not part of a git repository from which a compare target could be inferred.\n")
+    logger.error(
+        "No compare target was provided and the current working directory "
+        "is not part of a git repository from which a compare target could be inferred.\n"
+    )
     parser.print_help()
     sys.exit(1)
 
@@ -745,7 +915,9 @@ if known_args.show is not None:
     show = known_args.show.split(",")
     unknown_cols = []
     for prop in show:
-        valid_props = key_properties if tool == "test-backend-ops" else key_properties[:-3]  # Exclude n_prompt, n_gen, n_depth for local-inference-bench
+        valid_props = (
+            key_properties if tool == "test-backend-ops" else key_properties[:-3]
+        )  # Exclude n_prompt, n_gen, n_depth for local-inference-bench
         if prop not in valid_props:
             unknown_cols.append(prop)
     if unknown_cols:
@@ -828,8 +1000,8 @@ if tool == "local-inference-bench":
     # For local-inference-bench, create test names and compare avg_ts values
     for row in rows_show:
         n_prompt = int(row[-5])
-        n_gen    = int(row[-4])
-        n_depth  = int(row[-3])
+        n_gen = int(row[-4])
+        n_depth = int(row[-3])
         if n_prompt != 0 and n_gen == 0:
             test_name = f"pp{n_prompt}"
         elif n_prompt == 0 and n_gen != 0:
@@ -886,6 +1058,7 @@ elif tool == "test-backend-ops":
             baseline_str = "N/A"
             compare_str = "N/A"
             from math import nan
+
             speedup = nan
 
         table.append(list(row[:-4]) + [baseline_str, compare_str, speedup])
@@ -902,14 +1075,14 @@ for bool_property in bool_properties:
 if tool == "local-inference-bench":
     if "model_type" in show:
         ip = show.index("model_type")
-        for (old, new) in MODEL_SUFFIX_REPLACE.items():
+        for old, new in MODEL_SUFFIX_REPLACE.items():
             for row_table in table:
                 row_table[ip] = row_table[ip].replace(old, new)
 
     if "model_size" in show:
         ip = show.index("model_size")
         for row_table in table:
-            row_table[ip] = float(row_table[ip]) / 1024 ** 3
+            row_table[ip] = float(row_table[ip]) / 1024**3
 
     if "gpu_info" in show:
         ip = show.index("gpu_info")
@@ -923,7 +1096,7 @@ if tool == "local-inference-bench":
             if len(gpu_names) >= 2 and all_names_the_same:
                 row_table[ip] = f"{num_gpus}x {gpu_names[0]}"
 
-headers  = [pretty_names.get(p, p) for p in show]
+headers = [pretty_names.get(p, p) for p in show]
 if tool == "local-inference-bench":
     headers += ["Test", f"t/s {name_baseline}", f"t/s {name_compare}", "Speedup"]
 elif tool == "test-backend-ops":
@@ -932,16 +1105,28 @@ else:
     assert False
 
 if known_args.plot:
-    def create_performance_plot(table_data: list[list[str]], headers: list[str], baseline_name: str, compare_name: str, output_file: str, plot_x_param: str, log_scale: bool = False, tool_type: str = "local-inference-bench", metric_name: str = "t/s"):
+
+    def create_performance_plot(
+        table_data: list[list[str]],
+        headers: list[str],
+        baseline_name: str,
+        compare_name: str,
+        output_file: str,
+        plot_x_param: str,
+        log_scale: bool = False,
+        tool_type: str = "local-inference-bench",
+        metric_name: str = "t/s",
+    ):
         try:
             import matplotlib
             import matplotlib.pyplot as plt
-            matplotlib.use('Agg')
+
+            matplotlib.use("Agg")
         except ImportError as e:
             logger.error("matplotlib is required for --plot.")
             raise e
 
-        data_headers = headers[:-4] # Exclude the last 4 columns (Test, baseline t/s, compare t/s, Speedup)
+        data_headers = headers[:-4]  # Exclude the last 4 columns (Test, baseline t/s, compare t/s, Speedup)
         plot_x_index = None
         plot_x_label = plot_x_param
 
@@ -954,7 +1139,9 @@ if known_args.plot:
                 plot_x_index = data_headers.index(plot_x_param)
                 plot_x_label = plot_x_param
             else:
-                logger.error(f"Parameter '{plot_x_param}' not found in current table columns. Available columns: {', '.join(data_headers)}")
+                logger.error(
+                    f"Parameter '{plot_x_param}' not found in current table columns. Available columns: {', '.join(data_headers)}"
+                )
                 return
 
         grouped_data = {}
@@ -1001,12 +1188,9 @@ if known_args.plot:
             if group_key not in grouped_data:
                 grouped_data[group_key] = []
 
-            grouped_data[group_key].append({
-                'x_value': x_value,
-                'baseline': float(row[-3]),
-                'compare': float(row[-2]),
-                'speedup': float(row[-1])
-            })
+            grouped_data[group_key].append(
+                {"x_value": x_value, "baseline": float(row[-3]), "compare": float(row[-2]), "speedup": float(row[-1])}
+            )
 
         if not grouped_data:
             logger.error("No data available for plotting")
@@ -1014,14 +1198,13 @@ if known_args.plot:
 
         def make_axes(num_groups, max_cols=2, base_size=(8, 4)):
             from math import ceil
+
             cols = 1 if num_groups == 1 else min(max_cols, num_groups)
             rows = ceil(num_groups / cols)
 
             # Scale figure size by grid dimensions
             w, h = base_size
-            fig, ax_arr = plt.subplots(rows, cols,
-                                       figsize=(w * cols, h * rows),
-                                       squeeze=False)
+            fig, ax_arr = plt.subplots(rows, cols, figsize=(w * cols, h * rows), squeeze=False)
 
             axes = ax_arr.flatten()[:num_groups]
             return fig, axes
@@ -1037,33 +1220,40 @@ if known_args.plot:
             ax = axes[plot_idx]
 
             try:
-                points_sorted = sorted(points, key=lambda p: float(p['x_value']) if p['x_value'] is not None else 0)
-                x_values = [float(p['x_value']) if p['x_value'] is not None else 0 for p in points_sorted]
+                points_sorted = sorted(points, key=lambda p: float(p["x_value"]) if p["x_value"] is not None else 0)
+                x_values = [float(p["x_value"]) if p["x_value"] is not None else 0 for p in points_sorted]
             except ValueError:
                 points_sorted = sorted(points, key=lambda p: group_key)
-                x_values = [p['x_value'] for p in points_sorted]
+                x_values = [p["x_value"] for p in points_sorted]
 
-            baseline_vals = [p['baseline'] for p in points_sorted]
-            compare_vals = [p['compare'] for p in points_sorted]
+            baseline_vals = [p["baseline"] for p in points_sorted]
+            compare_vals = [p["compare"] for p in points_sorted]
 
-            ax.plot(x_values, baseline_vals, 'o-', color='skyblue',
-                    label=f'{baseline_name}', linewidth=2, markersize=6)
-            ax.plot(x_values, compare_vals, 's--', color='lightcoral', alpha=0.8,
-                    label=f'{compare_name}', linewidth=2, markersize=6)
+            ax.plot(x_values, baseline_vals, "o-", color="skyblue", label=f"{baseline_name}", linewidth=2, markersize=6)
+            ax.plot(
+                x_values,
+                compare_vals,
+                "s--",
+                color="lightcoral",
+                alpha=0.8,
+                label=f"{compare_name}",
+                linewidth=2,
+                markersize=6,
+            )
 
             if log_scale:
-                ax.set_xscale('log', base=2)
+                ax.set_xscale("log", base=2)
                 unique_x = sorted(set(x_values))
                 ax.set_xticks(unique_x)
                 ax.set_xticklabels([str(int(x)) for x in unique_x])
 
             title_parts = []
             for part in group_key:
-                if '=' in part:
-                    key, value = part.split('=', 1)
+                if "=" in part:
+                    key, value = part.split("=", 1)
                     title_parts.append(f"{key}: {value}")
 
-            title = ', '.join(title_parts) if title_parts else "Performance comparison"
+            title = ", ".join(title_parts) if title_parts else "Performance comparison"
 
             # Determine y-axis label based on tool type
             if tool_type == "local-inference-bench":
@@ -1073,10 +1263,10 @@ if known_args.plot:
             else:
                 assert False
 
-            ax.set_xlabel(plot_x_label, fontsize=12, fontweight='bold')
-            ax.set_ylabel(y_label, fontsize=12, fontweight='bold')
-            ax.set_title(title, fontsize=12, fontweight='bold')
-            ax.legend(loc='best', fontsize=10)
+            ax.set_xlabel(plot_x_label, fontsize=12, fontweight="bold")
+            ax.set_ylabel(y_label, fontsize=12, fontweight="bold")
+            ax.set_title(title, fontsize=12, fontweight="bold")
+            ax.legend(loc="best", fontsize=10)
             ax.grid(True, alpha=0.3)
 
             plot_idx += 1
@@ -1084,19 +1274,27 @@ if known_args.plot:
         for i in range(plot_idx, len(axes)):
             axes[i].set_visible(False)
 
-        fig.suptitle(f'Performance comparison: {compare_name} vs. {baseline_name}',
-                     fontsize=14, fontweight='bold')
+        fig.suptitle(f"Performance comparison: {compare_name} vs. {baseline_name}", fontsize=14, fontweight="bold")
         fig.subplots_adjust(top=1)
 
         plt.tight_layout()
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.savefig(output_file, dpi=300, bbox_inches="tight")
         plt.close()
 
-    create_performance_plot(table, headers, name_baseline, name_compare, known_args.plot, known_args.plot_x, known_args.plot_log_scale, tool, primary_metric)
+    create_performance_plot(
+        table,
+        headers,
+        name_baseline,
+        name_compare,
+        known_args.plot,
+        known_args.plot_x,
+        known_args.plot_log_scale,
+        tool,
+        primary_metric,
+    )
 
-print(tabulate( # noqa: NP100
-    table,
-    headers=headers,
-    floatfmt=".2f",
-    tablefmt=known_args.output
-))
+print(
+    tabulate(  # noqa: NP100
+        table, headers=headers, floatfmt=".2f", tablefmt=known_args.output
+    )
+)

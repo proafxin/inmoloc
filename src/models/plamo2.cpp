@@ -262,8 +262,6 @@ ggml_tensor * llama_model_plamo2::graph::build_plamo2_mamba_layer(llm_graph_inpu
                                                          int                  il) {
     const auto * mctx_cur = inp->mctx;
 
-    const auto kv_head = mctx_cur->get_head();
-
     const int64_t d_conv   = hparams.ssm_d_conv;
     const int64_t d_inner  = hparams.ssm_d_inner;
     const int64_t d_state  = hparams.ssm_d_state;
@@ -283,7 +281,7 @@ ggml_tensor * llama_model_plamo2::graph::build_plamo2_mamba_layer(llm_graph_inpu
     ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
     ggml_tensor * ssm_states_all  = mctx_cur->get_s_l(il);
 
-    ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
+    ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs, nullptr, il);
     conv               = ggml_reshape_3d(ctx0, conv, d_conv - 1, d_inner + 2 * n_group * d_state, n_seqs);
 
     // {n_embd, n_tokens} => {n_embd, n_seq_tokens, n_seqs}
@@ -319,11 +317,7 @@ ggml_tensor * llama_model_plamo2::graph::build_plamo2_mamba_layer(llm_graph_inpu
         ggml_tensor * last_conv = ggml_view_3d(ctx0, conv_x, d_conv - 1, d_inner, n_seqs, conv_x->nb[1], conv_x->nb[2],
                                                n_seq_tokens * (conv_x->nb[0]));
 
-        ggml_build_forward_expand(gf, ggml_cpy(ctx0, last_conv,
-                                               ggml_view_1d(ctx0, conv_states_all,
-                                                            (d_conv - 1) * (d_inner + 2 * n_group * d_state) * (n_seqs),
-                                                            kv_head * (d_conv - 1) * (d_inner + 2 * n_group * d_state) *
-                                                                ggml_element_size(conv_states_all))));
+        ggml_build_forward_expand(gf, build_rs_store(inp, conv_states_all, last_conv, il));
         cb(conv_states_all, "mamba_conv1d_state", il);
 
         // 1D convolution
@@ -377,7 +371,7 @@ ggml_tensor * llama_model_plamo2::graph::build_plamo2_mamba_layer(llm_graph_inpu
         // (this is necessary in order to properly use the states before they are overwritten,
         //  while avoiding to make unnecessary copies of the states)
         auto get_ssm_rows = [&](ggml_context * ctx, ggml_tensor * states, ggml_tensor * ids) {
-            ggml_tensor * ssm = ggml_reshape_4d(ctx, states, d_state, head_dim, n_heads, mctx_cur->get_size());
+            ggml_tensor * ssm = ggml_reshape_4d(ctx, states, d_state, head_dim, n_heads, states->ne[1]);
 
             // Custom operator to optimize the parallel associative scan
             // as described in the Annex D of the Mamba paper.
@@ -385,17 +379,14 @@ ggml_tensor * llama_model_plamo2::graph::build_plamo2_mamba_layer(llm_graph_inpu
             return ggml_ssm_scan(ctx, ssm, x, dt, A, B, C, ids, /*K=*/1);
         };
 
-        ggml_tensor * y_ssm = build_rs(inp, ssm_states_all, hparams.n_embd_s(), ubatch.n_seqs, get_ssm_rows);
+        ggml_tensor * y_ssm = build_rs(inp, ssm_states_all, hparams.n_embd_s(), ubatch.n_seqs, get_ssm_rows, il);
         cb(y_ssm, "mamba_ssm_scan", il);
 
         // store last states
-        ggml_build_forward_expand(
-            gf, ggml_cpy(
-                    ctx0,
-                    ggml_view_1d(ctx0, y_ssm, n_heads * head_dim * d_state * n_seqs,
-                                 n_heads * head_dim * n_seq_tokens * n_seqs * ggml_element_size(y_ssm)),
-                    ggml_view_1d(ctx0, ssm_states_all, n_heads * head_dim * d_state * n_seqs,
-                                 kv_head * n_seqs * n_heads * head_dim * d_state * ggml_element_size(ssm_states_all))));
+        ggml_build_forward_expand(gf, build_rs_store(inp, ssm_states_all,
+                                                     ggml_view_1d(ctx0, y_ssm, n_heads * head_dim * d_state * n_seqs,
+                                                                  n_heads * head_dim * n_seq_tokens * n_seqs * ggml_element_size(y_ssm)),
+                                                     il));
         cb(ssm_states_all, "mamba_ssm_states", il);
 
         ggml_tensor * y = ggml_view_4d(ctx0, y_ssm, head_dim, n_heads, n_seq_tokens, n_seqs,

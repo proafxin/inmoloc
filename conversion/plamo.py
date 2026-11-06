@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
-
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
+import pathlib
+
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("PlamoForCausalLM")
@@ -17,10 +20,10 @@ from .base import ModelBase, TextModel, gguf
 class PlamoModel(TextModel):
     model_arch = gguf.MODEL_ARCH.PLAMO
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_sentencepiece()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         hparams = self.hparams
 
         self.gguf_writer.add_context_length(4096)  # not in config.json
@@ -36,15 +39,13 @@ class PlamoModel(TextModel):
         assert data_torch.size() == (5120, 5120)
         data_torch = data_torch.reshape(8, 5, 128, 5120)
         data_torch = torch.permute(data_torch, (1, 0, 2, 3))
-        data_torch = torch.reshape(data_torch, (5120, 5120))
-        return data_torch
+        return torch.reshape(data_torch, (5120, 5120))
 
     def shuffle_attn_output_weight(self, data_torch):
         assert data_torch.size() == (5120, 5120)
         data_torch = data_torch.reshape(5120, 8, 5, 128)
         data_torch = torch.permute(data_torch, (0, 2, 1, 3))
-        data_torch = torch.reshape(data_torch, (5120, 5120))
-        return data_torch
+        return torch.reshape(data_torch, (5120, 5120))
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         new_name = self.map_tensor_name(name)
@@ -63,10 +64,10 @@ class PlamoModel(TextModel):
 class Plamo2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.PLAMO2
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_plamo()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         hparams = self.hparams
         self.gguf_writer.add_vocab_size(self.hparams["vocab_size"])
 
@@ -82,7 +83,7 @@ class Plamo2Model(TextModel):
             for i in range(self.block_count):
                 if self.block_count <= (mamba_step // 2):
                     # use attention in last layer
-                    is_mamba = (i != self.block_count - 1)
+                    is_mamba = i != self.block_count - 1
                 else:
                     is_mamba = (i % mamba_step) != (mamba_step // 2)
                 if is_mamba:
@@ -154,27 +155,26 @@ class Plamo2Model(TextModel):
 class Plamo3Model(TextModel):
     model_arch = gguf.MODEL_ARCH.PLAMO3
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_plamo()
 
         tokenizer_config_path = self.dir_model / "tokenizer_config.json"
         tokenizer_config = {}
 
         if tokenizer_config_path.is_file():
-            with open(tokenizer_config_path, encoding="utf-8") as f:
+            with pathlib.Path(tokenizer_config_path).open(encoding="utf-8") as f:
                 tokenizer_config = json.load(f)
 
         chat_template = tokenizer_config.get("chat_template")
         chat_template_jinja = self.dir_model / "chat_template.jinja"
 
         if chat_template_jinja.is_file():
-            with open(chat_template_jinja, encoding="utf-8") as f:
-                chat_template = f.read()
+            chat_template = pathlib.Path(chat_template_jinja).read_text(encoding="utf-8")
 
         if chat_template:
             self.gguf_writer.add_chat_template(chat_template)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_vocab_size(self.hparams["vocab_size"])
         if (sliding_window := self.find_hparam(["window_size", "sliding_window"], optional=True)) is not None:
@@ -184,16 +184,14 @@ class Plamo3Model(TextModel):
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
 
         if name.endswith(".pre_mixer_norm.weight"):
-            data_torch = data_torch + 1.0
+            data_torch += 1.0
         elif name.endswith(".post_mixer_norm.weight"):
-            data_torch = data_torch + 1.0 / 5
+            data_torch += 1.0 / 5
         elif name.endswith(".pre_mlp_norm.weight"):
-            data_torch = data_torch + 1.0
+            data_torch += 1.0
         elif name.endswith(".post_mlp_norm.weight"):
-            data_torch = data_torch + 1.0 / (5**1.5)
-        elif name.endswith((".mixer.q_norm.weight", ".mixer.k_norm.weight")):
-            data_torch = data_torch + 1.0
-        elif name.endswith(".norm.weight"):
-            data_torch = data_torch + 1.0
+            data_torch += 1.0 / (5**1.5)
+        elif name.endswith((".mixer.q_norm.weight", ".mixer.k_norm.weight", ".norm.weight")):
+            data_torch += 1.0
 
         yield from super().modify_tensors(data_torch, name, bid)

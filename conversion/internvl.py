@@ -1,32 +1,33 @@
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, gguf
+from conversion.base import MmprojModel, ModelBase, gguf
 
 
 @ModelBase.register("InternVisionModel")
 @ModelBase.example("OpenGVLab/InternVL3-2B", "OpenGVLab/InternVL2_5-1B")
 class InternVisionModel(MmprojModel):
-
     min_dynamic_tiles: int = 0
     max_dynamic_tiles: int = 0
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         assert self.hparams_vision is not None
         self.min_dynamic_tiles = self.global_config.get("min_dynamic_patch", 0)
         self.max_dynamic_tiles = self.global_config.get("max_dynamic_patch", 0)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         assert self.hparams_vision is not None
-        if isinstance(self.hparams_vision['image_size'], list):
-            self.hparams_vision['image_size'] = self.hparams_vision['image_size'][0]
-        if isinstance(self.hparams_vision['patch_size'], list):
-            self.hparams_vision['patch_size'] = self.hparams_vision['patch_size'][0]
+        if isinstance(self.hparams_vision["image_size"], list):
+            self.hparams_vision["image_size"] = self.hparams_vision["image_size"][0]
+        if isinstance(self.hparams_vision["patch_size"], list):
+            self.hparams_vision["patch_size"] = self.hparams_vision["patch_size"][0]
         super().set_gguf_parameters()
 
         hparams = self.hparams
@@ -38,7 +39,8 @@ class InternVisionModel(MmprojModel):
         elif hparams["hidden_act"] == "gelu":
             self.gguf_writer.add_vision_use_gelu(True)
         else:
-            raise ValueError(f"Unsupported hidden_act: {hparams['hidden_act']}")
+            msg = f"Unsupported hidden_act: {hparams['hidden_act']}"
+            raise ValueError(msg)
         # downsample_ratio
         downsample_ratio = self.global_config.get("downsample_ratio")
         assert downsample_ratio is not None
@@ -58,8 +60,8 @@ class InternVisionModel(MmprojModel):
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
         name, gen = item
 
-        vision_prefix = ['vision_model', 'mlp', 'model.vision_tower', 'model.multi_modal_projector']
-        if not any([name.startswith(prefix) for prefix in vision_prefix]):
+        vision_prefix = ["vision_model", "mlp", "model.vision_tower", "model.multi_modal_projector"]
+        if not any(name.startswith(prefix) for prefix in vision_prefix):
             return None
         # deal with intern-s1 special case
         names_map = {
@@ -83,15 +85,15 @@ class InternVisionModel(MmprojModel):
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # split QKV tensors if needed
         if ".qkv." in name:
-            if data_torch.ndim == 2: # weight
+            if data_torch.ndim == 2:  # weight
                 c3, _ = data_torch.shape
-            else: # bias
+            else:  # bias
                 c3 = data_torch.shape[0]
             assert c3 % 3 == 0
             c = c3 // 3
             wq = data_torch[:c]
-            wk = data_torch[c: c * 2]
-            wv = data_torch[c * 2:]
+            wk = data_torch[c : c * 2]
+            wv = data_torch[c * 2 :]
             yield from super().modify_tensors(wq, name.replace("attn.qkv", "self_attn.q_proj"), bid)
             yield from super().modify_tensors(wk, name.replace("attn.qkv", "self_attn.k_proj"), bid)
             yield from super().modify_tensors(wv, name.replace("attn.qkv", "self_attn.v_proj"), bid)

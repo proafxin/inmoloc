@@ -1755,7 +1755,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
             }
             return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
         case GGML_OP_LIGHTNING_INDEXER:
-            if (op->src[0]->ne[0] != OP_LIGHTNING_INDEXER_DK ||
+            // only the keys themselves with a mask, not the lists of rows of ggml_lightning_indexer_rows()
+            if (op->src[4] != nullptr ||
+                op->src[0]->ne[0] != OP_LIGHTNING_INDEXER_DK ||
                 op->src[0]->ne[1] != OP_LIGHTNING_INDEXER_NH) {
                 return false;
             }
@@ -1828,7 +1830,8 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_RWKV_WKV7:
             return true;
         case GGML_OP_GATED_DELTA_NET:
-            return has_simdgroup_reduction && op->src[2]->ne[0] % 32 == 0;
+            // the rows mode (ggml_gated_delta_net_rows) is not implemented here
+            return has_simdgroup_reduction && op->src[2]->ne[0] % 32 == 0 && ggml_get_op_params_i32(op, 1) == 0;
         case GGML_OP_SOLVE_TRI:
             return has_simdgroup_reduction && op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_MUL_MAT:
