@@ -81,7 +81,6 @@ class ServerProcess:
     ctk: str | None = None
     ctv: str | None = None
     ctkd: str | None = None
-    fa: str | None = None
     server_continuous_batching: bool | None = False
     server_embeddings: bool | None = False
     server_reranking: bool | None = False
@@ -221,8 +220,6 @@ class ServerProcess:
             server_args.extend(["-ctv", self.ctv])
         if self.ctkd:
             server_args.extend(["-ctkd", self.ctkd])
-        if self.fa is not None:
-            server_args.extend(["-fa", self.fa])
         # required with the elastic memory
         if self.n_predict and self.n_predict > 0:
             server_args.extend(["--max-output-tokens", self.n_predict])

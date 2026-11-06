@@ -11,7 +11,7 @@ x-gpu: &gpu
 
 services:
   qwen:
-    image: inmoloc:elastic20
+    image: inmoloc:latest
     container_name: qwen
     restart: unless-stopped
     ipc: host
@@ -56,7 +56,7 @@ services:
     deploy: *gpu
 
   paddleocr:
-    image: inmoloc:elastic20
+    image: inmoloc:latest
     container_name: paddleocr
     restart: unless-stopped
     ipc: host
@@ -101,7 +101,7 @@ services:
     deploy: *gpu
 
   embedding:
-    image: inmoloc:elastic20
+    image: inmoloc:latest
     container_name: embedding
     restart: unless-stopped
     ipc: host

@@ -297,12 +297,10 @@ def start_server_background(args):
     if args.offline:
         server_args.append("--offline")
     server_args.extend(["--n-gpu-layers", args.n_gpu_layers])
-    server_args.extend(["--ctx-size", args.ctx_size])
-    server_args.extend(["--parallel", args.parallel])
     server_args.extend(["--batch-size", args.batch_size])
     server_args.extend(["--ubatch-size", args.ubatch_size])
-    server_args.extend(["--n-predict", args.max_tokens * 2])
-    server_args.extend(("--cont-batching", "--metrics", "--flash-attn"))
+    server_args.extend(["--max-output-tokens", args.max_tokens * 2])
+    server_args.extend(("--cont-batching", "--metrics"))
     args = [str(arg) for arg in [server_path, *server_args]]
     print(f"bench: starting server with: {' '.join(args)}")
     pkwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
