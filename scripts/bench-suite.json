@@ -4,10 +4,11 @@
   "targets": [
     { "name": "llamacpp", "kind": "llamacpp", "image": "ghcr.io/ggml-org/llama.cpp:server-cuda" },
     { "name": "llamacpp-12", "kind": "llamacpp", "image": "ghcr.io/ggml-org/llama.cpp:server-cuda", "args": "-c 12288 --parallel 12" },
-    { "name": "elastic20", "kind": "inmoloc", "image": "inmoloc:elastic20", "args": "--rs-rollback replay --max-output-tokens 512" }
+    { "name": "elastic20", "kind": "inmoloc", "image": "inmoloc:elastic20", "args": "--rs-rollback replay --max-output-tokens 512" },
+    { "name": "current", "kind": "inmoloc", "image": "inmoloc:latest", "args": "--rs-rollback replay --max-output-tokens 512" }
   ],
 
-  "compare": [["elastic20", "llamacpp-12"], ["elastic20", "llamacpp"]],
+  "compare": [["current", "elastic20"], ["elastic20", "llamacpp-12"], ["elastic20", "llamacpp"]],
 
   "engine": {
     "bench":   { "n_prompt": "512", "n_gen": "128", "repetitions": 3 },

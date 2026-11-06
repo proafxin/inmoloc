@@ -482,9 +482,7 @@ def summarize(out: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=os.path.join(ROOT, "scripts", "bench-suite.json"))
-    parser.add_argument(
-        "--out", default=pathlib.Path(f"~/Projects/bench-results/{time.strftime('%Y%m%d-%H%M%S')}").expanduser()
-    )
+    parser.add_argument("--out", default=pathlib.Path("~/Projects/bench_out/").expanduser())
     parser.add_argument("--models", nargs="*", help="model names of the config to run (default: all)")
     parser.add_argument(
         "--tiers", nargs="*", help="tiers to run: engine server embed vision (default: those of each model)"

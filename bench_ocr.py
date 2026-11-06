@@ -220,9 +220,8 @@ def pct(values: list[float], p: float) -> float:
     return values[min(len(values) - 1, round(p / 100 * (len(values) - 1)))]
 
 
-def run_level(args, images: list[Path], level: int, sink: list) -> dict:
-    n = max(args.min_requests, level * args.per_slot)
-    work = [images[i % len(images)] for i in range(n)]
+def run_level(args, work: list[Path], level: int, sink: list) -> dict:
+    n = len(work)
     sampler = Sampler(args.container)
     sampler.start()
     t0 = time.time()
@@ -298,6 +297,15 @@ def main() -> None:
         compare(*args.compare)
         return
 
+    per_level_n = [max(args.min_requests, level * args.per_slot) for level in args.levels]
+    needed = 2 + sum(per_level_n)  # 2 warm-up pages, never reused in a level
+    if args.pages < needed:
+        sys.exit(
+            f"--pages {args.pages} is not enough for --levels {args.levels} at --per-slot {args.per_slot}: "
+            f"need {needed} distinct pages (2 warm-up + {sum(per_level_n)} across levels) so every request "
+            f"uses a real, unique page and nothing is served from the server's own prompt cache"
+        )
+
     pages = choose_pages(Path(args.pdf_dir), args.pages, args.seed)
     images = render(pages, args.dpi, Path(args.cache_dir))
     sizes = [p.stat().st_size for p in images]
@@ -308,7 +316,8 @@ def main() -> None:
     if not args.no_wait:
         print(f"ready after {wait_ready(args.url, 600):.1f}s")
 
-    for img in images[:2]:  # warm-up, not counted
+    cursor = 2
+    for img in images[:cursor]:  # warm-up, not counted, not reused by any level below
         r = ocr_request(args.url, args.model, img, args.prompt, args.max_tokens)
         if not r["ok"]:
             sys.exit(f"warm-up request failed, not starting the load: {r['error']}")
@@ -318,8 +327,10 @@ def main() -> None:
         f"{'level':>5} {'reqs':>5} {'ok':>4} {'fail':>4} {'wall s':>7} {'tok/s':>7} {'req/s':>6} "
         f"{'p50 s':>6} {'p95 s':>6} {'GPU MiB':>8} {'RAM MiB':>8}"
     )
-    for level in args.levels:
-        r = run_level(args, images, level, sink)
+    for level, n in zip(args.levels, per_level_n, strict=True):
+        work = images[cursor : cursor + n]
+        cursor += n
+        r = run_level(args, work, level, sink)
         rows.append(r)
         print(
             f"{r['level']:>5} {r['requests']:>5} {r['ok']:>4} {r['failed']:>4} {r['wall_s']:>7.1f} {r['tok_s']:>7.0f} "
@@ -333,7 +344,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     (out / f"{args.label}.jsonl").write_text("\n".join(json.dumps(x) for x in sink))
     (out / f"{args.label}_summary.json").write_text(json.dumps({"args": vars(args), "levels": rows}, indent=2))
-    print(f"saved {out / (args.label + '.jsonl')}")
+    print(f"saved {out / (args.label + '_ocr.jsonl')}")
 
 
 if __name__ == "__main__":

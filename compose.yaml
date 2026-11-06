@@ -78,7 +78,7 @@ services:
       - --vram-budget
       - ${OCR_BUDGET:-2.5G}
       - --cache-ram
-      - "2048"
+      - "0"
       - --cache-type-k
       - bf16
       - --cache-type-v
