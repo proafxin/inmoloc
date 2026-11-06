@@ -527,10 +527,14 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_tile(
                 }
 
                 int64_t i_KV;
+                // the padded slots of a list are zeros, like in the synchronous load: the -inf mask removes their score,
+                // but V is read too, and 0 times a value that is not finite (e.g. an f32 state of the elastic memory read
+                // as f16) is not 0
+                [[maybe_unused]] bool pad = false;
                 if constexpr (use_sparse) {
-                    // padded slots gather row 0, the -inf mask removes their contribution
-                    const int32_t index = i < i_sup ? indices[k_VKQ_0 + i] : 0;
-                    i_KV = index >= 0 ? index : 0;
+                    const int32_t index = i < i_sup ? indices[k_VKQ_0 + i] : -1;
+                    pad  = index < 0;
+                    i_KV = pad ? 0 : index;
                 } else {
                     i_KV = k_VKQ_0 + i;
                 }
@@ -539,11 +543,17 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_tile(
                 for (int k0 = k0_start; k0 < k0_stop; k0 += stride_k) {
                     const int k = k0 + (stride_k == warp_size ? threadIdx.x : threadIdx.x % stride_k);
 
+                    unsigned int dst;
                     if constexpr (swz) {
-                        const int smem_offs_b = ggml_cuda_fattn_smem_swizzle::bytes_rc<stride_tile>(i, k*h2_per_chunk);
-                        cp_async_cg_16<preload>(tile_KV_32 + smem_offs_b, KV + i_KV*stride_KV + k*h2_per_chunk);
+                        dst = tile_KV_32 + ggml_cuda_fattn_smem_swizzle::bytes_rc<stride_tile>(i, k*h2_per_chunk);
                     } else {
-                        cp_async_cg_16<preload>(tile_KV_32 + i*(stride_tile*sizeof(half2)) + k*16, KV + i_KV*stride_KV + k*h2_per_chunk);
+                        dst = tile_KV_32 + i*(stride_tile*sizeof(half2)) + k*16;
+                    }
+
+                    if constexpr (use_sparse) {
+                        cp_async_cg_16_zfill<preload>(dst, KV + i_KV*stride_KV + k*h2_per_chunk, pad);
+                    } else {
+                        cp_async_cg_16<preload>(dst, KV + i_KV*stride_KV + k*h2_per_chunk);
                     }
                 }
             }

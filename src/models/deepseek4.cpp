@@ -206,8 +206,10 @@ static ggml_tensor * dsv4_view_2d(
     return ggml_view_2d(ctx, t, ne0, ne1, t->nb[1], dsv4_elem_offset(t, i0));
 }
 
+// t is [state rows | rows of the tokens]: the row scaled to 0 is the last one, a token of the ubatch, computed by this
+// graph; a state row of a new sequence holds what the memory held, and 0 times a NaN is not 0
 static ggml_tensor * dsv4_append_zero_row(ggml_context * ctx, ggml_tensor * t, bool neg_inf) {
-    ggml_tensor * row = ggml_view_1d(ctx, t, t->ne[0], 0);
+    ggml_tensor * row = ggml_view_1d(ctx, t, t->ne[0], (size_t) (t->ne[1] - 1)*t->nb[1]);
     row = neg_inf ? ggml_scale_bias(ctx, row, 0.0f, -INFINITY) : ggml_scale(ctx, row, 0.0f);
     row = ggml_reshape_2d(ctx, row, t->ne[0], 1);
 

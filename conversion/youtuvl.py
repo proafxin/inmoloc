@@ -1,22 +1,24 @@
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, gguf, logger
+from conversion.base import MmprojModel, ModelBase, gguf, logger
 
 
 @ModelBase.register("YoutuVLForConditionalGeneration")
 @ModelBase.example("tencent/Youtu-VL-4B-Instruct")
 class YoutuVLVisionModel(MmprojModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         assert self.hparams_vision is not None
         self.hparams_vision["image_size"] = self.hparams_vision.get("image_size", 560)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.YOUTUVL)
@@ -24,12 +26,13 @@ class YoutuVLVisionModel(MmprojModel):
 
         # Handle activation function
         hidden_act = str(self.hparams.get("hidden_act", "gelu_pytorch_tanh")).lower()
-        if hidden_act in ("gelu", "gelu_pytorch_tanh", "gelu_fast", "gelu_new", "gelu_accurate"):
+        if hidden_act in {"gelu", "gelu_pytorch_tanh", "gelu_fast", "gelu_new", "gelu_accurate"}:
             self.gguf_writer.add_vision_use_gelu(True)
         elif hidden_act == "silu":
             self.gguf_writer.add_vision_use_silu(True)
         else:
-            raise ValueError(f"Unsupported activation function for YOUTUVL: {hidden_act}")
+            msg = f"Unsupported activation function for YOUTUVL: {hidden_act}"
+            raise ValueError(msg)
 
         self.gguf_writer.add_vision_spatial_merge_size(self.hparams.get("spatial_merge_size", 2))
 
@@ -46,10 +49,10 @@ class YoutuVLVisionModel(MmprojModel):
 
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
+        name, _gen = item
 
         # Skip language model tensors
-        skip_prefixes = ('lm_head.', 'model.layers.', 'model.embed_tokens.', 'model.norm.')
+        skip_prefixes = ("lm_head.", "model.layers.", "model.embed_tokens.", "model.norm.")
         if name.startswith(skip_prefixes):
             return None
 

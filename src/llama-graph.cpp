@@ -1033,6 +1033,19 @@ void llm_graph_input_dsv4::set_input(const llama_ubatch * ubatch) {
         mctx->set_input_box(inp_box.raw, inp_box.hca, inp_box.lid, inp_box.rng_raw, inp_box.rng_hca, inp_box.rng_csa, inp_box.win_lid, n_top, ubatch);
     }
 
+    if (copy_src) {
+        const auto & copies = mctx->get_block_copies();
+        GGML_ASSERT((int64_t) copies.size() == copy_src->ne[0]);
+
+        auto * src = (int32_t *) copy_src->data;
+        auto * dst = (int64_t *) copy_dst->data;
+
+        for (size_t i = 0; i < copies.size(); ++i) {
+            src[i] = (int32_t) copies[i].first;
+            dst[i] = (int64_t) copies[i].second;
+        }
+    }
+
     if (inp_csa.k_rot && inp_csa.k_rot->buffer) {
         mctx->get_csa()->set_input_k_rot(inp_csa.k_rot);
     }
@@ -1075,6 +1088,9 @@ bool llm_graph_input_dsv4::can_reuse(const llm_graph_params & params) {
 
     res &= inp_box.win_lid->ne[1] == params.ubatch.n_tokens;
     res &= inp_box.n_win == mctx->get_n_win_lid(params.ubatch);
+
+    // a graph with copies of blocks is one of a single ubatch
+    res &= copy_src == nullptr && mctx->get_block_copies().empty();
 
     return res;
 }
@@ -3584,6 +3600,23 @@ llm_graph_input_dsv4 * llm_graph_context::build_inp_dsv4() const {
         b.n_win   = mctx_cur->get_n_win_lid(ubatch);
 
         b.list_hca = ggml_concat(ctx0, b.raw, b.hca, 0);
+    }
+
+    // before the layers, which write the blocks
+    if (const auto & copies = mctx_cur->get_block_copies(); !copies.empty()) {
+        const int64_t n_copies = (int64_t) copies.size();
+
+        inp->copy_src = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_copies);
+        ggml_set_input(inp->copy_src);
+        ggml_set_name(inp->copy_src, "dsv4_copy_src");
+
+        inp->copy_dst = ggml_new_tensor_1d(ctx0, GGML_TYPE_I64, n_copies);
+        ggml_set_input(inp->copy_dst);
+        ggml_set_name(inp->copy_dst, "dsv4_copy_dst");
+
+        ggml_tensor * blocks = mctx_cur->get_box()->get_blocks();
+
+        ggml_build_forward_expand(gf, ggml_set_rows(ctx0, blocks, ggml_get_rows(ctx0, blocks, inp->copy_src), inp->copy_dst));
     }
 
     return (llm_graph_input_dsv4 *) res->add_input(std::move(inp));

@@ -69,6 +69,8 @@ llama_memory_recurrent::llama_memory_recurrent(
         n_rep .assign(n_seq_max, 0);
     }
 
+    n_snap.assign(n_seq_max, 0);
+
     r_l.resize(n_layer);
     s_l.resize(n_layer);
     p_l.resize(n_layer);
@@ -127,6 +129,8 @@ void llama_memory_recurrent::clear(bool data) {
         std::fill(n_pend.begin(), n_pend.end(), 0);
         std::fill(n_rep .begin(), n_rep .end(), 0);
     }
+
+    std::fill(n_snap.begin(), n_snap.end(), 0);
 }
 
 bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
@@ -157,6 +161,12 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
             } else if ((size_t) seq_id < n_pend.size()) {
                 n_pend[seq_id] = 0;
             }
+        }
+
+        if (seq_id < 0) {
+            std::fill(n_snap.begin(), n_snap.end(), 0);
+        } else {
+            n_snap[seq_id] = 0;
         }
     }
 
@@ -221,9 +231,10 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
                     return false;
                 }
 
-                // pending rollback is single-use
+                // pending rollback is single-use; snapshot d is the state before the last d tokens of the last step,
+                // which wrote n_snap of them: the one before the whole step is not kept
                 const bool pending = rs_idx[seq_id] != 0;
-                if (!pending && rollback >= 1 && rollback <= (llama_pos) n_rs_seq) {
+                if (!pending && rollback >= 1 && rollback < (llama_pos) n_snap[seq_id]) {
                     set_rs_idx(seq_id, (uint32_t) rollback);
                     cell.pos = p0 - 1;
                     return true;
@@ -249,6 +260,10 @@ bool llama_memory_recurrent::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos
     }
 
     for (uint32_t i = 0; i < size; ++i) {
+        // an empty cell with a position is a shared state the last batch read: box_prepare() frees it (box_free_next)
+        if (cells[i].is_empty()) {
+            continue;
+        }
         if (cells[i].pos >= p0 && cells[i].pos < p1) {
             if (seq_id < 0) {
                 cells[i].seq_id.clear();
@@ -332,6 +347,7 @@ void llama_memory_recurrent::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id
             x_cur [seq_id_dst] = x_cur[seq_id_src];
             n_pend[seq_id_dst] = tail_src >= 0 ? n_pend[seq_id_src] : 0;
         }
+        n_snap[seq_id_dst] = tail_src >= 0 ? n_snap[seq_id_src] : 0;
     }
 }
 
@@ -342,6 +358,7 @@ void llama_memory_recurrent::seq_keep(llama_seq_id seq_id) {
         if ((llama_seq_id) i != seq_id) {
             seq_tails[i] = -1;
             box_cow[i]   = -1;
+            n_snap[i]    = 0;
 
             if (rs_replay) {
                 n_pend[i] = 0;
@@ -582,6 +599,7 @@ bool llama_memory_recurrent::prepare(const std::vector<llama_ubatch> & ubatches)
     auto org_x_cur    = x_cur;
     auto org_n_pend   = n_pend;
     auto org_n_rep    = n_rep;
+    auto org_n_snap   = n_snap;
 
     auto org_box_cow    = box_cow;
     auto org_box_x_cell = box_x_cell;
@@ -605,6 +623,7 @@ bool llama_memory_recurrent::prepare(const std::vector<llama_ubatch> & ubatches)
     x_cur    = std::move(org_x_cur);
     n_pend   = std::move(org_n_pend);
     n_rep    = std::move(org_n_rep);
+    n_snap   = std::move(org_n_snap);
 
     box_cow    = std::move(org_box_cow);
     box_x_cell = std::move(org_box_x_cell);
@@ -643,6 +662,7 @@ bool llama_memory_recurrent::box_state_take(llama_seq_id seq_id) {
     seq_tails[seq_id]  = p;
     box_cow[seq_id]    = -1;
     box_x_cell[seq_id] = -1;
+    n_snap[seq_id]     = 0;
 
     if (rs_replay) {
         x_cur [seq_id] = 0;
@@ -831,6 +851,12 @@ bool llama_memory_recurrent::find_slot(const llama_ubatch & ubatch) {
             box_x_half[s] = 0;
 
             box_x_cell[lead] = cell_id;
+
+            // the snapshots the step writes, see seq_rm(); the other seqs of the cell share them
+            n_snap[lead] = std::min(n_seq_tokens, n_rs_seq + 1);
+            for (const llama_seq_id seq_id : cell.seq_id) {
+                n_snap[seq_id] = n_snap[lead];
+            }
         }
     }
 
@@ -1071,6 +1097,13 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
 
     if (n_rs_seq != 0) {
         set_rs_idx(seq_id, 0);
+    }
+
+    // a loaded state has no snapshots of a step: it is rolled back to after its next one
+    if (seq_id < 0) {
+        std::fill(n_snap.begin(), n_snap.end(), 0);
+    } else {
+        n_snap[seq_id] = 0;
     }
 }
 

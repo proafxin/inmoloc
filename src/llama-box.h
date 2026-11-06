@@ -91,8 +91,9 @@ public:
     // a box of `bytes` bytes, or with the memory of a cache of n_tokens cells and n_states states when bytes is 0; draft
     // are the layers of an MTP draft that keeps its tokens in the blocks, empty for none; no memory is taken until alloc()
     // lid are the indexer layers on the blocks of BLOCK_CSA, pieces the rest of a state
-    llama_box(std::vector<attn_layer> attn, std::vector<recr_layer> recr, const std::vector<attn_layer> & draft, size_t bytes, uint32_t n_tokens, uint32_t n_states,
-            std::vector<attn_layer> lid = {}, std::vector<state_piece> pieces = {});
+    // with bytes 0 the box holds n_tokens tokens of n_seq_max sequences, however they are split, and n_states states
+    llama_box(std::vector<attn_layer> attn, std::vector<recr_layer> recr, const std::vector<attn_layer> & draft, size_t bytes, uint32_t n_tokens,
+            uint32_t n_seq_max, uint32_t n_states, std::vector<attn_layer> lid = {}, std::vector<state_piece> pieces = {});
 
     // takes the buffer from buft and creates the views; a dry run (no_alloc) takes none
     void alloc(ggml_backend_buffer_type_t buft, bool no_alloc);
@@ -205,6 +206,19 @@ public:
 
     uint32_t comp_blocks(llama_seq_id seq_id, block_kind kind) const { return (uint32_t) seqs.at(seq_id).comp[kind].size(); }
 
+    // seq_id lets its compressed blocks of the kind go (those other seqs share stay theirs)
+    void comp_clear(llama_seq_id seq_id, block_kind kind);
+
+    // the blocks of the kind from index i0 on that seq_id shares become blocks of its own, before it writes them: each
+    // pair (shared block, own block) of copies is a copy a graph makes, see get_blocks(); false when no block is free
+    bool comp_own(llama_seq_id seq_id, block_kind kind, uint32_t i0, std::vector<std::pair<uint32_t, uint32_t>> & copies);
+
+    // the copies of comp_own() through host memory, for a batch that runs no graph
+    void comp_copy(const std::vector<std::pair<uint32_t, uint32_t>> & copies);
+
+    // the box as rows of blocks, for the copies of comp_own() [block_bytes/4, n_blocks]
+    ggml_tensor * get_blocks() const { return t_blocks; }
+
     // the raw blocks of seq_id that hold no cell any more go back: they left the window; what an admitted request gives
     // back is charged again, it may need the blocks for its next tokens
     void seq_evict(llama_seq_id seq_id);
@@ -213,8 +227,13 @@ public:
     void add_user(const void * user, std::function<bool(uint32_t)> fn);
     void remove_user(const void * user);
 
+    // the compressed blocks of the kind of seq_id_src become those of seq_id_dst as well (its own blocks of the kind go):
+    // the rows they hold are a history the sequences share, stored once. a block is written only by a sequence that holds
+    // it alone, so the blocks from index i_own on, which dst may write (its next rows, a rollback), are copies of its own;
+    // false when no block is free for them
+    bool comp_share(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, block_kind kind, uint32_t i_own);
+
     // copies of the compressed blocks and the states of sequences, between them or to host memory (block_bytes, state_bytes)
-    void comp_copy(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, block_kind kind);
     void comp_get(llama_seq_id seq_id, block_kind kind, uint32_t i, void * data) const;
     void comp_set(llama_seq_id seq_id, block_kind kind, uint32_t i, const void * data);
     void state_copy(int32_t src, int32_t dst);
@@ -318,6 +337,8 @@ private:
     std::vector<ggml_tensor *> t_lid;
     std::vector<ggml_tensor *> t_p;
 
+    ggml_tensor * t_blocks = nullptr;
+
     ggml_tensor * t_r = nullptr;
     ggml_tensor * t_s = nullptr;
     ggml_tensor * t_x = nullptr;
@@ -352,13 +373,25 @@ private:
 
     std::vector<seq_info> seqs;
 
+    // the sequences that hold a compressed block, see comp_share() (0 for the other blocks), and the one that took it,
+    // which it is charged to (-1 once that one let it go)
+    std::vector<uint32_t>     comp_refs;
+    std::vector<llama_seq_id> comp_owner;
+
+    // a seq lets a compressed block go: free when no seq holds it any more
+    void comp_release(llama_seq_id seq_id, uint32_t b);
+
     // the output blocks the admitted requests may still take, the sum of their reserves
     uint32_t reserved = 0;
 
     uint32_t block_pop();
 
+    // the blocks charged to a seq: its raw blocks and the compressed blocks it took (a block shared with it is charged to
+    // the seq that took it)
+    uint32_t seq_n_held(llama_seq_id seq_id) const;
+
     // a block of a seq was taken: after the input of an admitted request it is output, taken from its charge
-    void block_charge(seq_info & seq);
+    void block_charge(llama_seq_id seq_id);
 
     // the blocks the first n states cover
     uint32_t states_blocks(uint32_t n) const;
@@ -367,8 +400,8 @@ private:
 };
 
 // the elastic memory of a model; filter_attn selects the attention layers, and filter_recr the recurrent ones (nullptr
-// for a model without them, which ignores the state parameters); kv_size cells and rs_size states size it when box_bytes
-// is 0; the blocks also hold the layers of box_draft, see llama_box_draft; extra_attn holds pre-built layer descriptors
+// for a model without them, which ignores the state parameters); kv_size cells of n_seq_max sequences and rs_size states
+// size it when box_bytes is 0; the blocks also hold the layers of box_draft, see llama_box_draft; extra_attn holds pre-built layer descriptors
 // for layers whose dimensions differ from the main hparams (e.g. an indexer cache with a different head size), appended
 // after the main attention layers
 std::unique_ptr<llama_box> llama_box_make(
@@ -376,6 +409,7 @@ std::unique_ptr<llama_box> llama_box_make(
                 ggml_type   type_k,
                 ggml_type   type_v,
                  uint32_t   kv_size,
+                 uint32_t   n_seq_max,
                 ggml_type   type_r,
                 ggml_type   type_s,
                  uint32_t   rs_size,

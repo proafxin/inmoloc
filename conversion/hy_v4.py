@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from typing import TYPE_CHECKING
 
-import torch
+from conversion.base import ModelBase, gguf, logger
+from conversion.deepseek import DeepseekV2Model
 
-from .base import ModelBase, gguf, logger
-from .deepseek import DeepseekV2Model
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    import torch
 
 
 def split_gate_up(weight: torch.Tensor, moe_intermediate_size: int):
@@ -44,13 +47,15 @@ class HYV4Model(DeepseekV2Model):
     merge_expert = False
 
     # tensors a "full" indexer layer must carry
-    INDEXER_SUFFIXES = frozenset({
-        "self_attn.indexer.wq_b.weight",
-        "self_attn.indexer.wk.weight",
-        "self_attn.indexer.k_norm.weight",
-        "self_attn.indexer.k_norm.bias",
-        "self_attn.indexer.weights_proj.weight",
-    })
+    INDEXER_SUFFIXES = frozenset(
+        {
+            "self_attn.indexer.wq_b.weight",
+            "self_attn.indexer.wk.weight",
+            "self_attn.indexer.k_norm.weight",
+            "self_attn.indexer.k_norm.bias",
+            "self_attn.indexer.weights_proj.weight",
+        }
+    )
 
     @classmethod
     def filter_tensors(cls, item):
@@ -62,7 +67,8 @@ class HYV4Model(DeepseekV2Model):
     def _check_indexer_hparams(self):
         for key in ("index_n_heads", "index_head_dim", "index_topk"):
             if key not in self.hparams:
-                raise ValueError(f"HY_V4 has DSA layers but no {key}")
+                msg = f"HY_V4 has DSA layers but no {key}"
+                raise ValueError(msg)
 
     def indexer_is_full(self) -> list[bool] | None:
         """Per-layer indexer ownership, or None when the checkpoint has no DSA.
@@ -83,23 +89,26 @@ class HYV4Model(DeepseekV2Model):
             if not any(t in sparse for t in layer_types):
                 return None
             if len(layer_types) < n_layer:
-                raise ValueError(f"HY_V4 layer_types has {len(layer_types)} entries, need {n_layer}")
+                msg = f"HY_V4 layer_types has {len(layer_types)} entries, need {n_layer}"
+                raise ValueError(msg)
             self._check_indexer_hparams()
             return [t in sparse for t in layer_types[:n_layer]]
 
         self._check_indexer_hparams()
 
         if len(indexer_types) < n_layer:
-            raise ValueError(f"HY_V4 indexer_types has {len(indexer_types)} entries, need {n_layer}")
-        unknown = {t for t in indexer_types[:n_layer]} - {"full", "shared"}
+            msg = f"HY_V4 indexer_types has {len(indexer_types)} entries, need {n_layer}"
+            raise ValueError(msg)
+        unknown = set(indexer_types[:n_layer]) - {"full", "shared"}
         if unknown:
-            raise ValueError(f"HY_V4 unknown indexer_types values: {sorted(unknown)}")
+            msg = f"HY_V4 unknown indexer_types values: {sorted(unknown)}"
+            raise ValueError(msg)
         is_full = [t == "full" for t in indexer_types[:n_layer]]
         if is_full and not is_full[0]:
             raise ValueError("HY_V4 layer 0 must be indexer_types 'full' (nothing precedes it to share)")
         return is_full
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         hparams = self.hparams
 
         # HY4 has n_group == topk_group == 1 (no group routing). Drop the keys so the base does
@@ -126,10 +135,11 @@ class HYV4Model(DeepseekV2Model):
                 raise NotImplementedError("HY_V4 converter expects a contiguous leading dense block")
             derived = lead
         if explicit is not None and derived is not None and explicit != derived:
-            raise ValueError(
+            msg = (
                 f"HY_V4 first_k_dense_replace ({explicit}) disagrees with mlp_layer_types "
                 f"leading-dense count ({derived})"
             )
+            raise ValueError(msg)
         if explicit is None:
             if derived is None:
                 raise ValueError("HY_V4 needs first_k_dense_replace or mlp_layer_types to place dense layers")
@@ -163,8 +173,11 @@ class HYV4Model(DeepseekV2Model):
             self.gguf_writer.add_indexer_types(is_full)
             logger.info(
                 "HY_V4 DSA: %d/%d layers own an indexer (top_k=%d, n_heads=%d, head_dim=%d)",
-                sum(is_full), len(is_full), hparams["index_topk"],
-                hparams["index_n_heads"], hparams["index_head_dim"],
+                sum(is_full),
+                len(is_full),
+                hparams["index_topk"],
+                hparams["index_n_heads"],
+                hparams["index_head_dim"],
             )
 
         if hparams.get("num_nextn_predict_layers", 0):
@@ -174,7 +187,7 @@ class HYV4Model(DeepseekV2Model):
                 hparams["num_nextn_predict_layers"],
             )
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         # Hy4-preview for some reason has num_key_value_heads equal to 8, so override it here
         # without this conversion/deepseek.py fails on assert
         self.hparams["num_key_value_heads"] = self.hparams["num_attention_heads"]
@@ -190,15 +203,14 @@ class HYV4Model(DeepseekV2Model):
             for il, expect_full in enumerate(is_full):
                 seen = present.get(il, set())
                 if expect_full and seen != self.INDEXER_SUFFIXES:
-                    raise ValueError(
+                    msg = (
                         f"HY_V4 layer {il} is indexer_types 'full' but is missing indexer tensors: "
                         f"{sorted(self.INDEXER_SUFFIXES - seen)}"
                     )
+                    raise ValueError(msg)
                 if not expect_full and seen:
-                    raise ValueError(
-                        f"HY_V4 layer {il} is indexer_types 'shared' but carries indexer tensors: "
-                        f"{sorted(seen)}"
-                    )
+                    msg = f"HY_V4 layer {il} is indexer_types 'shared' but carries indexer tensors: {sorted(seen)}"
+                    raise ValueError(msg)
 
         super().prepare_tensors()
 
@@ -218,7 +230,9 @@ class HYV4Model(DeepseekV2Model):
             return gguf.GGMLQuantizationType.F32
         return super().tensor_force_quant(name, new_name, bid, n_dims)
 
-    def modify_tensors(self, data_torch: torch.Tensor, name: str, bid: int | None) -> Iterable[tuple[str, torch.Tensor]]:
+    def modify_tensors(
+        self, data_torch: torch.Tensor, name: str, bid: int | None
+    ) -> Iterable[tuple[str, torch.Tensor]]:
         hparams = self.hparams
         moe_inter = hparams["moe_intermediate_size"]
 
@@ -228,11 +242,11 @@ class HYV4Model(DeepseekV2Model):
         if name.endswith("mlp.experts.gate_up_proj"):
             gate, up = split_gate_up(data_torch, moe_inter)
             yield from super().modify_tensors(gate, tn(gguf.MODEL_TENSOR.FFN_GATE_EXP, bid), bid)
-            yield from super().modify_tensors(up,   tn(gguf.MODEL_TENSOR.FFN_UP_EXP,   bid), bid)
+            yield from super().modify_tensors(up, tn(gguf.MODEL_TENSOR.FFN_UP_EXP, bid), bid)
             return
 
         # add .weight suffixes
-        if name.endswith("mlp.experts.down_proj") or name.endswith(".self_attn.learnable_sink_param"):
+        if name.endswith(("mlp.experts.down_proj", ".self_attn.learnable_sink_param")):
             name += ".weight"
 
         if re.search(r"\.hc_head\.hc_head_(?:fn|base|scale)$", name):

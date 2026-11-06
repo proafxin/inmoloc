@@ -154,8 +154,9 @@ bool llama_memory_hybrid_iswa::get_can_shift() const {
 }
 
 void llama_memory_hybrid_iswa::clear(bool data) {
-    mem_attn->clear(data);
+    // the recurrent states go back to the box first: the attention caches own the box and clearing them resets it
     mem_recr->clear(data);
+    mem_attn->clear(data);
 }
 
 bool llama_memory_hybrid_iswa::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {

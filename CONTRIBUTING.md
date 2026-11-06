@@ -16,7 +16,7 @@ Issues and pull requests are welcome at https://github.com/proafxin/inmoloc.
 - Test what you change:
   - CUDA kernels: `test-backend-ops` for the ops you touched, e.g. `test-backend-ops -o FLASH_ATTN_EXT -b CUDA0`
   - unit tests: `ctest --test-dir build -L main`; the recurrent state rollback also with `test-recurrent-state-rollback --rs-rollback replay` (see `.github/workflows/ci.yml`)
-  - server: the pytest suite in `tools/server/tests` (`./tools/server/tests/tests.sh`, see its README), which includes preemption and prefix sharing; `scripts/bench-server-concurrency.py` for throughput and latency
+  - server: the pytest suite in `tests/server` (`./tests/server/tests.sh`, see its README), which includes preemption and prefix sharing; `scripts/bench-server-concurrency.py` for throughput and latency
   - KV cache quality at long context: `scripts/kv-quality.py`, against a server with the reference cache type and one with the type under test
 - A change to serving speed needs numbers: compare with and without it on the same workload, alternating runs on fresh servers, with nothing else using the GPU.
 

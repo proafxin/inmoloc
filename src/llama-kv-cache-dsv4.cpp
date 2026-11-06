@@ -23,21 +23,32 @@ static constexpr uint32_t DSV4_STATE_VERSION       = 1;
 static constexpr uint32_t DSV4_STATE_MODE_FULL     = 0;
 static constexpr uint32_t DSV4_STATE_MODE_PARTIAL  = 1;
 
-static bool dsv4_batch_has_coupled(const llama_batch & batch) {
+// whether a sequence has tokens of different sets of sequences in the batch: a token of several sequences is decoded
+// once for all of them, and their tokens of their own come in another batch, see llama_kv_cache_dsv4::box_prepare()
+static bool dsv4_batch_has_mixed(const llama_batch & batch) {
     if (!batch.n_seq_id) {
         return false;
     }
 
+    std::map<llama_seq_id, std::vector<llama_seq_id>> seq_sets;
+
     for (int32_t i = 0; i < batch.n_tokens; ++i) {
-        if (batch.n_seq_id[i] > 1) {
-            return true;
+        // in order: the first one leads, see dsv4_build_comp_plan()
+        const std::vector<llama_seq_id> set(batch.seq_id[i], batch.seq_id[i] + batch.n_seq_id[i]);
+
+        for (const llama_seq_id seq_id : set) {
+            const auto [it, added] = seq_sets.emplace(seq_id, set);
+            if (!added && it->second != set) {
+                return true;
+            }
         }
     }
 
     return false;
 }
 
-// a token belongs to one sequence: the elastic memory refuses tokens of several, see llama_kv_cache_dsv4::init_batch()
+// a token of several sequences: the first one (the lead) writes the compressed rows, which the others share, and each one
+// keeps its state, see llama_kv_cache_dsv4::box_prepare()
 static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
         const llama_ubatch & ubatch,
         uint32_t ratio,
@@ -137,7 +148,8 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
                 it->pos = pos;
             }
 
-            if ((pos + 1) % ratio != 0) {
+            // the others share the rows of the lead
+            if (s > 0 || (pos + 1) % ratio != 0) {
                 continue;
             }
 
@@ -189,6 +201,21 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
 
         for (uint32_t s = 0; s < ubatch.n_seqs_unq; ++s) {
             const llama_seq_id seq_id = ubatch.seq_id_unq[s];
+
+            // the last token of the seq: the row after it is the one no token sees yet, and no block of the ubatch
+            // writes it (the row of the first token is the one its block writes)
+            uint32_t i = ubatch.n_tokens;
+            for (uint32_t j = 0; j < ubatch.n_tokens; ++j) {
+                if (ubatch.pos[j] >= 0 && ubatch.seq_id[j][0] == seq_id && (i == ubatch.n_tokens || ubatch.pos[j] > ubatch.pos[i])) {
+                    i = j;
+                }
+            }
+
+            // the sharers write no rows
+            if (i == ubatch.n_tokens) {
+                continue;
+            }
+
             const uint32_t n_writes = state_write_counts[seq_id];
             if (n_writes >= n_blocks) {
                 continue;
@@ -197,11 +224,6 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
                 throw std::runtime_error("DSV4 CSA sequence positions are not contiguous");
             }
 
-            uint32_t i = 0;
-            while (i < ubatch.n_tokens && (ubatch.pos[i] < 0 || ubatch.seq_id[i][0] != seq_id)) {
-                ++i;
-            }
-            assert(i < ubatch.n_tokens);
             append_dummy_block(seq_id, i);
         }
     }
@@ -291,9 +313,10 @@ static llama_kv_cache_dsv4_context::comp_plan dsv4_build_comp_plan(
                 plan.state_persist_dst_idxs.push_back(state->box_row(st, 0, r));
             }
 
+            // the tokens of the sequence, those it shares included
             std::vector<uint32_t> token_idxs;
             for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
-                if (ubatch.seq_id[i][0] == seq_id) {
+                if (std::find(ubatch.seq_id[i], ubatch.seq_id[i] + ubatch.n_seq_id[i], seq_id) != ubatch.seq_id[i] + ubatch.n_seq_id[i]) {
                     token_idxs.push_back(i);
                 }
             }
@@ -570,7 +593,7 @@ llama_kv_cache_dsv4::llama_kv_cache_dsv4(
         llama_box_draft draft = box_draft;
         draft.hparams = &hparams_draft.hparams_draft;
 
-        box = llama_box_make(model, type_k, type_v, kv_size + n_seq_max*n_comp*n_block, GGML_TYPE_F32, GGML_TYPE_F32, n_seq_max, 0, false, offload,
+        box = llama_box_make(model, type_k, type_v, kv_size + n_seq_max*n_comp*n_block, n_seq_max, GGML_TYPE_F32, GGML_TYPE_F32, n_seq_max, 0, false, offload,
                 box_bytes, box_deferred, draft,
                 [&](int32_t il) { return filter_raw(il);
 
@@ -664,8 +687,9 @@ llama_memory_context_ptr llama_kv_cache_dsv4::init_batch(
             bool embd_all) {
     GGML_UNUSED(embd_all);
 
-    if (dsv4_batch_has_coupled(balloc.get_batch())) {
-        LLAMA_LOG_ERROR("%s: the elastic memory has no tokens of several DSV4 sequences, copy the sequence instead\n", __func__);
+    if (dsv4_batch_has_mixed(balloc.get_batch())) {
+        LLAMA_LOG_ERROR("%s: a DSV4 sequence has tokens it shares with other sequences and tokens of its own in one batch, "
+                "decode them in separate batches\n", __func__);
         return std::make_unique<llama_kv_cache_dsv4_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
     }
 
@@ -685,18 +709,24 @@ llama_memory_context_ptr llama_kv_cache_dsv4::init_batch(
         return std::make_unique<llama_kv_cache_dsv4_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
     }
 
-    if (!box_prepare(ubatches)) {
+    // the blocks box_prepare() made own blocks of hold the rows before the batch: no graph copies them
+    const auto failed = [this]() {
+        box->comp_copy(take_block_copies());
         return std::make_unique<llama_kv_cache_dsv4_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+    };
+
+    if (!box_prepare(ubatches)) {
+        return failed();
     }
 
     auto sinfos_base = kv_raw->get_base()->prepare(ubatches);
     if (sinfos_base.empty()) {
-        return std::make_unique<llama_kv_cache_dsv4_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+        return failed();
     }
 
     auto sinfos_swa = kv_raw->get_swa()->prepare(ubatches);
     if (sinfos_swa.empty()) {
-        return std::make_unique<llama_kv_cache_dsv4_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
+        return failed();
     }
 
     return std::make_unique<llama_kv_cache_dsv4_context>(
@@ -730,6 +760,9 @@ void llama_kv_cache_dsv4::clear(bool data) {
 bool llama_kv_cache_dsv4::box_state_take(llama_seq_id seq_id) {
     if (seq_states[seq_id] < 0) {
         seq_states[seq_id] = box->state_alloc();
+
+        LLAMA_LOG_DEBUG("%s: seq %d takes state %d, %u of %u blocks free\n", __func__, seq_id, seq_states[seq_id], box->n_free(),
+                box->get_n_blocks());
     }
 
     return seq_states[seq_id] >= 0;
@@ -738,7 +771,10 @@ bool llama_kv_cache_dsv4::box_state_take(llama_seq_id seq_id) {
 bool llama_kv_cache_dsv4::box_prepare(const std::vector<llama_ubatch> & ubatches) {
     constexpr uint32_t n_block = llama_box::n_block_tokens;
 
+    // the leads, which write the compressed rows of their tokens, and the sequences that share them, see
+    // dsv4_batch_has_mixed()
     std::map<llama_seq_id, std::pair<llama_pos, llama_pos>> seqs;
+    std::map<llama_seq_id, llama_seq_id> sharers;
 
     for (const auto & ubatch : ubatches) {
         for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
@@ -748,13 +784,34 @@ bool llama_kv_cache_dsv4::box_prepare(const std::vector<llama_ubatch> & ubatches
 
             it->second.first  = std::min(it->second.first,  ubatch.pos[i]);
             it->second.second = std::max(it->second.second, ubatch.pos[i]);
+
+            for (int32_t s = 1; s < ubatch.n_seq_id[i]; ++s) {
+                sharers[ubatch.seq_id[i][s]] = seq_id;
+            }
         }
     }
 
     const bool has_csa = !csa_state->get_ils().empty();
     const bool has_hca = !hca_state->get_ils().empty();
 
-    for (const auto & [seq_id, range] : seqs) {
+    std::vector<llama_box::block_kind> kinds;
+    if (has_csa) {
+        kinds.push_back(llama_box::BLOCK_CSA);
+    }
+    if (has_hca) {
+        kinds.push_back(llama_box::BLOCK_HCA);
+    }
+
+    block_copies.clear();
+
+    // the sharers take the rows of their lead: their own go first, so the lead copies no block it shares with them only
+    for (const auto & [seq_id, lead] : sharers) {
+        for (const auto kind : kinds) {
+            box->comp_clear(seq_id, kind);
+        }
+    }
+
+    const auto take = [&](llama_seq_id seq_id, std::pair<llama_pos, llama_pos> range) {
         if (!box_state_take(seq_id)) {
             LLAMA_LOG_WARN("%s: no room in the box for the state of seq %d\n", __func__, seq_id);
             return false;
@@ -767,15 +824,40 @@ bool llama_kv_cache_dsv4::box_prepare(const std::vector<llama_ubatch> & ubatches
             box->seq_evict(seq_id);
         }
 
+        return true;
+    };
+
+    for (const auto & [seq_id, range] : seqs) {
+        if (!take(seq_id, range)) {
+            return false;
+        }
+
         // the rows of the batch and the next one, which stands for a row not written yet, see dsv4_build_comp_plan()
         const uint32_t n_next = (uint32_t) range.second + 1;
-        const uint32_t n_csa  = n_next/(DSV4_CSA_RATIO*n_block) + 1;
-        const uint32_t n_hca  = n_next/(DSV4_HCA_RATIO*n_block) + 1;
 
-        if ((has_csa && !box->comp_take(seq_id, llama_box::BLOCK_CSA, n_csa)) ||
-            (has_hca && !box->comp_take(seq_id, llama_box::BLOCK_HCA, n_hca))) {
-            LLAMA_LOG_WARN("%s: no free block in the box for the compressed rows of seq %d\n", __func__, seq_id);
+        for (const auto kind : kinds) {
+            const uint32_t ratio = kind == llama_box::BLOCK_CSA ? DSV4_CSA_RATIO : DSV4_HCA_RATIO;
+
+            // the blocks the batch writes, which other sequences still hold, become the lead's own: the graph of the
+            // first ubatch copies them, see llama_kv_cache_dsv4_context::get_block_copies()
+            if (!box->comp_own(seq_id, kind, ((uint32_t) range.first/ratio)/n_block, block_copies) ||
+                !box->comp_take(seq_id, kind, n_next/(ratio*n_block) + 1)) {
+                LLAMA_LOG_WARN("%s: no free block in the box for the compressed rows of seq %d\n", __func__, seq_id);
+                return false;
+            }
+        }
+    }
+
+    for (const auto & [seq_id, lead] : sharers) {
+        if (!take(seq_id, seqs.at(lead))) {
             return false;
+        }
+
+        for (const auto kind : kinds) {
+            if (!box->comp_share(lead, seq_id, kind, box->comp_blocks(lead, kind))) {
+                LLAMA_LOG_WARN("%s: no free block in the box for the compressed rows of seq %d\n", __func__, seq_id);
+                return false;
+            }
         }
     }
 
@@ -809,12 +891,20 @@ void llama_kv_cache_dsv4::box_finalized() {
 }
 
 void llama_kv_cache_dsv4::box_seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst) {
+    constexpr uint32_t n_block = llama_box::n_block_tokens;
+
+    // the compressed rows of the source are a history both sequences have: the blocks are shared, except those holding
+    // the rows the destination may still write, its next ones and those a rollback rewrites
+    const llama_pos n_pos = kv_raw->seq_pos_max(seq_id_src) + 1;
+
     for (const auto kind : { llama_box::BLOCK_CSA, llama_box::BLOCK_HCA }) {
-        if (!box->comp_take(seq_id_dst, kind, box->comp_blocks(seq_id_src, kind))) {
+        const uint32_t ratio = kind == llama_box::BLOCK_CSA ? DSV4_CSA_RATIO : DSV4_HCA_RATIO;
+
+        const uint32_t r_write = (uint32_t) std::max<llama_pos>(0, n_pos - (llama_pos) n_rs_seq)/ratio;
+
+        if (!box->comp_share(seq_id_src, seq_id_dst, kind, r_write/n_block)) {
             throw std::runtime_error("no free block in the box to copy a DSV4 sequence");
         }
-
-        box->comp_copy(seq_id_src, seq_id_dst, kind);
     }
 
     if (!box_state_take(seq_id_dst)) {
@@ -938,8 +1028,10 @@ void llama_kv_cache_dsv4::state_write(llama_io_write_i & io, llama_seq_id seq_id
     io.write(&version, sizeof(version));
     io.write(&mode,    sizeof(mode));
 
+    LLAMA_LOG_DEBUG("%s: seq %d: raw cells at byte %zu\n", __func__, seq_id, io.n_bytes());
     kv_raw->state_write(io, seq_id, flags);
 
+    LLAMA_LOG_DEBUG("%s: seq %d: compressed rows and state at byte %zu\n", __func__, seq_id, io.n_bytes());
     box_state_write(io, seq_id, partial_only);
 }
 
@@ -1044,6 +1136,7 @@ void llama_kv_cache_dsv4::box_state_write(llama_io_write_i & io, llama_seq_id se
 
         const uint32_t n = box->comp_blocks(seq_id, kind);
 
+        LLAMA_LOG_DEBUG("%s: seq %d: %u compressed blocks of kind %d at byte %zu\n", __func__, seq_id, n, (int) kind, io.n_bytes());
         io.write(&n, sizeof(n));
 
         std::vector<uint8_t> data(box->get_block_bytes());
@@ -1055,6 +1148,7 @@ void llama_kv_cache_dsv4::box_state_write(llama_io_write_i & io, llama_seq_id se
 
     std::vector<uint8_t> data(box->get_state_bytes());
     box->state_get(st, data.data());
+    LLAMA_LOG_DEBUG("%s: seq %d: state %d of %zu bytes at byte %zu\n", __func__, seq_id, st, data.size(), io.n_bytes());
     io.write(data.data(), data.size());
 
     const uint32_t rs = rs_idx[seq_id];
@@ -1081,6 +1175,9 @@ void llama_kv_cache_dsv4::box_state_read(llama_io_read_i & io, llama_seq_id seq_
 
         uint32_t n;
         io.read(&n, sizeof(n));
+
+        // the restored rows go to blocks of the seq alone: a block it shares holds the history of other seqs too
+        box->comp_clear(seq_id, kind);
 
         if (!box->comp_take(seq_id, kind, n)) {
             throw std::runtime_error("no free block in the box for a DSV4 sequence");
@@ -1348,6 +1445,14 @@ llama_kv_cache_dsv4_context::llama_kv_cache_dsv4_context(
     lid_state(kv->get_lid_state()),
     status(ctx_raw->get_status()) {
     kv->reset_rs_idx_for_ubatches(this->ubatches);
+
+    block_copies = kv->take_block_copies();
+}
+
+const std::vector<std::pair<uint32_t, uint32_t>> & llama_kv_cache_dsv4_context::get_block_copies() const {
+    static const std::vector<std::pair<uint32_t, uint32_t>> none;
+
+    return i_next == 0 ? block_copies : none;
 }
 
 llama_kv_cache_dsv4_context::~llama_kv_cache_dsv4_context() = default;

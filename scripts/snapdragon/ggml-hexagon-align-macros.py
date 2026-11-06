@@ -18,20 +18,21 @@ import argparse
 import difflib
 import logging
 import os
+import pathlib
 import re
 import sys
 from collections import Counter
-from typing import List, Optional, Tuple, NamedTuple
+from typing import NamedTuple
 
 logger = logging.getLogger("ggml-hexagon-align-macros")
 
 
 class MacroLine(NamedTuple):
-    line_num: int       # 1-indexed
-    raw: str            # Original line including newline
-    content: str        # Line content before trailing backslash (stripped of trailing whitespace)
-    bs_col: Optional[int]  # 1-indexed column of backslash, or None if last line has no backslash
-    trailing_ws: bool   # True if whitespace existed after the backslash
+    line_num: int  # 1-indexed
+    raw: str  # Original line including newline
+    content: str  # Line content before trailing backslash (stripped of trailing whitespace)
+    bs_col: int | None  # 1-indexed column of backslash, or None if last line has no backslash
+    trailing_ws: bool  # True if whitespace existed after the backslash
 
 
 class MacroDef(NamedTuple):
@@ -39,19 +40,19 @@ class MacroDef(NamedTuple):
     filepath: str
     start_line: int
     end_line: int
-    lines: List[MacroLine]
+    lines: list[MacroLine]
 
 
-def parse_macros(filepath: str) -> List[MacroDef]:
+def parse_macros(filepath: str) -> list[MacroDef]:
     """Extract all multiline macros from a C/C++ source file."""
     try:
-        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+        with pathlib.Path(filepath).open(encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
     except Exception as e:
-        logger.error(f"Error reading {filepath}: {e}")
+        logger.exception("Error reading %s: %s", filepath, e)
         return []
 
-    macros: List[MacroDef] = []
+    macros: list[MacroDef] = []
     i = 0
     n = len(lines)
 
@@ -61,7 +62,7 @@ def parse_macros(filepath: str) -> List[MacroDef]:
         if m:
             macro_name = m.group(1)
             macro_start = i + 1
-            macro_lines: List[MacroLine] = []
+            macro_lines: list[MacroLine] = []
             cur = i
 
             while cur < n:
@@ -77,41 +78,38 @@ def parse_macros(filepath: str) -> List[MacroDef]:
                     content = l_rstrip[:bs_index].rstrip()
                     # 1-indexed column of the backslash
                     bs_col = bs_index + 1
-                    macro_lines.append(MacroLine(
-                        line_num=cur + 1,
-                        raw=l_raw,
-                        content=content,
-                        bs_col=bs_col,
-                        trailing_ws=has_trailing_ws
-                    ))
+                    macro_lines.append(
+                        MacroLine(
+                            line_num=cur + 1, raw=l_raw, content=content, bs_col=bs_col, trailing_ws=has_trailing_ws
+                        )
+                    )
                     cur += 1
+                # Line does not end with backslash
+                elif cur == i:
+                    # Single-line macro, not multiline
+                    break
                 else:
-                    # Line does not end with backslash
-                    if cur == i:
-                        # Single-line macro, not multiline
-                        break
-                    else:
-                        # Final line of a multiline macro
-                        macro_lines.append(MacroLine(
-                            line_num=cur + 1,
-                            raw=l_raw,
-                            content=l_rstrip.rstrip(),
-                            bs_col=None,
-                            trailing_ws=False
-                        ))
-                        break
+                    # Final line of a multiline macro
+                    macro_lines.append(
+                        MacroLine(
+                            line_num=cur + 1, raw=l_raw, content=l_rstrip.rstrip(), bs_col=None, trailing_ws=False
+                        )
+                    )
+                    break
 
             # Only record if it is a multiline macro (has at least one continuation line)
             continuation_lines = [ml for ml in macro_lines if ml.bs_col is not None]
             if continuation_lines:
                 macro_end = macro_lines[-1].line_num
-                macros.append(MacroDef(
-                    name=macro_name,
-                    filepath=filepath,
-                    start_line=macro_start,
-                    end_line=macro_end,
-                    lines=macro_lines
-                ))
+                macros.append(
+                    MacroDef(
+                        name=macro_name,
+                        filepath=filepath,
+                        start_line=macro_start,
+                        end_line=macro_end,
+                        lines=macro_lines,
+                    )
+                )
             i = cur
         i += 1
 
@@ -127,7 +125,7 @@ def is_macro_aligned(macro: MacroDef) -> bool:
     return len(set(bs_cols)) == 1 and not has_trailing_ws
 
 
-def compute_target_column(macro: MacroDef, mode: str, pad: int, target_col: Optional[int]) -> int:
+def compute_target_column(macro: MacroDef, mode: str, pad: int, target_col: int | None) -> int:
     """Determine the column where backslashes should be aligned."""
     max_content_len = max(len(ml.content) for ml in macro.lines)
     min_needed = max_content_len + pad
@@ -141,41 +139,39 @@ def compute_target_column(macro: MacroDef, mode: str, pad: int, target_col: Opti
 
     if mode == "min":
         return min_needed
-    elif mode == "max":
-        return max(max(bs_cols), min_needed)
-    elif mode == "majority":
+    if mode == "max":
+        return max(*bs_cols, min_needed)
+    if mode == "majority":
         counts = Counter(bs_cols)
         # Sort by frequency descending, then by column descending
-        majority_col = sorted(counts.items(), key=lambda x: (-x[1], -x[0]))[0][0]
+        majority_col = min(counts.items(), key=lambda x: (-x[1], -x[0]))[0]
         return max(majority_col, min_needed)
-    else:
-        return min_needed
+    return min_needed
 
 
-def realign_macro_lines(macro: MacroDef, target_col: int) -> List[str]:
+def realign_macro_lines(macro: MacroDef, target_col: int) -> list[str]:
     """Format macro lines with backslashes aligned at target_col."""
-    new_lines: List[str] = []
+    new_lines: list[str] = []
     for ml in macro.lines:
         nl = "\r\n" if ml.raw.endswith("\r\n") else "\n"
         if ml.bs_col is None:
             # Last line without backslash
             new_lines.append(ml.raw)
+        elif not ml.content:
+            spaces = " " * (target_col - 1)
+            new_lines.append(f"{spaces}\\{nl}")
         else:
-            if not ml.content:
-                spaces = " " * (target_col - 1)
-                new_lines.append(f"{spaces}\\{nl}")
-            else:
-                spaces_needed = max(1, target_col - len(ml.content) - 1)
-                new_lines.append(f"{ml.content}{' ' * spaces_needed}\\{nl}")
+            spaces_needed = max(1, target_col - len(ml.content) - 1)
+            new_lines.append(f"{ml.content}{' ' * spaces_needed}\\{nl}")
     return new_lines
 
 
-def process_file(filepath: str, args: argparse.Namespace) -> Tuple[int, int, Optional[str]]:
+def process_file(filepath: str, args: argparse.Namespace) -> tuple[int, int, str | None]:
     macros = parse_macros(filepath)
     if not macros:
         return 0, 0, None
 
-    with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+    with pathlib.Path(filepath).open(encoding="utf-8", errors="replace") as f:
         file_lines = f.readlines()
 
     misaligned_count = 0
@@ -194,15 +190,17 @@ def process_file(filepath: str, args: argparse.Namespace) -> Tuple[int, int, Opt
 
             if not args.quiet:
                 logger.info(f"{filepath}:{macro.start_line}-{macro.end_line} [{macro.name}]")
-                logger.info(f"  Max content width: {max_content}, Min needed column (+{args.pad}): {max_content + args.pad}")
+                logger.info(
+                    f"  Max content width: {max_content}, Min needed column (+{args.pad}): {max_content + args.pad}"
+                )
                 logger.info(f"  Current backslash columns: {dict(sorted(col_counts.items()))}")
                 trailing_ws_lines = [ml.line_num for ml in macro.lines if ml.trailing_ws]
                 if trailing_ws_lines:
-                    logger.warning(f"  Warning: Trailing whitespace after backslash on line(s): {trailing_ws_lines}")
+                    logger.warning("  Warning: Trailing whitespace after backslash on line(s): %s", trailing_ws_lines)
 
             target_col = compute_target_column(macro, args.mode, args.pad, args.target_col)
             if not args.quiet:
-                logger.info(f"  -> Target alignment column: {target_col}")
+                logger.info("  -> Target alignment column: %s", target_col)
 
             realigned = realign_macro_lines(macro, target_col)
 
@@ -215,30 +213,26 @@ def process_file(filepath: str, args: argparse.Namespace) -> Tuple[int, int, Opt
     diff_text = None
     if modified:
         diff = difflib.unified_diff(
-            file_lines,
-            new_file_lines,
-            fromfile=f"a/{filepath}",
-            tofile=f"b/{filepath}",
-            lineterm=""
+            file_lines, new_file_lines, fromfile=f"a/{filepath}", tofile=f"b/{filepath}", lineterm=""
         )
         diff_text = "\n".join(diff)
 
         if args.fix:
-            with open(filepath, "w", encoding="utf-8") as f:
+            with pathlib.Path(filepath).open("w", encoding="utf-8") as f:
                 f.writelines(new_file_lines)
             if not args.quiet:
-                logger.info(f"  [FIXED] Updated {filepath}")
+                logger.info("  [FIXED] Updated %s", filepath)
 
     return len(macros), misaligned_count, diff_text
 
 
-def find_source_files(paths: List[str]) -> List[str]:
+def find_source_files(paths: list[str]) -> list[str]:
     extensions = {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".inl"}
-    result: List[str] = []
+    result: list[str] = []
     for p in paths:
-        if os.path.isfile(p):
+        if pathlib.Path(p).is_file():
             result.append(p)
-        elif os.path.isdir(p):
+        elif pathlib.Path(p).is_dir():
             for root, _, files in os.walk(p):
                 for file in sorted(files):
                     _, ext = os.path.splitext(file)
@@ -247,20 +241,24 @@ def find_source_files(paths: List[str]) -> List[str]:
     return sorted(result)
 
 
-def main():
+def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    parser = argparse.ArgumentParser(
-        description="Inspect and align backslashes in multiline C/C++ macros."
-    )
+    parser = argparse.ArgumentParser(description="Inspect and align backslashes in multiline C/C++ macros.")
     parser.add_argument("paths", nargs="*", default=["."], help="Files or directories to scan (default: current dir)")
     parser.add_argument("--fix", action="store_true", help="Fix misaligned macros in-place")
     parser.add_argument("--diff", action="store_true", help="Display unified diff of suggested fixes")
     parser.add_argument("--check", action="store_true", help="Exit with code 1 if misaligned macros exist")
-    parser.add_argument("--mode", choices=["min", "max", "majority"], default="min",
-                        help="Alignment mode: 'min' (max_len + pad), 'max' (max existing col), 'majority' (dominant col)")
+    parser.add_argument(
+        "--mode",
+        choices=["min", "max", "majority"],
+        default="min",
+        help="Alignment mode: 'min' (max_len + pad), 'max' (max existing col), 'majority' (dominant col)",
+    )
     parser.add_argument("--pad", type=int, default=2, help="Spaces between longest line and backslash (default: 2)")
     parser.add_argument("--target-col", type=int, default=None, help="Force alignment to an exact column")
-    parser.add_argument("--all", action="store_true", help="Realign all macros even if already aligned (default: only misaligned)")
+    parser.add_argument(
+        "--all", action="store_true", help="Realign all macros even if already aligned (default: only misaligned)"
+    )
     parser.add_argument("-q", "--quiet", action="store_true", help="Only output errors and diffs/summary")
 
     args = parser.parse_args()
@@ -272,7 +270,7 @@ def main():
 
     total_macros = 0
     total_misaligned = 0
-    diffs: List[str] = []
+    diffs: list[str] = []
 
     for filepath in files:
         num_macros, num_misaligned, diff_text = process_file(filepath, args)
@@ -286,7 +284,9 @@ def main():
         for d in diffs:
             logger.info(d)
 
-    logger.info(f"\nSummary: scanned {len(files)} files, {total_macros} multiline macros, {total_misaligned} misaligned.")
+    logger.info(
+        f"\nSummary: scanned {len(files)} files, {total_macros} multiline macros, {total_misaligned} misaligned."
+    )
 
     if args.check and total_misaligned > 0:
         sys.exit(1)

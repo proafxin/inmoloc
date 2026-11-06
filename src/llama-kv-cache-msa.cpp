@@ -42,7 +42,7 @@ llama_kv_cache_msa::llama_kv_cache_msa(
         }
     }
 
-    std::shared_ptr<llama_box> box_own = llama_box_make(model, type_k, type_v, kv_size, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
+    std::shared_ptr<llama_box> box_own = llama_box_make(model, type_k, type_v, kv_size, n_seq_max, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
             box_bytes, box_deferred, llama_box_draft{},
             [&](int32_t il) { return filter == nullptr || filter(il); }, nullptr, std::move(layers_idx));
 
@@ -429,4 +429,3 @@ void llama_kv_cache_msa_context::set_input_box(ggml_tensor * rows, ggml_tensor *
         d_base[2*i + 1] = 0;
     }
 }
-

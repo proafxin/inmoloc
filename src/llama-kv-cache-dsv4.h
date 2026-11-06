@@ -156,7 +156,13 @@ public:
     const std::vector<uint32_t> & get_rs_idx() const;
     void reset_rs_idx_for_ubatches(const std::vector<llama_ubatch> & ubatches);
 
+    // the copies of shared compressed blocks the last box_prepare() made own blocks of: the first graph of the batch makes
+    // them, see llama_box::comp_own()
+    std::vector<std::pair<uint32_t, uint32_t>> take_block_copies() { return std::move(block_copies); }
+
 private:
+    std::vector<std::pair<uint32_t, uint32_t>> block_copies;
+
     llama_hparams hparams_raw;
     llama_hparams hparams_csa;
     llama_hparams hparams_hca;
@@ -421,11 +427,17 @@ public:
     // be reused; a reserve takes the most a sequence holds
     int64_t get_n_win_lid(const llama_ubatch & ubatch) const;
 
+    // the copies of shared compressed blocks (block, own block) the graph of the ubatch makes before it writes, the first
+    // one of the batch only, see llama_kv_cache_dsv4::take_block_copies()
+    const std::vector<std::pair<uint32_t, uint32_t>> & get_block_copies() const;
+
 private:
     llama_kv_cache_dsv4 * kv_dsv4 = nullptr;
     llama_box * kv_box = nullptr;
 
     size_t i_next = 0;
+
+    std::vector<std::pair<uint32_t, uint32_t>> block_copies;
 
     std::vector<llama_ubatch> ubatches;
 

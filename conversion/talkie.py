@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import LazyTorchTensor, ModelBase, TextModel, gguf
+from conversion.base import LazyTorchTensor, ModelBase, TextModel, gguf
 
 
 @ModelBase.register("TalkieForCausalLM")
@@ -15,7 +17,7 @@ from .base import LazyTorchTensor, ModelBase, TextModel, gguf
 class TalkieModel(TextModel):
     model_arch = gguf.MODEL_ARCH.TALKIE
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         # Talkie used F.rms_norm without an explicit eps
         self.gguf_writer.add_layer_norm_rms_eps(torch.finfo(torch.float32).eps)
@@ -33,7 +35,7 @@ class TalkieModel(TextModel):
         elif suffix == "lm_head_gain.w_g":
             self.gguf_writer.add_logit_scale(LazyTorchTensor.to_eager(data_torch).item())
             return
-        elif suffix in ("attn.attn_query.weight", "attn.attn_key.weight"):
+        elif suffix in {"attn.attn_query.weight", "attn.attn_key.weight"}:
             # absorb inverse rope
             head_dim = self.hparams["head_dim"]
             shape = data_torch.shape

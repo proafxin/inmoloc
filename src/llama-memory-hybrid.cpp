@@ -38,7 +38,7 @@ llama_memory_hybrid::llama_memory_hybrid(
                      const llama_box_draft & box_draft,
     std::vector<llama_box::attn_layer>   box_extra_attn) :
     hparams(model.hparams),
-    box(llama_box_make(model, type_k, type_v, kv_size, type_r, type_s, rs_size, n_rs_seq,
+    box(llama_box_make(model, type_k, type_v, kv_size, n_seq_max, type_r, type_s, rs_size, n_rs_seq,
                 rs_replay, offload, box_bytes, box_deferred, box_draft,
                 filter_attn == nullptr ? [&](int32_t il) { return !model.hparams.is_recr(il); } : filter_attn,
                 filter_recr == nullptr ? [&](int32_t il) { return  model.hparams.is_recr(il); } : filter_recr,

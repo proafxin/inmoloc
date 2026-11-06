@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import math
-
 from pathlib import Path
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, TextModel, gguf
-from .qwenvl import Qwen2VLVisionModel
+from conversion.base import MmprojModel, ModelBase, TextModel, gguf
+from conversion.qwenvl import Qwen2VLVisionModel
 
 
 @ModelBase.register("ExaoneForCausalLM")
@@ -19,19 +20,21 @@ from .qwenvl import Qwen2VLVisionModel
 class ExaoneModel(TextModel):
     model_arch = gguf.MODEL_ARCH.EXAONE
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         hparams = self.hparams
 
-        assert (hparams["activation_function"] == "silu")
+        assert hparams["activation_function"] == "silu"
 
         rotary_factor = self.rope_parameters.get("partial_rotary_factor")
         rotary_factor = rotary_factor if rotary_factor is not None else 1.0
-        self.gguf_writer.add_rope_dimension_count(int(rotary_factor * (hparams["hidden_size"] // hparams["num_attention_heads"])))
+        self.gguf_writer.add_rope_dimension_count(
+            int(rotary_factor * (hparams["hidden_size"] // hparams["num_attention_heads"]))
+        )
 
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
         if rope_params := self.rope_parameters.get("full_attention", self.rope_parameters):
-            if rope_params.get("rope_type", '').lower() == "llama3":
+            if rope_params.get("rope_type", "").lower() == "llama3":
                 base = self.rope_parameters.get("rope_theta", 10000.0)
                 if (dim := self.hparams.get("head_dim")) is None:
                     dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
@@ -57,7 +60,10 @@ class ExaoneModel(TextModel):
                         smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
                         rope_factors.append(1 / ((1 - smooth) / factor + smooth))
 
-                yield (self.format_tensor_name(gguf.MODEL_TENSOR.ROPE_FREQS), torch.tensor(rope_factors, dtype=torch.float32))
+                yield (
+                    self.format_tensor_name(gguf.MODEL_TENSOR.ROPE_FREQS),
+                    torch.tensor(rope_factors, dtype=torch.float32),
+                )
 
 
 @ModelBase.register("Exaone4ForCausalLM")
@@ -65,7 +71,7 @@ class ExaoneModel(TextModel):
 class Exaone4Model(TextModel):
     model_arch = gguf.MODEL_ARCH.EXAONE4
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         tokens, toktypes, tokpre = self.get_vocab_base()
         self.gguf_writer.add_tokenizer_model("gpt2")
         self.gguf_writer.add_tokenizer_pre(tokpre)
@@ -75,7 +81,7 @@ class Exaone4Model(TextModel):
         special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
         special_vocab.add_to_gguf(self.gguf_writer)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         hparams = self.hparams
         self.gguf_writer.add_vocab_size(hparams["vocab_size"])
@@ -87,17 +93,20 @@ class Exaone4Model(TextModel):
             elif "sliding_window_pattern" in hparams:
                 sliding_window_pattern = []
                 if isinstance(hparams["sliding_window_pattern"], str):  # e.g. LLLG
-                    for i in range(hparams["num_hidden_layers"]):
-                        sliding_window_pattern.append(hparams["sliding_window_pattern"][i % len(hparams["sliding_window_pattern"])] == "L")
+                    sliding_window_pattern.extend(
+                        hparams["sliding_window_pattern"][i % len(hparams["sliding_window_pattern"])] == "L"
+                        for i in range(hparams["num_hidden_layers"])
+                    )
                 if isinstance(hparams["sliding_window_pattern"], int):  # e.g. 4
-                    for i in range(hparams["num_hidden_layers"]):
-                        sliding_window_pattern.append((i + 1) % hparams["sliding_window_pattern"] != 0)
+                    sliding_window_pattern.extend(
+                        (i + 1) % hparams["sliding_window_pattern"] != 0 for i in range(hparams["num_hidden_layers"])
+                    )
                 if len(sliding_window_pattern) == hparams["num_hidden_layers"]:
                     self.gguf_writer.add_sliding_window_pattern(sliding_window_pattern)
 
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
         if rope_params := self.rope_parameters.get("full_attention", self.rope_parameters):
-            if rope_params.get("rope_type", '').lower() == "llama3":
+            if rope_params.get("rope_type", "").lower() == "llama3":
                 base = rope_params.get("rope_theta", 10_000.0)
                 if (dim := self.hparams.get("head_dim")) is None:
                     dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
@@ -122,7 +131,10 @@ class Exaone4Model(TextModel):
                         smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
                         rope_factors.append(1 / ((1 - smooth) / factor + smooth))
 
-                yield (self.format_tensor_name(gguf.MODEL_TENSOR.ROPE_FREQS), torch.tensor(rope_factors, dtype=torch.float32))
+                yield (
+                    self.format_tensor_name(gguf.MODEL_TENSOR.ROPE_FREQS),
+                    torch.tensor(rope_factors, dtype=torch.float32),
+                )
 
 
 # note: transformers >= 5.1 renamed the class to "ExaoneMoeForCausalLM" (lowercase 'e'),
@@ -132,12 +144,12 @@ class Exaone4Model(TextModel):
 class ExaoneMoEModel(Exaone4Model):
     model_arch = gguf.MODEL_ARCH.EXAONE_MOE
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.block_count = self.hparams["num_hidden_layers"] + self.hparams.get("num_nextn_predict_layers", 0)
         self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         moe_intermediate_size = self.hparams["moe_intermediate_size"]
         num_shared_experts = self.hparams["num_shared_experts"]
@@ -160,18 +172,18 @@ class ExaoneMoEModel(Exaone4Model):
                 # `mtp.layers.0.[module_name]` format
                 name = name.replace(f"mtp.layers.{bid}", f"model.layers.{bid + self.hparams['num_hidden_layers']}")
             else:
-                # mtp fc/norm weights
+                # mtp fc/norm weights: templates, filled for each NextN/MTP layer below
                 remapper = {
-                    "mtp.fc": "model.layers.{bid}.eh_proj",
-                    "mtp.pre_fc_norm_embedding": "model.layers.{bid}.enorm",
-                    "mtp.pre_fc_norm_hidden": "model.layers.{bid}.hnorm",
-                    "mtp.norm": "model.layers.{bid}.shared_head.norm",
+                    "mtp.fc": "model.layers.{bid}.eh_proj",  # noqa: RUF027
+                    "mtp.pre_fc_norm_embedding": "model.layers.{bid}.enorm",  # noqa: RUF027
+                    "mtp.pre_fc_norm_hidden": "model.layers.{bid}.hnorm",  # noqa: RUF027
+                    "mtp.norm": "model.layers.{bid}.shared_head.norm",  # noqa: RUF027
                 }
-                _n = Path(name)
-                new_name = remapper[_n.stem] + _n.suffix
+                n = Path(name)
+                new_name = remapper[n.stem] + n.suffix
 
                 # set shared weights for all NextN/MTP layers
-                for bid in range(self.hparams['num_hidden_layers'], self.block_count):
+                for bid in range(self.hparams["num_hidden_layers"], self.block_count):
                     yield from super().modify_tensors(data_torch, new_name.format(bid=bid), bid)
                 return
 
@@ -207,13 +219,14 @@ class ExaoneMoEModel(Exaone4Model):
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
         if self._experts is not None:
             # flatten `list[dict[str, Tensor]]` into `list[str]`
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)
 
 
 @ModelBase.register("Exaone4_5_ForConditionalGeneration")
@@ -223,14 +236,14 @@ class Exaone4_5_TextModel(Exaone4Model):
 
     model_arch = gguf.MODEL_ARCH.EXAONE4
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         n_nextn = int(self.hparams.get("num_nextn_predict_layers", 0) or 0)
         if n_nextn > 0:
             self.block_count = self.hparams["num_hidden_layers"] + n_nextn
             self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         n_nextn = int(self.hparams.get("num_nextn_predict_layers", 0) or 0)
         if n_nextn > 0:
@@ -258,12 +271,12 @@ class Exaone4_5_TextModel(Exaone4Model):
                     "mtp.pre_fc_norm_hidden": gguf.MODEL_TENSOR.NEXTN_HNORM,
                     "mtp.norm": gguf.MODEL_TENSOR.NEXTN_SHARED_HEAD_NORM,
                 }
-                _n = Path(name)
-                key = _n.stem
+                n = Path(name)
+                key = n.stem
                 if key not in remapper:
                     return
                 for bid_mtp in range(nh, self.block_count):
-                    mapped_name = self.format_tensor_name(remapper[key], bid_mtp, suffix=_n.suffix)
+                    mapped_name = self.format_tensor_name(remapper[key], bid_mtp, suffix=n.suffix)
                     yield from ModelBase.modify_tensors(self, data_torch, mapped_name, bid_mtp)
                 return
 
@@ -281,7 +294,7 @@ class Exaone4_5VisionModel(Qwen2VLVisionModel):
         name = name.replace("model.visual.", "visual.", 1)
         return super().filter_tensors((name, gen))
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         MmprojModel.set_gguf_parameters(self)
         assert self.hparams_vision is not None
         hparams = self.hparams_vision
@@ -301,7 +314,8 @@ class Exaone4_5VisionModel(Qwen2VLVisionModel):
             n_wa_pattern = fullatt_block_indexes[0] + 1
             for i in range(1, len(fullatt_block_indexes)):
                 if fullatt_block_indexes[i] - fullatt_block_indexes[i - 1] != n_wa_pattern:
-                    raise ValueError(f"Invalid EXAONE4.5 fullatt_block_indexes: {fullatt_block_indexes}")
+                    msg = f"Invalid EXAONE4.5 fullatt_block_indexes: {fullatt_block_indexes}"
+                    raise ValueError(msg)
             self.gguf_writer.add_vision_n_wa_pattern(n_wa_pattern)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:

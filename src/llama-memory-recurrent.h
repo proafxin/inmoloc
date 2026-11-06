@@ -93,6 +93,11 @@ public:
 
     void set_rs_idx(llama_seq_id seq_id, uint32_t idx);
 
+    // per seq, without rs_replay: the snapshots its last step wrote, min(its tokens, n_rs_seq + 1); a rollback of d
+    // tokens reads snapshot d, so only one shorter than the last step can be undone (the state before the step is not
+    // kept), see seq_rm()
+    std::vector<uint32_t> n_snap;
+
     //
     // rs_replay bookkeeping
     //

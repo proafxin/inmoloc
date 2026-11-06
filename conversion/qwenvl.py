@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, TextModel, gguf
+from conversion.base import MmprojModel, ModelBase, TextModel, gguf
 
 
 @ModelBase.register(
@@ -21,10 +23,10 @@ from .base import MmprojModel, ModelBase, TextModel, gguf
 class Qwen2VLModel(TextModel):
     model_arch = gguf.MODEL_ARCH.QWEN2VL
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         try:
             self._set_vocab_sentencepiece()
         except FileNotFoundError:
@@ -43,26 +45,26 @@ class Qwen2VLModel(TextModel):
 @ModelBase.register("Qwen2VLModel", "Qwen2VLForConditionalGeneration", "Qwen2_5_VLForConditionalGeneration")
 @ModelBase.example("Qwen/Qwen2-VL-2B-Instruct", "Qwen/Qwen2.5-VL-3B-Instruct")
 class Qwen2VLVisionModel(MmprojModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         assert self.hparams_vision is not None
         self.hparams_vision["image_size"] = self.hparams_vision.get("image_size", 560)
         # rename config.json values
         self.hparams_vision["num_attention_heads"] = self.hparams_vision.get("num_heads")
         self.hparams_vision["num_hidden_layers"] = self.hparams_vision.get("depth")
-        if "embed_dim" in self.hparams_vision: # qwen2vl
+        if "embed_dim" in self.hparams_vision:  # qwen2vl
             self.hparams_vision["intermediate_size"] = self.hparams_vision.get("hidden_size")
             self.hparams_vision["hidden_size"] = self.hparams_vision.get("embed_dim")
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         assert self.hparams_vision is not None
         hparams = self.hparams_vision
-        model_type = self.global_config['model_type']
-        if model_type == 'qwen2_vl':
+        model_type = self.global_config["model_type"]
+        if model_type == "qwen2_vl":
             self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.QWEN2VL)
-        elif model_type == 'qwen2_5_vl' or model_type == 'qwen2_5_omni':
-            if model_type == 'qwen2_5_omni':
+        elif model_type in {"qwen2_5_vl", "qwen2_5_omni"}:
+            if model_type == "qwen2_5_omni":
                 self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.QWEN25O)
             else:
                 self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.QWEN25VL)
@@ -74,10 +76,12 @@ class Qwen2VLVisionModel(MmprojModel):
             # validate n_wa_pattern
             for i in range(1, len(fullatt_block_indexes)):
                 if fullatt_block_indexes[i] - fullatt_block_indexes[i - 1] != n_wa_pattern:
-                    raise ValueError(f"Invalid fullatt_block_indexes: {fullatt_block_indexes}")
+                    msg = f"Invalid fullatt_block_indexes: {fullatt_block_indexes}"
+                    raise ValueError(msg)
             self.gguf_writer.add_vision_n_wa_pattern(n_wa_pattern)
         else:
-            raise ValueError(f"Unknown QwenVL model type: {self.global_config['model_type']}")
+            msg = f"Unknown QwenVL model type: {self.global_config['model_type']}"
+            raise ValueError(msg)
         # default values below are taken from HF tranformers code
         self.gguf_writer.add_vision_attention_layernorm_eps(self.global_config.get("rms_norm_eps", 1e-6))
 
@@ -88,7 +92,7 @@ class Qwen2VLVisionModel(MmprojModel):
 
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
+        name, _gen = item
 
         if not name.startswith("visual."):
             return None
@@ -98,24 +102,24 @@ class Qwen2VLVisionModel(MmprojModel):
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # split QKV tensors if needed
         if ".qkv." in name:
-            if data_torch.ndim == 2: # weight
+            if data_torch.ndim == 2:  # weight
                 c3, _ = data_torch.shape
-            else: # bias
+            else:  # bias
                 c3 = data_torch.shape[0]
             assert c3 % 3 == 0
             c = c3 // 3
             wq = data_torch[:c]
-            wk = data_torch[c: c * 2]
-            wv = data_torch[c * 2:]
+            wk = data_torch[c : c * 2]
+            wv = data_torch[c * 2 :]
             yield from super().modify_tensors(wq, name.replace("qkv", "q"), bid)
             yield from super().modify_tensors(wk, name.replace("qkv", "k"), bid)
             yield from super().modify_tensors(wv, name.replace("qkv", "v"), bid)
-        elif 'patch_embed.proj.weight' in name:
+        elif "patch_embed.proj.weight" in name:
             # split Conv3D into Conv2Ds
             c1, c2, kt, kh, kw = data_torch.shape
             del c1, c2, kh, kw  # unused
             assert kt == 2, "Current implementation only support temporal_patch_size of 2"
-            yield (gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_ENC_EMBD_PATCH] + ".weight"  , data_torch[:, :, 0, ...])
+            yield (gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_ENC_EMBD_PATCH] + ".weight", data_torch[:, :, 0, ...])
             yield (gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_ENC_EMBD_PATCH] + ".weight.1", data_torch[:, :, 1, ...])
         else:
             yield from super().modify_tensors(data_torch, name, bid)
@@ -124,14 +128,14 @@ class Qwen2VLVisionModel(MmprojModel):
 class Qwen25AudioModel(MmprojModel):
     has_audio_encoder = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         assert self.hparams_audio is not None
         self.hparams_audio["hidden_size"] = self.hparams_audio["d_model"]
         self.hparams_audio["intermediate_size"] = self.hparams_audio["encoder_ffn_dim"]
         self.hparams_audio["num_attention_heads"] = self.hparams_audio["encoder_attention_heads"]
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         assert self.hparams_audio is not None
         self.gguf_writer.add_audio_num_mel_bins(self.hparams_audio["num_mel_bins"])
@@ -174,7 +178,7 @@ class Qwen25OmniModel(Qwen2VLVisionModel, Qwen25AudioModel):
     def get_audio_config(self) -> dict[str, Any] | None:
         return self.global_config["thinker_config"].get("audio_config")
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.QWEN25O)
 

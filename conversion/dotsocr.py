@@ -1,22 +1,24 @@
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, gguf
+from conversion.base import MmprojModel, ModelBase, gguf
 
 
 @ModelBase.register("DotsOCRForCausalLM")
 @ModelBase.example("rednote-hilab/dots.ocr")
 class DotsOCRVisionModel(MmprojModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         assert self.hparams_vision is not None
-        self.hparams_vision["image_size"] = 0 # dynamic resolution
+        self.hparams_vision["image_size"] = 0  # dynamic resolution
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.DOTSOCR)
         self.gguf_writer.add_vision_min_pixels(self.preprocessor_config["min_pixels"])

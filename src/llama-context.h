@@ -316,6 +316,9 @@ private:
     // sets llm_graph_result::t_h_nextn
     buffer_view<float> embd_nextn = {nullptr, 0};
 
+    // whether the last decode wrote embd_nextn: a model without nextn hidden states leaves it as it was
+    bool embd_nextn_set = false;
+
     // host buffers for output layer input embeddings, per layer
     // populated when cparams.output_layer_inp[il] is true
     std::vector<buffer_view<float>> embd_layer_inp;

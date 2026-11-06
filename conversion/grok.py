@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import sys
-
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
+from conversion.base import ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register("GrokForCausalLM", "Grok1ForCausalLM")
@@ -17,26 +18,28 @@ from .base import ModelBase, TextModel, gguf, logger
 class GrokModel(TextModel):
     model_arch = gguf.MODEL_ARCH.GROK
 
-    def set_vocab(self):
-        if (self.dir_model / 'tokenizer.model').is_file():
+    def set_vocab(self) -> None:
+        if (self.dir_model / "tokenizer.model").is_file():
             self._set_vocab_sentencepiece()
             return
 
-        if not (self.dir_model / 'tokenizer.json').is_file() or not (self.dir_model / 'chat_template.jinja').is_file():
-            logger.error('Error: Missing vocab and chat template, download files from https://huggingface.co/alvarobartt/grok-2-tokenizer')
+        if not (self.dir_model / "tokenizer.json").is_file() or not (self.dir_model / "chat_template.jinja").is_file():
+            logger.error(
+                "Error: Missing vocab and chat template, download files from https://huggingface.co/alvarobartt/grok-2-tokenizer"
+            )
             sys.exit(1)
 
         self._set_vocab_gpt2()
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         self.gguf_writer.add_attn_logit_softcapping(self.hparams.get("attn_logit_softcapping", 30.0))
         self.gguf_writer.add_router_logit_softcapping(self.hparams.get("router_logit_softcapping", 30.0))
-        if (final_logit_softcap := self.hparams.get("final_logit_softcapping")):
+        if final_logit_softcap := self.hparams.get("final_logit_softcapping"):
             self.gguf_writer.add_final_logit_softcapping(final_logit_softcap)
 
         if (rope_dim := self.hparams.get("head_dim")) is None:
@@ -46,7 +49,7 @@ class GrokModel(TextModel):
             self.gguf_writer.add_expert_feed_forward_length(moe_intermediate_size)
 
         # Treat "original" as "yarn", seems to have been a mistake
-        if self.hparams.get("rope_type") in ("yarn", "original"):
+        if self.hparams.get("rope_type") in {"yarn", "original"}:
             self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.YARN)
             self.gguf_writer.add_rope_scaling_factor(self.hparams["scaling_factor"])
             self.gguf_writer.add_rope_scaling_orig_ctx_len(self.hparams["original_max_position_embeddings"])

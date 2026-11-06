@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
-from huggingface_hub import HfApi
 import argparse
 import os
 import sys
+
+from huggingface_hub import HfApi
 
 
 def create_collection(title, description, private=False, namespace=None, return_slug=False):
@@ -39,15 +40,10 @@ def create_collection(title, description, private=False, namespace=None, return_
         # Create the collection
         if not return_slug:
             print(f"📚 Creating collection: '{title}'...")
-        collection = api.create_collection(
-            title=title,
-            description=description,
-            private=private,
-            namespace=namespace
-        )
+        collection = api.create_collection(title=title, description=description, private=private, namespace=namespace)
 
         if not return_slug:
-            print(f"✅ Collection created successfully!")
+            print("✅ Collection created successfully!")
             print(f"📋 Collection slug: {collection.slug}")
             print(f"🔗 Collection URL: https://huggingface.co/collections/{collection.slug}")
 
@@ -57,17 +53,18 @@ def create_collection(title, description, private=False, namespace=None, return_
         print(f"❌ Error creating collection: {e}")
         return None
 
-def main():
+
+def main() -> None:
     # This script requires that the environment variable HF_TOKEN is set with your
     # Hugging Face API token.
-    api = HfApi()
+    HfApi()
 
-    parser = argparse.ArgumentParser(description='Create a Huggingface Collection')
-    parser.add_argument('--name', '-n', help='The name/title of the Collection', required=True)
-    parser.add_argument('--description', '-d', help='The description for the Collection', required=True)
-    parser.add_argument('--namespace', '-ns', help='The namespace to add the Collection to', required=True)
-    parser.add_argument('--private', '-p', help='Create a private Collection', action='store_true')  # Fixed
-    parser.add_argument('--return-slug', '-s', help='Only output the collection slug', action='store_true')  # Fixed
+    parser = argparse.ArgumentParser(description="Create a Huggingface Collection")
+    parser.add_argument("--name", "-n", help="The name/title of the Collection", required=True)
+    parser.add_argument("--description", "-d", help="The description for the Collection", required=True)
+    parser.add_argument("--namespace", "-ns", help="The namespace to add the Collection to", required=True)
+    parser.add_argument("--private", "-p", help="Create a private Collection", action="store_true")  # Fixed
+    parser.add_argument("--return-slug", "-s", help="Only output the collection slug", action="store_true")  # Fixed
 
     args = parser.parse_args()
 
@@ -85,11 +82,7 @@ def main():
         print(f"Private: {private}")
 
     collection = create_collection(
-        title=name,
-        description=description,
-        private=private,
-        namespace=namespace,
-        return_slug=return_slug
+        title=name, description=description, private=private, namespace=namespace, return_slug=return_slug
     )
 
     if collection:
@@ -101,6 +94,7 @@ def main():
     else:
         print("\n❌ Failed to create collection")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

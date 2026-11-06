@@ -23,8 +23,9 @@ Each test case contains:
 
 import argparse
 import json
-import requests
 import sys
+
+import requests
 
 # ---------------------------------------------------------------------------
 # Color / formatting helpers
@@ -47,50 +48,46 @@ def _print(text="", end="\n"):
     sys.stdout.flush()
 
 
-def print_header(title):
+def print_header(title) -> None:
     bar = "─" * 60
     _print(f"\n{BOLD}{CYAN}┌{bar}┐{RESET}")
-    _print(
-        f"{BOLD}{CYAN}│  {WHITE}{title}{CYAN}{' ' * max(0, 58 - len(title))}│{RESET}"
-    )
+    _print(f"{BOLD}{CYAN}│  {WHITE}{title}{CYAN}{' ' * max(0, 58 - len(title))}│{RESET}")
     _print(f"{BOLD}{CYAN}└{bar}┘{RESET}")
 
 
-def print_turn_banner(turn_idx, n_calls):
+def print_turn_banner(turn_idx, n_calls) -> None:
     color = MAGENTA if n_calls >= 2 else DIM
     _print(f"\n  {BOLD}{color}▶ turn {turn_idx} — {n_calls} tool call(s){RESET}")
 
 
-def print_tool_call(name, args):
+def print_tool_call(name, args) -> None:
     args_str = json.dumps(args)
-    _print(
-        f"    {BOLD}{YELLOW}⚙ {name}{RESET}{DIM}({args_str}){RESET}"
-    )
+    _print(f"    {BOLD}{YELLOW}⚙ {name}{RESET}{DIM}({args_str}){RESET}")
 
 
-def print_tool_result(result):
+def print_tool_result(result) -> None:
     preview = result[:140] + ("…" if len(result) > 140 else "")
     _print(f"      {DIM}{BLUE}↳ {preview}{RESET}")
 
 
-def print_model_output(text):
+def print_model_output(text) -> None:
     sys.stdout.write(text)
     sys.stdout.flush()
 
 
-def print_pass(reason):
+def print_pass(reason) -> None:
     _print(f"\n{BOLD}{GREEN}✔ PASS{RESET}  {reason}")
 
 
-def print_fail(reason):
+def print_fail(reason) -> None:
     _print(f"\n{BOLD}{RED}✘ FAIL{RESET}  {reason}")
 
 
-def print_info(msg):
+def print_info(msg) -> None:
     _print(f"{DIM}{msg}{RESET}")
 
 
-def print_warn(msg):
+def print_warn(msg) -> None:
     _print(f"{BOLD}{YELLOW}⚠ {msg}{RESET}")
 
 
@@ -160,9 +157,7 @@ def chat_completion(url, messages, tools=None, stream=False):
                     if "name" in tc["function"]:
                         tool_calls[idx]["function"]["name"] += tc["function"]["name"]
                     if "arguments" in tc["function"]:
-                        tool_calls[idx]["function"]["arguments"] += tc["function"][
-                            "arguments"
-                        ]
+                        tool_calls[idx]["function"]["arguments"] += tc["function"]["arguments"]
     else:
         data = response.json()
         choices = data.get("choices", [])
@@ -200,9 +195,7 @@ def run_agentic_loop(url, messages, tools, mock_tool_responses, stream, max_turn
         tcs = result.get("tool_calls") or []
         content = result.get("content") or ""
 
-        turns.append(
-            {"index": turn_idx, "tool_calls": list(tcs), "content": content}
-        )
+        turns.append({"index": turn_idx, "tool_calls": list(tcs), "content": content})
 
         if not tcs:
             if content:
@@ -233,10 +226,7 @@ def run_agentic_loop(url, messages, tools, mock_tool_responses, stream, max_turn
             print_tool_call(tool_name, args)
 
             mock_fn = mock_tool_responses.get(tool_name)
-            if mock_fn:
-                tool_result = mock_fn(args)
-            else:
-                tool_result = json.dumps({"error": f"Unknown tool: {tool_name}"})
+            tool_result = mock_fn(args) if mock_fn else json.dumps({"error": f"Unknown tool: {tool_name}"})
 
             print_tool_result(tool_result)
 
@@ -296,26 +286,20 @@ def _check_parallel(turns, expected):
     min_parallel = expected.get("min_parallel", 2)
     if len(best["tool_calls"]) < min_parallel:
         by_turn = [len(t["tool_calls"]) for t in turns]
-        return False, (
-            f"No turn had >= {min_parallel} parallel tool calls "
-            f"(per-turn counts: {by_turn})"
-        )
+        return False, (f"No turn had >= {min_parallel} parallel tool calls (per-turn counts: {by_turn})")
 
     require_same = expected.get("require_same_tool")
     if require_same is not None:
         names = [tc["function"]["name"] for tc in best["tool_calls"]]
         if any(n != require_same for n in names):
-            return False, (
-                f"Parallel turn mixed tools; expected all {require_same!r}, got {names}"
-            )
+            return False, (f"Parallel turn mixed tools; expected all {require_same!r}, got {names}")
 
     require_distinct = expected.get("require_distinct_tools")
     if require_distinct is not None:
         distinct = _distinct_tool_names(best)
         if len(distinct) < require_distinct:
             return False, (
-                f"Parallel turn had only {len(distinct)} distinct tool names "
-                f"({distinct}); need >= {require_distinct}"
+                f"Parallel turn had only {len(distinct)} distinct tool names ({distinct}); need >= {require_distinct}"
             )
 
     distinct_key = expected.get("min_distinct_args_key")
@@ -329,8 +313,7 @@ def _check_parallel(turns, expected):
             )
 
     return True, (
-        f"Parallel turn had {len(best['tool_calls'])} calls across "
-        f"{len(_distinct_tool_names(best))} distinct tool(s)"
+        f"Parallel turn had {len(best['tool_calls'])} calls across {len(_distinct_tool_names(best))} distinct tool(s)"
     )
 
 
@@ -401,9 +384,9 @@ _FILE_TOOLS = [
 
 _FILE_CONTENTS = {
     "config/database.yml": "host: db.internal\nport: 5432\nuser: svc_app\n",
-    "config/redis.yml":    "host: cache.internal\nport: 6379\ndb: 0\n",
-    "config/queue.yml":    "broker: rabbitmq.internal\nport: 5672\nvhost: prod\n",
-    "config/auth.yml":     "provider: oidc\nissuer: https://auth.internal\n",
+    "config/redis.yml": "host: cache.internal\nport: 6379\ndb: 0\n",
+    "config/queue.yml": "broker: rabbitmq.internal\nport: 5672\nvhost: prod\n",
+    "config/auth.yml": "provider: oidc\nissuer: https://auth.internal\n",
 }
 
 
@@ -443,7 +426,7 @@ MULTIFILE_READ_TEST = {
         "min_distinct_args_key": "path",
         "min_distinct_args_count": 4,
     },
-    "validate": lambda turns, tcs, content: _validate_multifile(turns, tcs, content),
+    "validate": _validate_multifile,
 }
 
 
@@ -522,7 +505,7 @@ TODO_BATCH_TEST = {
         "min_distinct_args_key": "todo_id",
         "min_distinct_args_count": 5,
     },
-    "validate": lambda turns, tcs, content: _validate_todo(turns, tcs, content),
+    "validate": _validate_todo,
 }
 
 
@@ -548,7 +531,7 @@ _WEATHER_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "city":  {"type": "string", "description": "City name"},
+                    "city": {"type": "string", "description": "City name"},
                     "units": {
                         "type": "string",
                         "enum": ["metric", "imperial"],
@@ -562,10 +545,10 @@ _WEATHER_TOOLS = [
 ]
 
 _WEATHER_DB = {
-    "tokyo":  {"city": "Tokyo",  "temp_c": 18.4, "condition": "partly cloudy", "humidity": 64},
-    "london": {"city": "London", "temp_c":  9.1, "condition": "overcast",       "humidity": 81},
-    "new york": {"city": "New York", "temp_c": 12.7, "condition": "clear",      "humidity": 55},
-    "paris":  {"city": "Paris",  "temp_c": 11.3, "condition": "light rain",     "humidity": 78},
+    "tokyo": {"city": "Tokyo", "temp_c": 18.4, "condition": "partly cloudy", "humidity": 64},
+    "london": {"city": "London", "temp_c": 9.1, "condition": "overcast", "humidity": 81},
+    "new york": {"city": "New York", "temp_c": 12.7, "condition": "clear", "humidity": 55},
+    "paris": {"city": "Paris", "temp_c": 11.3, "condition": "light rain", "humidity": 78},
 }
 
 
@@ -599,15 +582,13 @@ MULTI_WEATHER_TEST = {
         "min_distinct_args_key": "city",
         "min_distinct_args_count": 4,
     },
-    "validate": lambda turns, tcs, content: _validate_weather(turns, tcs, content),
+    "validate": _validate_weather,
 }
 
 
 def _validate_weather(turns, tcs, content):
     del turns
-    if not content or not any(
-        kw in content.lower() for kw in ("warmest", "rank", "hot", "cool")
-    ):
+    if not content or not any(kw in content.lower() for kw in ("warmest", "rank", "hot", "cool")):
         return False, f"Final content missing a ranking: {content!r}"
     return True, f"{len(tcs)} total get_weather calls; ranking produced"
 
@@ -624,8 +605,8 @@ _TRIP_TOOLS = [
                 "type": "object",
                 "properties": {
                     "from_airport": {"type": "string", "description": "IATA code, e.g. SFO"},
-                    "to_airport":   {"type": "string", "description": "IATA code, e.g. JFK"},
-                    "date":         {"type": "string", "description": "YYYY-MM-DD"},
+                    "to_airport": {"type": "string", "description": "IATA code, e.g. JFK"},
+                    "date": {"type": "string", "description": "YYYY-MM-DD"},
                 },
                 "required": ["from_airport", "to_airport", "date"],
             },
@@ -639,10 +620,10 @@ _TRIP_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "city":       {"type": "string"},
-                    "check_in":   {"type": "string", "description": "YYYY-MM-DD"},
-                    "check_out":  {"type": "string", "description": "YYYY-MM-DD"},
-                    "max_price":  {"type": "integer"},
+                    "city": {"type": "string"},
+                    "check_in": {"type": "string", "description": "YYYY-MM-DD"},
+                    "check_out": {"type": "string", "description": "YYYY-MM-DD"},
+                    "max_price": {"type": "integer"},
                 },
                 "required": ["city", "check_in", "check_out"],
             },
@@ -656,7 +637,7 @@ _TRIP_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "city":    {"type": "string"},
+                    "city": {"type": "string"},
                     "cuisine": {"type": "string"},
                 },
                 "required": ["city"],
@@ -668,19 +649,19 @@ _TRIP_TOOLS = [
 _FLIGHTS_RESULT = {
     "results": [
         {"flight": "UA 1552", "depart": "08:15", "arrive": "16:45", "price": 389},
-        {"flight": "AA  20",  "depart": "10:00", "arrive": "18:35", "price": 412},
+        {"flight": "AA  20", "depart": "10:00", "arrive": "18:35", "price": 412},
     ]
 }
 _HOTELS_RESULT = {
     "results": [
-        {"name": "Midtown Grand",    "nightly_rate": 245, "rating": 4.3},
+        {"name": "Midtown Grand", "nightly_rate": 245, "rating": 4.3},
         {"name": "Harbour Boutique", "nightly_rate": 312, "rating": 4.6},
     ]
 }
 _RESTAURANTS_RESULT = {
     "results": [
         {"name": "Trattoria Nona", "cuisine": "italian", "rating": 4.5},
-        {"name": "Osteria Blu",    "cuisine": "italian", "rating": 4.4},
+        {"name": "Osteria Blu", "cuisine": "italian", "rating": 4.4},
     ]
 }
 
@@ -709,7 +690,7 @@ TRIP_PLAN_TEST = {
         "min_parallel": 3,
         "require_distinct_tools": 3,
     },
-    "validate": lambda turns, tcs, content: _validate_trip(turns, tcs, content),
+    "validate": _validate_trip,
 }
 
 
@@ -751,7 +732,7 @@ _STOCK_TOOLS = [
 _STOCK_DB = {
     "AAPL": {"symbol": "AAPL", "price": 218.45, "change_pct": "+0.8%"},
     "MSFT": {"symbol": "MSFT", "price": 421.10, "change_pct": "+1.2%"},
-    "GOOGL":{"symbol": "GOOGL","price": 175.22, "change_pct": "-0.3%"},
+    "GOOGL": {"symbol": "GOOGL", "price": 175.22, "change_pct": "-0.3%"},
     "AMZN": {"symbol": "AMZN", "price": 189.76, "change_pct": "+0.5%"},
     "NVDA": {"symbol": "NVDA", "price": 140.88, "change_pct": "+2.4%"},
 }
@@ -786,7 +767,7 @@ PORTFOLIO_TEST = {
         "min_distinct_args_key": "symbol",
         "min_distinct_args_count": 5,
     },
-    "validate": lambda turns, tcs, content: _validate_portfolio(turns, tcs, content),
+    "validate": _validate_portfolio,
 }
 
 
@@ -808,9 +789,8 @@ _LANG_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "text":            {"type": "string"},
-                    "target_language": {"type": "string",
-                                        "description": "ISO 639-1 language code, e.g. 'es'"},
+                    "text": {"type": "string"},
+                    "target_language": {"type": "string", "description": "ISO 639-1 language code, e.g. 'es'"},
                 },
                 "required": ["text", "target_language"],
             },
@@ -855,18 +835,22 @@ def _translate_mock(args):
 
 def _definition_mock(args):
     w = args.get("word", "")
-    return json.dumps({
-        "word": w,
-        "definition": f"A standard dictionary definition of {w!r}.",
-    })
+    return json.dumps(
+        {
+            "word": w,
+            "definition": f"A standard dictionary definition of {w!r}.",
+        }
+    )
 
 
 def _synonyms_mock(args):
     w = args.get("word", "")
-    return json.dumps({
-        "word": w,
-        "synonyms": ["synonym_a", "synonym_b", "synonym_c"],
-    })
+    return json.dumps(
+        {
+            "word": w,
+            "synonyms": ["synonym_a", "synonym_b", "synonym_c"],
+        }
+    )
 
 
 LANG_TOOLKIT_TEST = {
@@ -886,15 +870,15 @@ LANG_TOOLKIT_TEST = {
         }
     ],
     "mock_tool_responses": {
-        "translate_text":  _translate_mock,
-        "get_definition":  _definition_mock,
-        "get_synonyms":    _synonyms_mock,
+        "translate_text": _translate_mock,
+        "get_definition": _definition_mock,
+        "get_synonyms": _synonyms_mock,
     },
     "expected_parallel": {
         "min_parallel": 3,
         "require_distinct_tools": 3,
     },
-    "validate": lambda turns, tcs, content: _validate_lang(turns, tcs, content),
+    "validate": _validate_lang,
 }
 
 
@@ -929,7 +913,7 @@ ALL_TEST_CASES = [
 # ---------------------------------------------------------------------------
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Test local-inference-server parallel tool-calling capability. Run this only "
@@ -939,12 +923,8 @@ def main():
     )
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", default=8080, type=int)
-    parser.add_argument(
-        "--no-stream", action="store_true", help="Disable streaming mode tests"
-    )
-    parser.add_argument(
-        "--stream-only", action="store_true", help="Only run streaming mode tests"
-    )
+    parser.add_argument("--no-stream", action="store_true", help="Disable streaming mode tests")
+    parser.add_argument("--stream-only", action="store_true", help="Only run streaming mode tests")
     parser.add_argument(
         "--test",
         help="Run only the test whose name contains this substring (case-insensitive)",

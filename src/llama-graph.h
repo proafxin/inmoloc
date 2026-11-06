@@ -698,6 +698,11 @@ public:
 
     box_input inp_box;
 
+    // the shared compressed blocks a sequence of the batch writes, copied to its own blocks before the layers, see
+    // llama_box::comp_own()
+    ggml_tensor * copy_src = nullptr; // I32 [n_copies]
+    ggml_tensor * copy_dst = nullptr; // I64 [n_copies]
+
     comp_input inp_csa;
     comp_input inp_hca;
     comp_input inp_lid;

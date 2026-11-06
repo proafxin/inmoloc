@@ -2,23 +2,30 @@ from __future__ import annotations
 
 import math
 import re
-
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, TextModel, _MISTRAL_COMMON_DATASET_MEAN, _MISTRAL_COMMON_DATASET_STD, gguf
-
-from .qwen import Qwen3Model
+from conversion.base import (
+    _MISTRAL_COMMON_DATASET_MEAN,
+    _MISTRAL_COMMON_DATASET_STD,
+    MmprojModel,
+    ModelBase,
+    TextModel,
+    gguf,
+)
+from conversion.qwen import Qwen3Model
 
 
 @ModelBase.register("StepVLForConditionalGeneration", "Step3p7ForConditionalGeneration")
 @ModelBase.example("stepfun-ai/Step3-VL-10B", "stepfun-ai/Step-3.7-Flash")
 class Step3VLVisionModel(MmprojModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         assert self.hparams_vision is not None
 
@@ -26,25 +33,28 @@ class Step3VLVisionModel(MmprojModel):
             hidden_size = self.hparams_vision.get("hidden_size") or self.hparams_vision.get("width") or 0
             assert hidden_size > 0
             mlp_ratio = float(self.hparams_vision.get("mlp_ratio", 8960 / 1536))
-            self.hparams_vision["intermediate_size"] = int(round(hidden_size * mlp_ratio))
+            self.hparams_vision["intermediate_size"] = round(hidden_size * mlp_ratio)
 
         self.preprocessor_config.setdefault("image_mean", list(_MISTRAL_COMMON_DATASET_MEAN))
         self.preprocessor_config.setdefault("image_std", list(_MISTRAL_COMMON_DATASET_STD))
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         assert self.hparams_vision is not None
 
         projector_stride = int(self.global_config.get("understand_projector_stride", -1))
         hidden_size = int(self.hparams_vision.get("hidden_size", self.hparams_vision.get("width", -1)))
         num_layers = int(self.hparams_vision.get("num_hidden_layers", self.hparams_vision.get("layers", -1)))
-        assert (projector_stride, int(self.hparams_vision.get("image_size", -1)), hidden_size, num_layers) == (2, 728, 1536, 47), (
-            "current Step3-VL conversion path is only validated for Step3-VL-10B"
-        )
+        assert (projector_stride, int(self.hparams_vision.get("image_size", -1)), hidden_size, num_layers) == (
+            2,
+            728,
+            1536,
+            47,
+        ), "current Step3-VL conversion path is only validated for Step3-VL-10B"
 
         self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.STEP3VL)
         self.gguf_writer.add_vision_attention_layernorm_eps(float(self.hparams_vision.get("layer_norm_eps", 1e-5)))
-        self.gguf_writer.add_vision_projector_scale_factor(projector_stride ** 2)
+        self.gguf_writer.add_vision_projector_scale_factor(projector_stride**2)
         # 3024 max resize comes from step3-vl-10b processing_step3.py.
         self.gguf_writer.add_vision_preproc_image_size(3024)
 
@@ -52,12 +62,16 @@ class Step3VLVisionModel(MmprojModel):
         if ".position_embd." in new_name:
             return gguf.GGMLQuantizationType.F32
         if ("mm.0." in new_name or "mm.1." in new_name) and new_name.endswith(".weight"):
-            return gguf.GGMLQuantizationType.F16 if self.ftype == gguf.LlamaFileType.MOSTLY_F16 else gguf.GGMLQuantizationType.F32
+            return (
+                gguf.GGMLQuantizationType.F16
+                if self.ftype == gguf.LlamaFileType.MOSTLY_F16
+                else gguf.GGMLQuantizationType.F32
+            )
         return super().tensor_force_quant(name, new_name, bid, n_dims)
 
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
+        name, _gen = item
 
         if name.startswith(("model.", "lm_head.")):
             return None
@@ -68,7 +82,8 @@ class Step3VLVisionModel(MmprojModel):
         if name.startswith("vision_model.vit_downsampler"):
             match = re.match(r"vision_model\.vit_downsampler(\d+)\.(weight|bias)", name)
             if match is None:
-                raise ValueError(f"Unexpected Step3-VL projector tensor {name!r}")
+                msg = f"Unexpected Step3-VL projector tensor {name!r}"
+                raise ValueError(msg)
 
             proj_id = int(match.group(1)) - 1
             suffix = f".{match.group(2)}"
@@ -111,7 +126,7 @@ class Step35Model(TextModel):
     # filter_tensors can tell the appended MTP block(s) apart from the trunk.
     _n_main_layers: int | None = None
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # NextN/MTP layers are appended past num_hidden_layers; extend the
         # tensor map to cover them so the MTP block's tensors get correctly
@@ -131,7 +146,7 @@ class Step35Model(TextModel):
         type(self)._n_main_layers = hparams.get(key)
         return super().index_tensors(remote_hf_model_id=remote_hf_model_id)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         rope_theta = self.hparams.get("rope_theta")
         if isinstance(rope_theta, list):
             self.hparams["rope_theta"] = float(rope_theta[0])
@@ -161,7 +176,7 @@ class Step35Model(TextModel):
         def _pad(arr, n, default):
             arr = list(arr)
             if len(arr) < n:
-                arr = arr + [default] * (n - len(arr))
+                arr += [default] * (n - len(arr))
             return arr[:n]
 
         layer_types = _pad(layer_types, self.block_count, "full_attention")
@@ -244,8 +259,15 @@ class Step35Model(TextModel):
             return None
         # --mtp: keep ONLY MTP-block tensors plus the shared embeddings/norm/
         # lm_head (so the resulting GGUF carries just the draft head).
-        if cls.mtp_only and not is_mtp and name not in (
-            "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight",
+        if (
+            cls.mtp_only
+            and not is_mtp
+            and name
+            not in {
+                "model.embed_tokens.weight",
+                "model.norm.weight",
+                "lm_head.weight",
+            }
         ):
             return None
 
@@ -264,12 +286,20 @@ class Step35Model(TextModel):
         if name.endswith("norm.weight"):
             data_torch += 1.0
 
-        if name.endswith((".self_attn.g_proj.weight", ".moe.gate.weight", ".moe.up_proj.weight", ".moe.gate_proj.weight", ".moe.down_proj.weight")):
+        if name.endswith(
+            (
+                ".self_attn.g_proj.weight",
+                ".moe.gate.weight",
+                ".moe.up_proj.weight",
+                ".moe.gate_proj.weight",
+                ".moe.down_proj.weight",
+            )
+        ):
             data_torch = data_torch.squeeze().contiguous()
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_metadata(self, vocab_only: bool):
+    def prepare_metadata(self, vocab_only: bool) -> None:
         from_dir = self.fname_out.is_dir()
         super().prepare_metadata(vocab_only=vocab_only)
 
@@ -280,8 +310,14 @@ class Step35Model(TextModel):
 
         output_type: str = self.ftype.name.partition("_")[2]
         fname_default: str = gguf.naming_convention(
-            self.metadata.name, self.metadata.basename, self.metadata.finetune,
-            self.metadata.version, size_label=None, output_type=output_type, model_type=None)
+            self.metadata.name,
+            self.metadata.basename,
+            self.metadata.finetune,
+            self.metadata.version,
+            size_label=None,
+            output_type=output_type,
+            model_type=None,
+        )
         self.fname_out = self.fname_out.parent / f"mtp-{fname_default}.gguf"
 
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
@@ -309,7 +345,7 @@ class Step35Model(TextModel):
         layer_types = (self.hparams.get("layer_types") or [])[: self.block_count]
         partial_rotary_factors = (self.hparams.get("partial_rotary_factors") or [])[: self.block_count]
         full_attention_factor = next(
-            float(f) for lt, f in zip(layer_types, partial_rotary_factors) if lt == "full_attention"
+            float(f) for lt, f in zip(layer_types, partial_rotary_factors, strict=False) if lt == "full_attention"
         )
         rotary_dim = int(storage_dim * full_attention_factor)
 

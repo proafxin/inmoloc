@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import pathlib
 import statistics
 import sys
 import time
@@ -15,8 +16,8 @@ import requests
 from datasets import get_dataset_config_names, load_dataset
 from tqdm import tqdm
 
-
 DATASET_REPO = "nvidia/SPEED-Bench"
+
 
 @dataclass
 class Sample:
@@ -53,9 +54,10 @@ def normalize_base_url(url: str) -> str:
         url = "http://" + url
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
-        raise ValueError(f"invalid --url: {url}")
+        msg = f"invalid --url: {url}"
+        raise ValueError(msg)
     if not parsed.path.rstrip("/").endswith("/v1"):
-        url = url + "/v1"
+        url += "/v1"
     return url.rstrip("/")
 
 
@@ -78,9 +80,8 @@ def extract_turns(row: dict[str, Any]) -> list[str]:
 def load_samples(args: argparse.Namespace) -> list[Sample]:
     bench_names = get_dataset_config_names(DATASET_REPO)
     if args.bench not in bench_names:
-        raise ValueError(
-            f"unknown --bench {args.bench!r}; available benches: {', '.join(bench_names)}"
-        )
+        msg = f"unknown --bench {args.bench!r}; available benches: {', '.join(bench_names)}"
+        raise ValueError(msg)
 
     dataset = load_dataset(DATASET_REPO, name=args.bench, split="test")
     categories = list(dict.fromkeys(str(category) for category in dataset["category"]))
@@ -88,22 +89,22 @@ def load_samples(args: argparse.Namespace) -> list[Sample]:
     if args.category != "all":
         requested_list = [category.strip() for category in args.category.split(",") if category.strip()]
         if not requested_list:
-            raise ValueError(
-                f"--category must be 'all' or a comma-separated list; available categories: {', '.join(categories)}"
-            )
+            msg = f"--category must be 'all' or a comma-separated list; available categories: {', '.join(categories)}"
+            raise ValueError(msg)
         requested_categories = set(requested_list)
         unknown_categories = [category for category in requested_list if category not in categories]
         if unknown_categories:
             unknown = ", ".join(unknown_categories)
-            raise ValueError(
+            msg = (
                 f"unknown --category {unknown!r} for bench {args.bench!r}; "
                 f"available categories: all, {', '.join(categories)}"
             )
+            raise ValueError(msg)
 
     samples: list[Sample] = []
     samples_per_category: dict[str, int] = {}
     skipped = 0
-    for index, row_raw in enumerate(dataset):
+    for row_raw in dataset:
         row = dict(row_raw)
         category_raw = row.get("category")
         if not isinstance(category_raw, str) or not category_raw.strip():
@@ -129,7 +130,8 @@ def load_samples(args: argparse.Namespace) -> list[Sample]:
         samples_per_category[category] = samples_per_category.get(category, 0) + 1
 
     if not samples:
-        raise RuntimeError(f"no samples selected from bench={args.bench} category={args.category}")
+        msg = f"no samples selected from bench={args.bench} category={args.category}"
+        raise RuntimeError(msg)
 
     if skipped:
         print(f"speed_bench: skipped {skipped} rows without usable turns")
@@ -176,7 +178,8 @@ def run_request(
     latency_s = time.perf_counter() - start
     if response.status_code != 200:
         body = response.text[:500].replace("\n", "\\n")
-        raise RuntimeError(f"HTTP {response.status_code}: {body}")
+        msg = f"HTTP {response.status_code}: {body}"
+        raise RuntimeError(msg)
     return response.json(), latency_s
 
 
@@ -210,7 +213,9 @@ def run_one(
 
             turn_prompt_tokens = int(usage.get("prompt_tokens") or timings.get("prompt_n") or 0)
             turn_completion_tokens_count = int(usage.get("completion_tokens") or timings.get("predicted_n") or 0)
-            turn_total_tokens_count = int(usage.get("total_tokens") or (turn_prompt_tokens + turn_completion_tokens_count))
+            turn_total_tokens_count = int(
+                usage.get("total_tokens") or (turn_prompt_tokens + turn_completion_tokens_count)
+            )
             prompt_tokens += turn_prompt_tokens
             completion_tokens += turn_completion_tokens_count
             total_tokens += turn_total_tokens_count
@@ -273,15 +278,9 @@ def run_one(
 def summarize_group(category: str, results: list[RequestResult]) -> dict[str, Any]:
     ok_results = [result for result in results if result.ok]
     latencies = [result.latency_s for result in ok_results]
-    server_prompt_speeds = [
-        result.prompt_per_second
-        for result in ok_results
-        if result.prompt_per_second is not None
-    ]
+    server_prompt_speeds = [result.prompt_per_second for result in ok_results if result.prompt_per_second is not None]
     server_completion_speeds = [
-        result.predicted_per_second
-        for result in ok_results
-        if result.predicted_per_second is not None
+        result.predicted_per_second for result in ok_results if result.predicted_per_second is not None
     ]
     turns = sum(result.turns for result in ok_results)
     draft_n = sum(result.draft_n for result in ok_results)
@@ -330,9 +329,7 @@ def print_table(rows: list[dict[str, Any]]) -> None:
 
 
 def print_rows(rows: list[dict[str, Any]], columns: list[tuple[str, str, str]]) -> None:
-    rendered_rows = []
-    for row in rows:
-        rendered_rows.append([fmt_value(row.get(key), kind) for _, key, kind in columns])
+    rendered_rows = [[fmt_value(row.get(key), kind) for _, key, kind in columns] for row in rows]
 
     widths = [len(header) for header, _, _ in columns]
     for rendered in rendered_rows:
@@ -346,7 +343,13 @@ def print_rows(rows: list[dict[str, Any]], columns: list[tuple[str, str, str]]) 
         print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(rendered)))
 
 
-def save_output(path: str, args: argparse.Namespace, samples: list[Sample], results: list[RequestResult], summary: list[dict[str, Any]]) -> None:
+def save_output(
+    path: str,
+    args: argparse.Namespace,
+    samples: list[Sample],
+    results: list[RequestResult],
+    summary: list[dict[str, Any]],
+) -> None:
     payload = {
         "config": {
             "url": args.url,
@@ -363,19 +366,30 @@ def save_output(path: str, args: argparse.Namespace, samples: list[Sample], resu
         "summary": summary,
         "results": [asdict(result) for result in results],
     }
-    with open(path, "w", encoding="utf-8") as f:
+    with pathlib.Path(path).open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, sort_keys=True)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run SPEED-Bench against an OpenAI-compatible local-inference-server.")
-    parser.add_argument("--url", default="localhost:8080", help="Server URL, for example localhost:8080 or http://localhost:8080/v1")
+    parser.add_argument(
+        "--url", default="localhost:8080", help="Server URL, for example localhost:8080 or http://localhost:8080/v1"
+    )
     parser.add_argument("--model", default=None, help="Optional model name to send in OpenAI requests")
-    parser.add_argument("--bench", default="qualitative", help="SPEED-Bench config to run, for example qualitative or throughput_1k")
-    parser.add_argument("--category", default="all", help="Category to run within the selected bench; use all for no category filter")
+    parser.add_argument(
+        "--bench", default="qualitative", help="SPEED-Bench config to run, for example qualitative or throughput_1k"
+    )
+    parser.add_argument(
+        "--category", default="all", help="Category to run within the selected bench; use all for no category filter"
+    )
     parser.add_argument("--osl", type=int, default=4096, help="Output sequence length, mapped to max_tokens")
     parser.add_argument("--extra-inputs", default='{"temperature":0}', help="Extra request fields as a JSON object")
-    parser.add_argument("--concurrency", type=int, default=1, help="Concurrent client requests; usually match local-inference-server --np")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="Concurrent client requests; usually match local-inference-server --np",
+    )
     parser.add_argument("--limit", type=int, default=None, help="Optional sample limit per category for smoke tests")
     parser.add_argument("--timeout", type=float, default=600, help="Per-request timeout in seconds")
     parser.add_argument("--output", default=None, help="Optional path to save raw results JSON")
@@ -399,7 +413,9 @@ def main(argv: list[str] | None = None) -> int:
             executor.submit(run_one, sample, endpoint, args.model, args.osl, extra_inputs, args.timeout)
             for sample in samples
         ]
-        for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="speed_bench", unit="sample"):
+        for future in tqdm(
+            concurrent.futures.as_completed(futures), total=len(futures), desc="speed_bench", unit="sample"
+        ):
             result = future.result()
             results.append(result)
 

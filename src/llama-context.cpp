@@ -1098,14 +1098,14 @@ float * llama_context::get_embeddings_seq(llama_seq_id seq_id) {
 float * llama_context::get_embeddings_nextn() {
     output_reorder();
 
-    return embd_nextn.data;
+    return embd_nextn_set ? embd_nextn.data : nullptr;
 }
 
 float * llama_context::get_embeddings_nextn_ith(int32_t i) {
     output_reorder();
 
     try {
-        if (embd_nextn.data == nullptr) {
+        if (embd_nextn.data == nullptr || !embd_nextn_set) {
             throw std::runtime_error("no nextn embeddings");
         }
 
@@ -1605,6 +1605,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
         synchronize();
     }
     embd_seq.clear();
+    embd_nextn_set = false;
 
     if (t_compute_start_us == 0) {
         t_compute_start_us = ggml_time_us();
@@ -1723,6 +1724,7 @@ int llama_context::encode(const llama_batch & batch_inp) {
         const uint32_t n_embd = hparams.n_embd_out();
         GGML_ASSERT(n_tokens*n_embd <= (int64_t) embd_nextn.size);
         ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn.data, 0, n_tokens*n_embd*sizeof(float));
+        embd_nextn_set = true;
     }
 
     // TODO: hacky solution
@@ -1898,6 +1900,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
         synchronize();
     }
     embd_seq.clear();
+    embd_nextn_set = false;
 
     if (t_compute_start_us == 0) {
         t_compute_start_us = ggml_time_us();
@@ -2131,6 +2134,7 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
                 GGML_ASSERT((offset + n_rows)*n_embd <= (int64_t) embd_nextn.size);
                 ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn_out, 0, n_rows*n_embd*sizeof(float));
+                embd_nextn_set   = true;
                 extract_all_idxs = extract_all_idxs || !masked;
             }
         }
@@ -3545,9 +3549,25 @@ size_t llama_context::state_write_data(llama_io_write_i & io) {
         // TODO: add more model-specific info which should prevent loading the session file if not identical
     }
 
+    // the memory as its sequences, each as llama_state_seq_get_data() writes it: the box restores single sequences only,
+    // their cells go to the blocks of the sequence (cells shared by sequences are written, and restored, for each)
     if (memory != nullptr) {
         LLAMA_LOG_DEBUG("%s: - writing memory module\n", __func__);
-        memory->state_write(io);
+
+        std::vector<llama_seq_id> seq_ids;
+        for (llama_seq_id s = 0; s < (llama_seq_id) cparams.n_seq_max; ++s) {
+            if (memory->seq_pos_max(s) >= 0) {
+                seq_ids.push_back(s);
+            }
+        }
+
+        const uint32_t n_seqs = (uint32_t) seq_ids.size();
+        io.write(&n_seqs, sizeof(n_seqs));
+
+        for (const llama_seq_id s : seq_ids) {
+            io.write(&s, sizeof(s));
+            memory->state_write(io, s);
+        }
     }
 
     return io.n_bytes();
@@ -3570,10 +3590,25 @@ size_t llama_context::state_read_data(llama_io_read_i & io) {
         // TODO: add more info which needs to be identical but which is not verified otherwise
     }
 
+    // see state_write_data()
     if (memory) {
         LLAMA_LOG_DEBUG("%s: - reading memory module\n", __func__);
 
-        memory->state_read(io);
+        memory->clear(true);
+
+        uint32_t n_seqs = 0;
+        io.read(&n_seqs, sizeof(n_seqs));
+
+        for (uint32_t i = 0; i < n_seqs; ++i) {
+            llama_seq_id s = -1;
+            io.read(&s, sizeof(s));
+
+            if (s < 0 || s >= (llama_seq_id) cparams.n_seq_max) {
+                throw std::runtime_error(format("the state holds seq %d, the context has %u", s, cparams.n_seq_max));
+            }
+
+            memory->state_read(io, s);
+        }
     }
 
     return io.n_bytes();

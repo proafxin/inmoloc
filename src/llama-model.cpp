@@ -2381,7 +2381,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
             {
                 if (hparams.indexer_top_k == 0) {
                     // full-attention checkpoint: no indexer, so no indexer key cache
-                    std::shared_ptr<llama_box> box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
+                    std::shared_ptr<llama_box> box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq, cparams.n_seq_max,
                             GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
                             cparams.box_bytes, cparams.box_deferred, llama_box_draft{},
                             [](int32_t) { return true; }, nullptr);
@@ -2537,7 +2537,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 
                 if (llm_arch_is_recurrent(arch)) {
                     // the states are all the memory of the model: they hold the elastic memory
-                    std::shared_ptr<llama_box> box_own = llama_box_make(*this, GGML_TYPE_F16, GGML_TYPE_F16, 0,
+                    std::shared_ptr<llama_box> box_own = llama_box_make(*this, GGML_TYPE_F16, GGML_TYPE_F16, 0, cparams.n_seq_max,
                             GGML_TYPE_F32, GGML_TYPE_F32, std::max((uint32_t) 1, cparams.n_rs_cells),
                             cparams.n_rs_seq, cparams.rs_replay, cparams.offload_kqv,
                             cparams.box_bytes, cparams.box_deferred, llama_box_draft{},
@@ -2588,7 +2588,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
                         const auto & hp = hparams;
 
-                        std::shared_ptr<llama_box> box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
+                        std::shared_ptr<llama_box> box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq, cparams.n_seq_max,
                                 GGML_TYPE_F32, GGML_TYPE_F32, std::max((uint32_t) 1, cparams.n_rs_cells),
                                 cparams.n_rs_seq, cparams.rs_replay, cparams.offload_kqv,
                                 cparams.box_bytes, cparams.box_deferred, cparams.box_draft,
@@ -2726,7 +2726,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 
                             std::shared_ptr<llama_box> box_own;
                             if (!in_box) {
-                                box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
+                                box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq, cparams.n_seq_max,
                                         GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
                                         cparams.box_bytes, cparams.box_deferred, cparams.box_draft,
                                         filter ? filter : [](int32_t) { return true; }, nullptr);
@@ -2761,7 +2761,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
 
                         std::shared_ptr<llama_box> box_own;
                         if (!in_box) {
-                            box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq,
+                            box_own = llama_box_make(*this, params.type_k, params.type_v, cparams.n_ctx_seq, cparams.n_seq_max,
                                     GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, cparams.offload_kqv,
                                     cparams.box_bytes, cparams.box_deferred, cparams.box_draft,
                                     filter ? filter : [](int32_t) { return true; }, nullptr);

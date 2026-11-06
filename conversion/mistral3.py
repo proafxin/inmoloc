@@ -5,10 +5,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
-
-from .deepseek import DeepseekV2Model
-from .llama import LlamaModel
+from conversion.base import ModelBase, TextModel, gguf
+from conversion.deepseek import DeepseekV2Model
+from conversion.llama import LlamaModel
 
 
 @ModelBase.register(
@@ -20,7 +19,7 @@ class Mistral3Model(TextModel):
     class Ministral3Model(LlamaModel):
         model_arch = gguf.MODEL_ARCH.MISTRAL3
 
-        def set_gguf_parameters(self):
+        def set_gguf_parameters(self) -> None:
             super().set_gguf_parameters()
             rope_params = self.rope_parameters
             if self.hparams.get("model_type") == "ministral3":
@@ -31,38 +30,38 @@ class Mistral3Model(TextModel):
 
     class Mistral4Model(DeepseekV2Model):
         model_arch = gguf.MODEL_ARCH.MISTRAL4
-        skip_mtp = False # model contains no MTP layers, so no need to skip
-        merge_expert = False # experts are already stacked as 3D
+        skip_mtp = False  # model contains no MTP layers, so no need to skip
+        merge_expert = False  # experts are already stacked as 3D
 
         def modify_tensors(self, data_torch, name, bid):
-            if name.endswith(".down_proj") or name.endswith(".gate_up_proj"):
-                name = name + ".weight"
+            if name.endswith((".down_proj", ".gate_up_proj")):
+                name += ".weight"
             yield from super().modify_tensors(data_torch, name, bid)
 
-    model_arch = gguf.MODEL_ARCH.MISTRAL3 # unused
+    model_arch = gguf.MODEL_ARCH.MISTRAL3  # unused
     impl: TextModel
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         if self.hparams.get("model_type") == "mistral4":
             self.impl = Mistral3Model.Mistral4Model(*args, **kwargs)
         else:
             self.impl = Mistral3Model.Ministral3Model(*args, **kwargs)
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self.impl.set_vocab()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         self.impl.set_gguf_parameters()
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
         yield from self.impl.modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         self.impl.prepare_tensors()
 
-    def write_vocab(self):
+    def write_vocab(self) -> None:
         self.impl.write_vocab()
 
-    def write(self):
+    def write(self) -> None:
         self.impl.write()

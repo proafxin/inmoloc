@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import json
 import math
-
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
+import pathlib
+
+from conversion.base import ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register(
@@ -27,14 +30,17 @@ from .base import ModelBase, TextModel, gguf, logger
     "Eagle3Speculator",
     "Eagle3DraftModel",
     "IQuestCoderForCausalLM",
-    "LlamaModel")
+    "LlamaModel",
+)
 # [TAG_HF_EXAMPLE_GATED] meta-llama/Llama-3.2-1B-Instruct is gated
-@ModelBase.example("unsloth/Llama-3.2-1B-Instruct", "mistralai/Mistral-7B-Instruct-v0.3", "mistralai/Mixtral-8x7B-Instruct-v0.1")
+@ModelBase.example(
+    "unsloth/Llama-3.2-1B-Instruct", "mistralai/Mistral-7B-Instruct-v0.3", "mistralai/Mixtral-8x7B-Instruct-v0.1"
+)
 class LlamaModel(TextModel):
     model_arch = gguf.MODEL_ARCH.LLAMA
     undo_permute = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # fix for SmolVLM2, missing `num_attention_heads` in config.json
         if self.hf_arch == "VLlama3ForCausalLM":
@@ -44,7 +50,7 @@ class LlamaModel(TextModel):
             self.origin_hf_arch = None
         else:
             hparams = ModelBase.load_hparams(self.dir_model, is_mistral_format=False)
-            self.origin_hf_arch = hparams.get('architectures', [None])[0]
+            self.origin_hf_arch = hparams.get("architectures", [None])[0]
 
         # Detect eagle3 draft checkpoint by hparams (some models don't use a distinct HF arch name)
         if "draft_vocab_size" in self.hparams and self.hparams["num_hidden_layers"] == 1:
@@ -62,9 +68,9 @@ class LlamaModel(TextModel):
                     "Please provide the path to the target model directory to read config.json"
                 )
             # Read both eagle3 raw config and target model config
-            with open(self.dir_model / "config.json", 'r', encoding='utf-8') as f:
+            with pathlib.Path(self.dir_model / "config.json").open("r", encoding="utf-8") as f:
                 eagle3_raw_config = json.load(f)
-            with open(self.target_model_dir / "config.json", 'r', encoding='utf-8') as f:
+            with pathlib.Path(self.target_model_dir / "config.json").open("r", encoding="utf-8") as f:
                 target_config = json.load(f)
 
             if "text_config" in target_config:
@@ -75,10 +81,7 @@ class LlamaModel(TextModel):
             # if present, else derive from the target layer count.
             target_num_layers = target_config["num_hidden_layers"]
             aux_layer_ids = eagle3_raw_config.get("eagle_aux_hidden_state_layer_ids")
-            if aux_layer_ids:
-                target_layers = aux_layer_ids
-            else:
-                target_layers = [2, target_num_layers // 2, target_num_layers - 3]
+            target_layers = aux_layer_ids or [2, target_num_layers // 2, target_num_layers - 3]
             logger.info(f"EAGLE-3: target_layers = {target_layers} (target model has {target_num_layers} layers)")
             self.gguf_writer.add_target_layers(target_layers)
 
@@ -106,7 +109,7 @@ class LlamaModel(TextModel):
     def set_vocab(self):
         # eagle3: use tokenizer from target model if provided
         original_dir_model = None
-        if getattr(self, 'is_eagle3', False):
+        if getattr(self, "is_eagle3", False):
             assert self.target_model_dir is not None
             logger.info(f"EAGLE-3: Using tokenizer from target model: {self.target_model_dir}")
             original_dir_model = self.dir_model
@@ -123,9 +126,9 @@ class LlamaModel(TextModel):
         if path_tekken_json.is_file() and not path_tokenizer_json.is_file():
             return self._set_vocab_mistral()
 
-        tokenizer_config_file = self.dir_model / 'tokenizer_config.json'
+        tokenizer_config_file = self.dir_model / "tokenizer_config.json"
         if tokenizer_config_file.is_file():
-            with open(tokenizer_config_file, "r", encoding="utf-8") as f:
+            with pathlib.Path(tokenizer_config_file).open("r", encoding="utf-8") as f:
                 tokenizer_config_json = json.load(f)
                 if (add_prefix_space := tokenizer_config_json.get("add_prefix_space")) is not None:
                     self.gguf_writer.add_add_space_prefix(add_prefix_space)
@@ -144,13 +147,12 @@ class LlamaModel(TextModel):
         # Apply to CodeLlama only (and ignore for Llama 3 with a vocab size of 128256)
         if self.hparams.get("vocab_size", 32000) == 32016:
             special_vocab = gguf.SpecialVocab(
-                self.dir_model, load_merges=False,
-                special_token_types = ['prefix', 'suffix', 'middle', 'eot']
+                self.dir_model, load_merges=False, special_token_types=["prefix", "suffix", "middle", "eot"]
             )
             special_vocab._set_special_token("prefix", 32007)
             special_vocab._set_special_token("suffix", 32008)
             special_vocab._set_special_token("middle", 32009)
-            special_vocab._set_special_token("eot",    32010)
+            special_vocab._set_special_token("eot", 32010)
             special_vocab.add_to_gguf(self.gguf_writer)
 
         # Apply to granite small models only
@@ -160,8 +162,9 @@ class LlamaModel(TextModel):
         # eagle3: Restore original dir_model
         if original_dir_model is not None:
             self.dir_model = original_dir_model
+        return None
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         hparams = self.hparams
 
@@ -176,9 +179,11 @@ class LlamaModel(TextModel):
     def permute(weights: Tensor, n_head: int, n_head_kv: int | None):
         if n_head_kv is not None and n_head != n_head_kv:
             n_head = n_head_kv
-        return (weights.reshape(n_head, 2, weights.shape[0] // n_head // 2, *weights.shape[1:])
-                .swapaxes(1, 2)
-                .reshape(weights.shape))
+        return (
+            weights.reshape(n_head, 2, weights.shape[0] // n_head // 2, *weights.shape[1:])
+            .swapaxes(1, 2)
+            .reshape(weights.shape)
+        )
 
     def _repack_nvfp4(self, name: str, weight: Tensor, scale: Tensor, scale2: Tensor, input_scale: Tensor):
         # Mirror the BF16 Q/K RoPE permutation site in modify_tensors; the NVFP4 path bypasses it.
@@ -188,10 +193,10 @@ class LlamaModel(TextModel):
             if n_head is not None:
                 if name.endswith("q_proj.weight"):
                     weight = LlamaModel.permute(weight, n_head, n_head)
-                    scale  = LlamaModel.permute(scale, n_head, n_head)
+                    scale = LlamaModel.permute(scale, n_head, n_head)
                 elif name.endswith("k_proj.weight"):
                     weight = LlamaModel.permute(weight, n_head, n_kv_head)
-                    scale  = LlamaModel.permute(scale, n_head, n_kv_head)
+                    scale = LlamaModel.permute(scale, n_head, n_kv_head)
         super()._repack_nvfp4(name, weight, scale, scale2, input_scale)
 
     _experts: list[dict[str, Tensor]] | None = None
@@ -201,7 +206,7 @@ class LlamaModel(TextModel):
         name, gen = item
 
         if "text_model." in name:
-            name = name.replace("text_model.", "") # for SmolVLM
+            name = name.replace("text_model.", "")  # for SmolVLM
 
         return super().filter_tensors((name, gen))
 
@@ -218,7 +223,7 @@ class LlamaModel(TextModel):
             new_tensors = {}
             for name, gen in tensors.items():
                 if name.startswith("midlayer."):
-                    new_name = "model.layers.0." + name[len("midlayer."):]
+                    new_name = "model.layers.0." + name[len("midlayer.") :]
                     new_tensors[new_name] = gen
                 elif name.startswith("layers.0."):  # Eagle3Speculator format
                     new_name = "model." + name
@@ -231,7 +236,7 @@ class LlamaModel(TextModel):
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # eagle3: special tensors that bypass standard llama mapping
-        if getattr(self, 'is_eagle3', False):
+        if getattr(self, "is_eagle3", False):
             if name == "fc.weight":
                 yield (name, data_torch)
                 return
@@ -240,7 +245,7 @@ class LlamaModel(TextModel):
                 return
             if name == "d2t":
                 # store for manual int64 handling in prepare_tensors (avoid F32 conversion)
-                if not hasattr(self, '_eagle3_int_tensors'):
+                if not hasattr(self, "_eagle3_int_tensors"):
                     self._eagle3_int_tensors = {}
                 self._eagle3_int_tensors[name] = data_torch
                 return
@@ -297,7 +302,7 @@ class LlamaModel(TextModel):
 
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
         if rope_params := self.rope_parameters.get("full_attention", self.rope_parameters):
-            if rope_params.get("rope_type", '').lower() == "llama3":
+            if rope_params.get("rope_type", "").lower() == "llama3":
                 base = rope_params.get("rope_theta", 10000.0)
                 if (dim := self.hparams.get("head_dim")) is None:
                     dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
@@ -323,12 +328,15 @@ class LlamaModel(TextModel):
                         smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
                         rope_factors.append(1 / ((1 - smooth) / factor + smooth))
 
-                yield (self.format_tensor_name(gguf.MODEL_TENSOR.ROPE_FREQS), torch.tensor(rope_factors, dtype=torch.float32))
+                yield (
+                    self.format_tensor_name(gguf.MODEL_TENSOR.ROPE_FREQS),
+                    torch.tensor(rope_factors, dtype=torch.float32),
+                )
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         # eagle3: collect d2t original dtype before parent converts tensors to F32
         eagle3_original_dtypes = {}
-        if getattr(self, 'is_eagle3', False):
+        if getattr(self, "is_eagle3", False):
             for name, data_torch in self.get_tensors():
                 if name == "d2t":
                     eagle3_original_dtypes[name] = data_torch.dtype
@@ -336,15 +344,16 @@ class LlamaModel(TextModel):
         super().prepare_tensors()
 
         # eagle3: write d2t as absolute target token ids
-        if getattr(self, 'is_eagle3', False) and hasattr(self, '_eagle3_int_tensors'):
+        if getattr(self, "is_eagle3", False) and hasattr(self, "_eagle3_int_tensors"):
             for name, data_torch in self._eagle3_int_tensors.items():
                 old_dtype = eagle3_original_dtypes.get(name, data_torch.dtype)
                 data = data_torch.to(torch.int64).cpu().numpy()
                 if name == "d2t":
                     data = data.reshape(-1)
-                    data = data + np.arange(data.size, dtype=np.int64)
+                    data += np.arange(data.size, dtype=np.int64)
                     if np.any((data < 0) | (data >= self.target_vocab_size)):
-                        raise ValueError(f"EAGLE-3 d2t target ids out of range for target vocab size {self.target_vocab_size}")
+                        msg = f"EAGLE-3 d2t target ids out of range for target vocab size {self.target_vocab_size}"
+                        raise ValueError(msg)
                     if np.unique(data).size != data.size:
                         raise ValueError("EAGLE-3 d2t contains duplicate target ids")
                 data_qtype = gguf.GGMLQuantizationType.I64
@@ -355,9 +364,10 @@ class LlamaModel(TextModel):
 
         if self._experts is not None:
             # flatten `list[dict[str, Tensor]]` into `list[str]`
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)
 
 
 @ModelBase.register("ArceeForCausalLM")
@@ -365,7 +375,7 @@ class LlamaModel(TextModel):
 class ArceeModel(LlamaModel):
     model_arch = gguf.MODEL_ARCH.ARCEE
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self._try_set_pooling_type()
 
@@ -380,23 +390,22 @@ class Llama4Model(LlamaModel):
     model_arch = gguf.MODEL_ARCH.LLAMA4
     undo_permute = False
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # IMPORTANT: the normal "intermediate_size" is renamed to "intermediate_size_mlp", we need to undo this
         self.hparams["intermediate_size_moe"] = self.hparams["intermediate_size"]
         self.hparams["intermediate_size"] = self.hparams["intermediate_size_mlp"]
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_gpt2()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_interleave_moe_layer_step(self.hparams["interleave_moe_layer_step"])
         self.gguf_writer.add_expert_feed_forward_length(self.hparams["intermediate_size_moe"])
-        if "layer_types" in self.hparams:
-            if all(lt == "full_attention" for lt in self.hparams["layer_types"]):
-                # all layers are full attention (for MobileLLM), disable swa
-                self.gguf_writer.add_sliding_window(0)
+        if "layer_types" in self.hparams and all(lt == "full_attention" for lt in self.hparams["layer_types"]):
+            # all layers are full attention (for MobileLLM), disable swa
+            self.gguf_writer.add_sliding_window(0)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
         # split the gate_up into gate and up
@@ -444,22 +453,22 @@ class ApertusModel(LlamaModel):
         n_layers = self.hparams["num_hidden_layers"]
         if name.endswith(".act_fn.alpha_n"):
             self._alpha_n[bid] = data_torch.to("cpu").float().item()
-            if (len(self._alpha_n) == n_layers):
+            if len(self._alpha_n) == n_layers:
                 self.gguf_writer.add_xielu_alpha_n([self._alpha_n[k] for k in sorted(self._alpha_n)])
             return
         if name.endswith(".act_fn.alpha_p"):
             self._alpha_p[bid] = data_torch.to("cpu").float().item()
-            if (len(self._alpha_p) == n_layers):
+            if len(self._alpha_p) == n_layers:
                 self.gguf_writer.add_xielu_alpha_p([self._alpha_p[k] for k in sorted(self._alpha_p)])
             return
         if name.endswith(".act_fn.beta"):
             self._beta[bid] = data_torch.to("cpu").float().item()
-            if (len(self._beta) == n_layers):
+            if len(self._beta) == n_layers:
                 self.gguf_writer.add_xielu_beta([self._beta[k] for k in sorted(self._beta)])
             return
         if name.endswith(".act_fn.eps"):
             self._eps[bid] = data_torch.to("cpu").float().item()
-            if (len(self._eps) == n_layers):
+            if len(self._eps) == n_layers:
                 self.gguf_writer.add_xielu_eps([self._eps[k] for k in sorted(self._eps)])
             return
 

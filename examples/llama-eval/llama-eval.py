@@ -2,22 +2,23 @@
 
 import argparse
 import json
+import operator
 import os
+import random
 import re
 import subprocess
 import sys
 import threading
 import time
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict, field
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from math import sqrt
 from pathlib import Path
 from queue import Queue
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Any
+
 import requests
-from tqdm import tqdm
-import random
-from math import sqrt
 
 
 @dataclass
@@ -26,7 +27,8 @@ class ServerConfig:
     threads: int
     name: str = ""
 
-def wilson_interval(correct: int, total: int, z: float = 1.96) -> Tuple[float, float]:
+
+def wilson_interval(correct: int, total: int, z: float = 1.96) -> tuple[float, float]:
     """Wilson score confidence interval for a proportion."""
     if total == 0:
         return (0.0, 1.0)
@@ -36,44 +38,25 @@ def wilson_interval(correct: int, total: int, z: float = 1.96) -> Tuple[float, f
     margin = z * sqrt((p * (1 - p) + z2 / 4) / total) / (1 + z2)
     return (center - margin, center + margin)
 
+
 cache_dir = Path.home() / ".cache" / "huggingface" / "datasets"
 cache_dir.mkdir(parents=True, exist_ok=True)
 os.environ["HF_DATASETS_CACHE"] = str(cache_dir)
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 
 GRADER_PATTERNS = {
-    "aime": r'\boxed{(\d+)}|\b(\d+)\b',
-    "aime2025": r'\boxed{(\d+)}|\b(\d+)\b',
-    "aime2026": r'\boxed{(\d+)}|\b(\d+)\b',
-    "gsm8k": r'\b(\d+)\b',
+    "aime": r"\boxed{(\d+)}|\b(\d+)\b",
+    "aime2025": r"\boxed{(\d+)}|\b(\d+)\b",
+    "aime2026": r"\boxed{(\d+)}|\b(\d+)\b",
+    "gsm8k": r"\b(\d+)\b",
 }
 
 SAMPLE_ANSWERS = {
-    "aime": [
-        "42",
-        "-123",
-        "999"
-    ],
-    "aime2025": [
-        "42",
-        "-123",
-        "999"
-    ],
-    "aime2026": [
-        "42",
-        "-123",
-        "999"
-    ],
-    "gsm8k": [
-        "42",
-        "-123",
-        "999"
-    ],
-    "gpqa": [
-        "A",
-        "D",
-        "C"
-    ],
+    "aime": ["42", "-123", "999"],
+    "aime2025": ["42", "-123", "999"],
+    "aime2026": ["42", "-123", "999"],
+    "gsm8k": ["42", "-123", "999"],
+    "gpqa": ["A", "D", "C"],
 }
 
 TEMPLATE_REGISTRY = {
@@ -111,22 +94,22 @@ D) {D}
 
 
 class BaseDataset(ABC):
-    questions: List[Dict]
+    questions: list[dict]
 
     @abstractmethod
-    def get_question(self, index: int) -> Dict:
+    def get_question(self, index: int) -> dict:
         pass
 
     @abstractmethod
-    def get_question_text(self, question: Dict) -> str:
+    def get_question_text(self, question: dict) -> str:
         pass
 
     @abstractmethod
-    def get_answer(self, question: Dict) -> str:
+    def get_answer(self, question: dict) -> str:
         pass
 
     @abstractmethod
-    def get_prompt(self, question: Dict) -> str:
+    def get_prompt(self, question: dict) -> str:
         pass
 
     def __len__(self) -> int:
@@ -139,16 +122,16 @@ class TaskState:
     prompt: str
     expected: str
     question_text: str = ""
-    response: Optional[str] = None
-    answer: Optional[str] = None
-    grader_log: Dict[str, Any] = field(default_factory=dict)
+    response: str | None = None
+    answer: str | None = None
+    grader_log: dict[str, Any] = field(default_factory=dict)
     correct: bool = False
     status: str = "pending"
-    tokens: Optional[int] = None
-    tps_gen: Optional[float] = None
-    t_gen_ms: Optional[float] = None
-    reasoning_content: Optional[str] = None
-    server_name: Optional[str] = None
+    tokens: int | None = None
+    tps_gen: float | None = None
+    t_gen_ms: float | None = None
+    reasoning_content: str | None = None
+    server_name: str | None = None
     chunk_idx: int = 0
     problem_idx: int = 0
 
@@ -157,25 +140,25 @@ class EvalState:
     def __init__(
         self,
         dataset_type: str,
-        sampling_config: Dict[str, Any],
+        sampling_config: dict[str, Any],
         output_file: Path = Path("llama-eval-state.json"),
-        model_name: Optional[str] = None
-    ):
+        model_name: str | None = None,
+    ) -> None:
         self.dataset_type = dataset_type
         self.sampling_config = sampling_config
         self.output_file = output_file
         self.model_name = model_name
-        self.dataset: Optional[BaseDataset] = None
-        self.tasks: List[Tuple[int, str]] = []
-        self.all_tasks: List[Tuple[int, str]] = []
-        self.task_states: Dict[str, Any] = {}
+        self.dataset: BaseDataset | None = None
+        self.tasks: list[tuple[int, str]] = []
+        self.all_tasks: list[tuple[int, str]] = []
+        self.task_states: dict[str, Any] = {}
         self.total = 0
         self.correct = 0
         self.processed = 0
         self.total_time: float = 0.0
         self._lock = threading.Lock()
 
-    def load_dataset(self, seed: int = 1234):
+    def load_dataset(self, seed: int = 1234) -> None:
         if self.dataset_type == "aime":
             self.dataset = AimeDataset()
         elif self.dataset_type == "aime2025":
@@ -187,9 +170,10 @@ class EvalState:
         elif self.dataset_type == "gpqa":
             self.dataset = GpqaDataset(variant="diamond", seed=seed)
         else:
-            raise ValueError(f"Unknown dataset type: {self.dataset_type}")
+            msg = f"Unknown dataset type: {self.dataset_type}"
+            raise ValueError(msg)
 
-    def setup_tasks(self, n_cases: Optional[int] = None, seed: int = 1234):
+    def setup_tasks(self, n_cases: int | None = None, seed: int = 1234) -> None:
         if self.dataset is None:
             raise ValueError("Dataset not loaded. Call load_dataset() first.")
 
@@ -212,7 +196,7 @@ class EvalState:
 
         self.all_tasks = list(self.tasks)
 
-    def get_case(self, index: int) -> Tuple[str, str, str]:
+    def get_case(self, index: int) -> tuple[str, str, str]:
         if self.dataset is None:
             raise ValueError("Dataset not loaded.")
         question = self.dataset.get_question(index)
@@ -226,19 +210,19 @@ class EvalState:
         task_id: str,
         prompt: str,
         expected: str,
-        response: Optional[str],
-        answer: Optional[str],
-        grader_log: Dict[str, Any],
+        response: str | None,
+        answer: str | None,
+        grader_log: dict[str, Any],
         correct: bool,
         status: str,
-        tokens: Optional[int] = None,
-        tps_gen: Optional[float] = None,
-        t_gen_ms: Optional[float] = None,
-        reasoning_content: Optional[str] = None,
-        server_name: Optional[str] = None,
+        tokens: int | None = None,
+        tps_gen: float | None = None,
+        t_gen_ms: float | None = None,
+        reasoning_content: str | None = None,
+        server_name: str | None = None,
         chunk_idx: int = 0,
         problem_idx: int = 0,
-    ):
+    ) -> None:
         with self._lock:
             if "cases" not in self.task_states:
                 self.task_states["cases"] = {}
@@ -263,41 +247,49 @@ class EvalState:
 
             self.correct = sum(1 for c in self.task_states.get("cases", {}).values() if c.get("correct", False))
 
-    def print_progress(self, task_state: TaskState, total_tasks: int, n_correct: int = 0):
-        display_answer = task_state.answer if task_state.answer else "N/A"
+    def print_progress(self, task_state: TaskState, total_tasks: int, n_correct: int = 0) -> None:
+        display_answer = task_state.answer or "N/A"
         display_tokens = str(task_state.tokens) if task_state.tokens is not None else "N/A"
         display_tps = f"{task_state.tps_gen:.1f}" if task_state.tps_gen is not None else "N/A"
-        display_t_gen = f"{task_state.t_gen_ms/1000:.1f}" if task_state.t_gen_ms is not None else "N/A"
-        display_server = task_state.server_name if task_state.server_name else "N/A"
+        display_t_gen = f"{task_state.t_gen_ms / 1000:.1f}" if task_state.t_gen_ms is not None else "N/A"
+        display_server = task_state.server_name or "N/A"
         success_ratio = n_correct / self.processed if self.processed > 0 else 0.0
-        first_line = task_state.question_text.split('\n')[0]
+        first_line = task_state.question_text.split("\n")[0]
         truncated_question = first_line[:43]
         if len(first_line) > 43:
             truncated_question += "..."
         else:
             truncated_question = truncated_question.ljust(43) + "..."
-        print(f"{self.processed:3}/{total_tasks:3}  {task_state.task_id:<20} {self.dataset_type.upper()}   {truncated_question:<40}    {task_state.expected:<10} {display_answer:<10} {display_tokens:<6} {display_tps:<6} {display_t_gen:<8} {'✓' if task_state.correct else '✗'}  [{n_correct:3}/{self.processed:3}, {success_ratio:.3f}]  {display_server}")
+        print(
+            f"{self.processed:3}/{total_tasks:3}  {task_state.task_id:<20} {self.dataset_type.upper()}   "
+            f"{truncated_question:<40}    {task_state.expected:<10} {display_answer:<10} {display_tokens:<6} "
+            f"{display_tps:<6} {display_t_gen:<8} {'✓' if task_state.correct else '✗'}  "  # noqa: RUF001
+            f"[{n_correct:3}/{self.processed:3}, {success_ratio:.3f}]  {display_server}"
+        )
 
-    def print_summary(self):
+    def print_summary(self) -> None:
         if self.total == 0:
-            print(f"\n{'='*60}")
-            print(f"Results: 0/0 correct (0.0%)")
-            print(f"{'='*60}")
+            print(f"\n{'=' * 60}")
+            print("Results: 0/0 correct (0.0%)")
+            print(f"{'=' * 60}")
         else:
             ci_lower, ci_upper = self.accuracy_ci()
-            print(f"\n{'='*60}")
-            print(f"Results: {self.correct}/{self.total} correct ({self.correct/self.total*100:.1f}%) [{ci_lower*100:.1f}%, {ci_upper*100:.1f}%]")
-            print(f"{'='*60}")
+            print(f"\n{'=' * 60}")
+            print(
+                f"Results: {self.correct}/{self.total} correct ({self.correct / self.total * 100:.1f}%) "
+                f"[{ci_lower * 100:.1f}%, {ci_upper * 100:.1f}%]"
+            )
+            print(f"{'=' * 60}")
 
-    def dump(self):
+    def dump(self) -> None:
         with self._lock:
-            tasks_to_save = self.all_tasks if self.all_tasks else self.tasks
+            tasks_to_save = self.all_tasks or self.tasks
             all_cases = {}
             for i, task_id in tasks_to_save:
                 question_text, prompt, expected = self.get_case(i)
                 # Extract chunk_idx from task_id for pending cases
-                _parts = task_id.rsplit("_", 2)
-                _chunk_idx = int(_parts[-2]) if len(_parts) >= 3 else 0
+                parts = task_id.rsplit("_", 2)
+                chunk_idx = int(parts[-2]) if len(parts) >= 3 else 0
                 if task_id in self.task_states.get("cases", {}):
                     all_cases[task_id] = self.task_states["cases"][task_id]
                 else:
@@ -316,7 +308,7 @@ class EvalState:
                         "t_gen_ms": None,
                         "reasoning_content": None,
                         "server_name": None,
-                        "chunk_idx": _chunk_idx,
+                        "chunk_idx": chunk_idx,
                         "problem_idx": i,
                     }
 
@@ -333,20 +325,20 @@ class EvalState:
                     "ci_upper": ci_upper,
                     "cases": all_cases,
                 },
-                "sampling_config": self.sampling_config
+                "sampling_config": self.sampling_config,
             }
-            with open(self.output_file, "w") as f:
+            with Path(self.output_file).open("w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
 
             self.dump_html(tasks_to_save, all_cases)
 
-    def dump_html(self, tasks_to_save: List[Tuple[int, str]], all_cases: Dict[str, Any]):
+    def dump_html(self, tasks_to_save: list[tuple[int, str]], all_cases: dict[str, Any]) -> None:
         html_file = Path(str(self.output_file) + ".html")
 
         cases = all_cases
         completed = {tid: c for tid, c in cases.items() if c.get("status") == "ok"}
         n_correct = sum(1 for c in completed.values() if c.get("correct", False))
-        n_incorrect = len(completed) - n_correct
+        len(completed) - n_correct
         n_pending = len(tasks_to_save) - len(completed)
         accuracy = n_correct / len(completed) * 100 if completed else 0.0
         ci_lower, ci_upper = wilson_interval(n_correct, len(completed)) if completed else (0.0, 1.0)
@@ -358,7 +350,7 @@ class EvalState:
         sampling_str = ", ".join(sampling_parts) if sampling_parts else "default"
 
         rows = []
-        for i, task_id in tasks_to_save:
+        for _i, task_id in tasks_to_save:
             case = cases.get(task_id, {})
             status = case.get("status", "pending")
             expected = case.get("expected", "")
@@ -383,7 +375,7 @@ class EvalState:
             tps_gen = case.get("tps_gen")
             tps_str = f"{tps_gen:.1f}" if tps_gen is not None else ""
             t_gen_ms = case.get("t_gen_ms")
-            t_gen_str = f"{t_gen_ms/1000:.1f}" if t_gen_ms is not None else ""
+            t_gen_str = f"{t_gen_ms / 1000:.1f}" if t_gen_ms is not None else ""
             reasoning_content = case.get("reasoning_content", "") or ""
             server_name = case.get("server_name", "") or ""
 
@@ -409,7 +401,7 @@ class EvalState:
                     <div class="details-content">
                         <b>Prompt</b><pre>{escaped_prompt}</pre>
                         <b>Response</b><pre>{escaped_response}</pre>
-                        {f'<b>Reasoning</b><pre>{escaped_reasoning}</pre>' if escaped_reasoning else ''}
+                        {f"<b>Reasoning</b><pre>{escaped_reasoning}</pre>" if escaped_reasoning else ""}
                         <b>Grader</b><pre>{grader_log_str}</pre>
                     </div>
                 </td>
@@ -418,23 +410,24 @@ class EvalState:
         rows_html = "\n".join(rows)
 
         # ---- per-problem summary table ----
-        problem_groups: Dict[int, List[Dict[str, Any]]] = {}
-        for _tid, _case in cases.items():
-            if _case.get("status") != "ok":
+        problem_groups: dict[int, list[dict[str, Any]]] = {}
+        for tid, case_ in cases.items():
+            if case_.get("status") != "ok":
                 continue
-            _pidx = _case.get("problem_idx")
-            if _pidx is None:
-                _p_parts = _tid.rsplit("_", 2)
-                _pidx = int(_p_parts[-1]) if len(_p_parts) >= 3 else 0
-            problem_groups.setdefault(_pidx, []).append(_case)
+            pidx_ = case_.get("problem_idx")
+            if pidx_ is None:
+                p_parts = tid.rsplit("_", 2)
+                pidx_ = int(p_parts[-1]) if len(p_parts) >= 3 else 0
+            problem_groups.setdefault(pidx_, []).append(case_)
 
         summary_rows_html = ""
         if problem_groups:
+
             def _stat(v, fmt=".1f", avg_fmt=None):
                 if not v:
                     return ("–", "–", "–")
                 af = fmt if avg_fmt is None else avg_fmt
-                return (f"{min(v):{fmt}}", f"{sum(v)/len(v):{af}}", f"{max(v):{fmt}}")
+                return (f"{min(v):{fmt}}", f"{sum(v) / len(v):{af}}", f"{max(v):{fmt}}")
 
             summary_data = []
             for pidx, g in problem_groups.items():
@@ -443,14 +436,18 @@ class EvalState:
                 toks = [c["tokens"] for c in g if c.get("tokens") is not None]
                 tps = [c["tps_gen"] for c in g if c.get("tps_gen") is not None]
                 tg = [c["t_gen_ms"] / 1000 for c in g if c.get("t_gen_ms") is not None]
-                summary_data.append((
-                    pidx, runs, n_ok,
-                    _stat(toks, "d", ".0f"),
-                    _stat(tps),
-                    _stat(tg),
-                ))
+                summary_data.append(
+                    (
+                        pidx,
+                        runs,
+                        n_ok,
+                        _stat(toks, "d", ".0f"),
+                        _stat(tps),
+                        _stat(tg),
+                    )
+                )
 
-            summary_data.sort(key=lambda r: r[0])  # sort by problem index ascending
+            summary_data.sort(key=operator.itemgetter(0))  # sort by problem index ascending
 
             summary_rows_html = "\n".join(
                 f"""<tr class="summary-row">
@@ -507,8 +504,8 @@ class EvalState:
 <body>
     <div class="bar">
         <div class="label">Dataset</div><div class="value"><b>{self.dataset_type.upper()}</b></div>
-        <div class="label">Model</div><div class="value"><b>{self.model_name or 'N/A'}</b></div>
-        <div class="label">Accuracy</div><div class="value"><b>{accuracy:.1f}%</b> [{ci_lower*100:.1f}%, {ci_upper*100:.1f}%]</div>
+        <div class="label">Model</div><div class="value"><b>{self.model_name or "N/A"}</b></div>
+        <div class="label">Accuracy</div><div class="value"><b>{accuracy:.1f}%</b> [{ci_lower * 100:.1f}%, {ci_upper * 100:.1f}%]</div>
         <div class="label">Correct</div><div class="value"><span class="correct">{n_correct}</span> / {len(completed)}</div>
         <div class="label">Pending</div><div class="value">{n_pending}</div>
         <div class="label">Time</div><div class="value">{self.total_time:.1f}s</div>
@@ -574,26 +571,27 @@ class EvalState:
 </body>
 </html>"""
 
-        with open(html_file, "w") as f:
-            f.write(html_content)
+        Path(html_file).write_text(html_content, encoding="utf-8")
 
     def _escape_html(self, s: str) -> str:
-        return (s.replace("&", "&amp;")
-                   .replace("<", "&lt;")
-                   .replace(">", "&gt;")
-                   .replace('"', "&quot;")
-                   .replace("'", "&#39;"))
+        return (
+            s.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#39;")
+        )
 
     @classmethod
     def load(cls, path: Path) -> "EvalState":
-        with open(path, "r") as f:
+        with Path(path).open(encoding="utf-8") as f:
             data = json.load(f)
 
         eval_state = cls(
             dataset_type=data["id"],
             sampling_config=data["sampling_config"],
             output_file=path,
-            model_name=data.get("model_name")
+            model_name=data.get("model_name"),
         )
         eval_state.load_dataset()
 
@@ -601,10 +599,7 @@ class EvalState:
         eval_state.all_tasks = []
         for task_id in data.get("tasks", []):
             parts = task_id.rsplit("_", 2)
-            if len(parts) >= 3:
-                idx = int(parts[-1])
-            else:
-                idx = 0
+            idx = int(parts[-1]) if len(parts) >= 3 else 0
             eval_state.tasks.append((idx, task_id))
             eval_state.all_tasks.append((idx, task_id))
 
@@ -625,10 +620,10 @@ class EvalState:
         if not self.all_tasks:
             return False
         cases = self.task_states.get("cases", {})
-        completed = {tid for tid in self.task_states.get("cases", {}).keys() if cases.get(tid, {}).get("status") == "ok"}
+        completed = {tid for tid in self.task_states.get("cases", {}) if cases.get(tid, {}).get("status") == "ok"}
         return len(completed) == len(self.all_tasks)
 
-    def get_pending_tasks(self) -> List[Tuple[int, str]]:
+    def get_pending_tasks(self) -> list[tuple[int, str]]:
         cases = self.task_states.get("cases", {})
         pending = []
         for i, task_id in self.all_tasks:
@@ -637,14 +632,17 @@ class EvalState:
                 pending.append((i, task_id))
         return pending
 
-    def print_all_tasks(self):
+    def print_all_tasks(self) -> None:
         cases = self.task_states.get("cases", {})
-        tasks_to_show = self.all_tasks if self.all_tasks else self.tasks
+        tasks_to_show = self.all_tasks or self.tasks
         print()
         print("Tasks:")
-        print("  Task ID             Dataset  Prompt (first 40 chars)                        Expected    Answer       Tokens  T/s     Gen s  Status")
+        print(
+            "  Task ID             Dataset  Prompt (first 40 chars)                        Expected    Answer       "
+            "Tokens  T/s     Gen s  Status"
+        )
         for i, task_id in tasks_to_show:
-            question, prompt, expected = self.get_case(i)
+            question, _prompt, expected = self.get_case(i)
             case = cases.get(task_id, {})
             status = case.get("status", "pending")
             answer = case.get("answer") or "N/A" if status == "ok" else "N/A"
@@ -653,35 +651,41 @@ class EvalState:
             tps_gen = case.get("tps_gen")
             tps_str = f"{tps_gen:.1f}" if tps_gen is not None else "N/A"
             t_gen_ms = case.get("t_gen_ms")
-            t_gen_str = f"{t_gen_ms/1000:.1f}" if t_gen_ms is not None else "N/A"
+            t_gen_str = f"{t_gen_ms / 1000:.1f}" if t_gen_ms is not None else "N/A"
             server_name = case.get("server_name", "") or ""
             is_correct = case.get("correct", False) if status == "ok" else False
-            symbol = "✓ " if is_correct else ("✗ " if status == "ok" else "")
-            first_line = question.split('\n')[0]
+            symbol = "✓ " if is_correct else ("✗ " if status == "ok" else "")  # noqa: RUF001
+            first_line = question.split("\n")[0]
             question_trunc = first_line[:43]
             if len(first_line) > 43:
                 question_trunc += "..."
             else:
                 question_trunc = question_trunc.ljust(43) + "..."
-            print(f"  {task_id:<20} {self.dataset_type.upper()}   {question_trunc:<40}    {expected:<10} {answer:<10} {tokens_str:<6} {tps_str:<6} {t_gen_str:<8} {symbol}{status}  {server_name}")
+            print(
+                f"  {task_id:<20} {self.dataset_type.upper()}   {question_trunc:<40}    {expected:<10} {answer:<10} "
+                f"{tokens_str:<6} {tps_str:<6} {t_gen_str:<8} {symbol}{status}  {server_name}"
+            )
         print()
 
-    def print_existing_summary(self):
+    def print_existing_summary(self) -> None:
         cases = self.task_states.get("cases", {})
         completed_cases = {tid: c for tid, c in cases.items() if c.get("status") == "ok"}
         correct = sum(1 for c in completed_cases.values() if c.get("correct", False))
         total = len(completed_cases)
         if total == 0:
-            print(f"{'='*60}")
-            print(f"Results: 0/0 correct (0.0%)")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
+            print("Results: 0/0 correct (0.0%)")
+            print(f"{'=' * 60}")
         else:
             ci_lower, ci_upper = self.accuracy_ci()
-            print(f"{'='*60}")
-            print(f"Results: {correct}/{total} correct ({correct/total*100:.1f}%) [{ci_lower*100:.1f}%, {ci_upper*100:.1f}%]")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
+            print(
+                f"Results: {correct}/{total} correct ({correct / total * 100:.1f}%) "
+                f"[{ci_lower * 100:.1f}%, {ci_upper * 100:.1f}%]"
+            )
+            print(f"{'=' * 60}")
 
-    def accuracy_ci(self) -> Tuple[float, float]:
+    def accuracy_ci(self) -> tuple[float, float]:
         """Compute Wilson score confidence interval from completed cases."""
         cases = self.task_states.get("cases", {})
         completed = {tid: c for tid, c in cases.items() if c.get("status") == "ok"}
@@ -689,14 +693,16 @@ class EvalState:
         total = len(completed)
         return wilson_interval(correct, total)
 
-def normalize_number(s: str) -> Optional[int]:
+
+def normalize_number(s: str) -> int | None:
     match = re.match(r"\d+", s)  # match digits from the start
     if not match:
         return None
     return int(match.group(0))
 
+
 class AimeDataset(BaseDataset):
-    def __init__(self, split: str = "train"):
+    def __init__(self, split: str = "train") -> None:
         self.split = split
         self.questions = []
         self._load_dataset()
@@ -720,34 +726,35 @@ class AimeDataset(BaseDataset):
 
         print(f"AIME dataset loaded: {len(self.questions)} questions")
 
-    def get_question(self, index: int) -> Dict:
+    def get_question(self, index: int) -> dict:
         """Get question by index"""
         return self.questions[index]
 
-    def get_question_text(self, question: Dict) -> str:
+    def get_question_text(self, question: dict) -> str:
         """Get question string"""
         return question["problem"] if "problem" in question else question["question"]
 
-    def get_answer(self, question: Dict) -> str:
+    def get_answer(self, question: dict) -> str:
         answer = question["answer"]
         if isinstance(answer, str):
             normalized = normalize_number(answer)
             return str(normalized) if normalized is not None else answer
         return str(answer)
 
-    def get_prompt(self, question: Dict) -> str:
+    def get_prompt(self, question: dict) -> str:
         """Get formatted prompt for the question"""
         return TEMPLATE_REGISTRY[question["dataset_type"]].format(
             question=self.get_question_text(question),
         )
 
+
 class Aime2025Dataset(BaseDataset):
-    def __init__(self):
+    def __init__(self) -> None:
         self.questions = []
         self._load_dataset()
 
     def _load_dataset(self):
-        print(f"Loading AIME2025 dataset...")
+        print("Loading AIME2025 dataset...")
         from datasets import load_dataset
 
         config_name = "AIME2025-I"
@@ -766,7 +773,7 @@ class Aime2025Dataset(BaseDataset):
 
         print(f"AIME2025 dataset loaded: {len(self.questions)} questions")
 
-        print(f"Loading AIME2025 dataset (part 2)...")
+        print("Loading AIME2025 dataset (part 2)...")
         config_name_2 = "AIME2025-II"
         cache_path_2 = cache_dir / "opencompass___AIME2025" / "default" / "0.0.0"
         if cache_path_2.exists():
@@ -782,34 +789,35 @@ class Aime2025Dataset(BaseDataset):
 
         print(f"AIME2025 dataset loaded: {len(self.questions)} questions (total)")
 
-    def get_question(self, index: int) -> Dict:
+    def get_question(self, index: int) -> dict:
         """Get question by index"""
         return self.questions[index]
 
-    def get_question_text(self, question: Dict) -> str:
+    def get_question_text(self, question: dict) -> str:
         """Get question string"""
         return question["question"]
 
-    def get_answer(self, question: Dict) -> str:
+    def get_answer(self, question: dict) -> str:
         answer = question["answer"]
         if isinstance(answer, str):
             normalized = normalize_number(answer)
             return str(normalized) if normalized is not None else answer
         return str(answer)
 
-    def get_prompt(self, question: Dict) -> str:
+    def get_prompt(self, question: dict) -> str:
         """Get formatted prompt for the question"""
         return TEMPLATE_REGISTRY["aime2025"].format(
             question=self.get_question_text(question),
         )
 
+
 class Aime2026Dataset(BaseDataset):
-    def __init__(self):
+    def __init__(self) -> None:
         self.questions = []
         self._load_dataset()
 
     def _load_dataset(self):
-        print(f"Loading AIME2026 dataset...")
+        print("Loading AIME2026 dataset...")
         from datasets import load_dataset
 
         cache_path = cache_dir / "MathArena___aime_2026" / "default" / "0.0.0"
@@ -827,25 +835,26 @@ class Aime2026Dataset(BaseDataset):
 
         print(f"AIME2026 dataset loaded: {len(self.questions)} questions")
 
-    def get_question(self, index: int) -> Dict:
+    def get_question(self, index: int) -> dict:
         """Get question by index"""
         return self.questions[index]
 
-    def get_question_text(self, question: Dict) -> str:
+    def get_question_text(self, question: dict) -> str:
         """Get question string"""
         return question["problem"]
 
-    def get_answer(self, question: Dict) -> str:
+    def get_answer(self, question: dict) -> str:
         return str(question["answer"])
 
-    def get_prompt(self, question: Dict) -> str:
+    def get_prompt(self, question: dict) -> str:
         """Get formatted prompt for the question"""
         return TEMPLATE_REGISTRY["aime2026"].format(
             question=self.get_question_text(question),
         )
 
+
 class Gsm8kDataset(BaseDataset):
-    def __init__(self, split: str = "test"):
+    def __init__(self, split: str = "test") -> None:
         self.split = split
         self.questions = []
         self._load_dataset()
@@ -880,15 +889,15 @@ class Gsm8kDataset(BaseDataset):
 
         print(f"GSM8K dataset loaded: {len(self.questions)} questions")
 
-    def get_question(self, index: int) -> Dict:
+    def get_question(self, index: int) -> dict:
         """Get question by index"""
         return self.questions[index]
 
-    def get_question_text(self, question: Dict) -> str:
+    def get_question_text(self, question: dict) -> str:
         """Get question string"""
         return question["problem"] if "problem" in question else question["question"]
 
-    def get_answer(self, question: Dict) -> str:
+    def get_answer(self, question: dict) -> str:
         # GSM8K has pre-extracted gold field, AIME uses answer field
         if "gold" in question:
             return question["gold"]
@@ -898,14 +907,15 @@ class Gsm8kDataset(BaseDataset):
             return str(normalized) if normalized is not None else answer
         return str(answer)
 
-    def get_prompt(self, question: Dict) -> str:
+    def get_prompt(self, question: dict) -> str:
         """Get formatted prompt for the question"""
         return TEMPLATE_REGISTRY[question["dataset_type"]].format(
             question=self.get_question_text(question),
         )
 
+
 class GpqaDataset(BaseDataset):
-    def __init__(self, variant: str = "diamond", seed: int = 1234):
+    def __init__(self, variant: str = "diamond", seed: int = 1234) -> None:
         self.variant = variant
         self.seed = seed
         self.questions = []
@@ -930,7 +940,7 @@ class GpqaDataset(BaseDataset):
             incorrect_answers = [
                 question["Incorrect Answer 1"],
                 question["Incorrect Answer 2"],
-                question["Incorrect Answer 3"]
+                question["Incorrect Answer 3"],
             ]
 
             # Create list of (answer, is_correct) tuples
@@ -942,7 +952,7 @@ class GpqaDataset(BaseDataset):
 
             # Extract shuffled answers and determine correct letter
             shuffled_answers = [ans for ans, _ in options]
-            correct_letter = chr(ord('A') + options.index((correct_answer, True)))
+            correct_letter = chr(ord("A") + options.index((correct_answer, True)))
 
             # Store shuffled answers and correct letter
             question["shuffled_answers"] = shuffled_answers
@@ -952,37 +962,38 @@ class GpqaDataset(BaseDataset):
 
         print(f"GPQA dataset loaded: {len(self.questions)} questions")
 
-    def get_question(self, index: int) -> Dict:
+    def get_question(self, index: int) -> dict:
         """Get question by index"""
         return self.questions[index]
 
-    def get_question_text(self, question: Dict) -> str:
+    def get_question_text(self, question: dict) -> str:
         """Get question string"""
         return question["Question"]
 
-    def get_answer(self, question: Dict) -> str:
+    def get_answer(self, question: dict) -> str:
         # GPQA returns the correct letter (A, B, C, or D)
         return question["correct_letter"]
 
-    def get_prompt(self, question: Dict) -> str:
+    def get_prompt(self, question: dict) -> str:
         """Get formatted prompt for the question"""
         return TEMPLATE_REGISTRY["gpqa"].format(
             Question=self.get_question_text(question),
             A=question["shuffled_answers"][0],
             B=question["shuffled_answers"][1],
             C=question["shuffled_answers"][2],
-            D=question["shuffled_answers"][3]
+            D=question["shuffled_answers"][3],
         )
+
 
 class Grader:
     def __init__(
         self,
         grader_type: str = "llm",
-        grader_script: Optional[str] = None,
-        grader_model_name: Optional[str] = None,
+        grader_script: str | None = None,
+        grader_model_name: str | None = None,
         grader_server_url: str = "",
-        dataset_type: str = "aime"
-    ):
+        dataset_type: str = "aime",
+    ) -> None:
         self.grader_type = grader_type
         self.grader_script = grader_script
         self.grader_model_name = grader_model_name
@@ -990,19 +1001,19 @@ class Grader:
         self.dataset_type = dataset_type
         self.pattern = self._get_pattern()
 
-    def _get_pattern(self) -> Optional[str]:
+    def _get_pattern(self) -> str | None:
         if self.grader_type == "regex":
             return GRADER_PATTERNS.get(self.dataset_type)  # Use dataset_type as key
         return None
 
-    def _extract_answer_regex(self, pred: str) -> Optional[str]:
+    def _extract_answer_regex(self, pred: str) -> str | None:
         """Extract answer using regex pattern"""
         if not self.pattern:
             return None
 
         # For AIME datasets, prioritize boxed answers
-        if self.dataset_type in ["aime", "aime2025"]:
-            boxed_pattern = r'\\boxed{([^}]+)}'
+        if self.dataset_type in {"aime", "aime2025"}:
+            boxed_pattern = r"\\boxed{([^}]+)}"
             boxed_matches = re.findall(boxed_pattern, pred, re.IGNORECASE)
             if boxed_matches:
                 # Return the last boxed answer found (most likely the final answer)
@@ -1017,13 +1028,13 @@ class Grader:
         # Process matches from end to start
         for match in reversed(matches):
             if isinstance(match, tuple):
-                match = match[0] if match[0] else match[1]
+                match = match[0] or match[1]
             answer = match.strip()
             if answer:
                 return answer
         return None
 
-    def _grade_regex(self, gold: str, pred: str) -> Tuple[bool, Optional[str]]:
+    def _grade_regex(self, gold: str, pred: str) -> tuple[bool, str | None]:
         """Grade using regex pattern matching"""
         answer = self._extract_answer_regex(pred)
         if answer is None:
@@ -1031,36 +1042,32 @@ class Grader:
         is_correct = answer.strip() == gold.strip()
         return is_correct, answer
 
-    def _grade_cli(self, gold: str, pred: str) -> Tuple[bool, Optional[str]]:
+    def _grade_cli(self, gold: str, pred: str) -> tuple[bool, str | None]:
         """Grade using external CLI script"""
         if not self.grader_script:
             raise ValueError("CLI grader requires --grader-script")
 
         script_path = Path(self.grader_script)
         if not script_path.exists():
-            raise FileNotFoundError(f"Grader script not found: {self.grader_script}")
+            msg = f"Grader script not found: {self.grader_script}"
+            raise FileNotFoundError(msg)
 
         try:
             result = subprocess.run(
-                [str(script_path), "--answer", pred, "--expected", gold],
-                capture_output=True,
-                text=True,
-                timeout=30
+                [str(script_path), "--answer", pred, "--expected", gold], capture_output=True, text=True, timeout=30
             )
             is_correct = result.returncode == 0
             answer = pred if is_correct else None
             return is_correct, answer
         except subprocess.TimeoutExpired:
             return False, None
-        except Exception as e:
+        except Exception:
             return False, None
 
-    def _grade_llm(self, gold: str, pred: str, problem: str) -> Tuple[bool, Optional[str]]:
+    def _grade_llm(self, gold: str, pred: str, problem: str) -> tuple[bool, str | None]:
         """Grade using LLM-based extraction with few-shot examples"""
         sample_answers = SAMPLE_ANSWERS.get(self.dataset_type, [])
-        sample_examples = "\n".join([
-            f"Example {i+1}: {ans}" for i, ans in enumerate(sample_answers)
-        ])
+        sample_examples = "\n".join([f"Example {i + 1}: {ans}" for i, ans in enumerate(sample_answers)])
 
         system_prompt = f"""You are an answer extraction system. Your task is to extract the answer from the model's response.
 
@@ -1080,13 +1087,10 @@ Please provide only the extracted answer, nothing else. If there is no clear ans
         headers = {"Content-Type": "application/json"}
         data = {
             "model": self.grader_model_name,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
             "temperature": 0,
         }
-        #print(json.dumps(data, indent=2))
+        # print(json.dumps(data, indent=2))
 
         try:
             response = requests.post(url, headers=headers, json=data)
@@ -1094,59 +1098,55 @@ Please provide only the extracted answer, nothing else. If there is no clear ans
             answer = response.json()["choices"][0]["message"]["content"].strip()
             is_correct = answer.strip().lower() == gold.strip().lower()
             return is_correct, answer
-        except Exception as e:
+        except Exception:
             return False, None
 
     def _truncate_response(self, response: str, max_lines: int = 6) -> str:
         """Keep only last N lines of response"""
-        lines = response.split('\n')
-        return '\n'.join(lines[-max_lines:]) if len(lines) > max_lines else response
+        lines = response.split("\n")
+        return "\n".join(lines[-max_lines:]) if len(lines) > max_lines else response
 
-    def grade(self, gold: str, pred: str, problem: str = "") -> Tuple[bool, Optional[str]]:
+    def grade(self, gold: str, pred: str, problem: str = "") -> tuple[bool, str | None]:
         """Grade the response"""
         if self.grader_type == "regex":
             return self._grade_regex(gold, pred)
-        elif self.grader_type == "cli":
+        if self.grader_type == "cli":
             return self._grade_cli(gold, pred)
-        elif self.grader_type == "llm":
+        if self.grader_type == "llm":
             return self._grade_llm(gold, pred, problem)
-        else:
-            raise ValueError(f"Unknown grader type: {self.grader_type}")
+        msg = f"Unknown grader type: {self.grader_type}"
+        raise ValueError(msg)
+
 
 class Processor:
     def __init__(
-        self,
-        server_configs: List[ServerConfig],
-        grader: Grader,
-        model_name: Optional[str] = None,
-        n_predict: int = -1
-    ):
+        self, server_configs: list[ServerConfig], grader: Grader, model_name: str | None = None, n_predict: int = -1
+    ) -> None:
         self.server_configs = server_configs
         self.grader = grader
         self.model_name = model_name
         self.n_predict = n_predict
 
     @staticmethod
-    def _check_server(server_config: ServerConfig) -> List[str]:
+    def _check_server(server_config: ServerConfig) -> list[str]:
         url = f"{server_config.url}/v1/models"
         try:
             response = requests.get(url)
             response.raise_for_status()
-            models = [m["id"] for m in response.json().get("data", [])]
-            return models
+            return [m["id"] for m in response.json().get("data", [])]
         except Exception as e:
             print(f"Error: Cannot reach server {server_config.name} ({server_config.url}): {e}", file=sys.stderr)
             sys.exit(1)
 
     def _make_request(
         self, server_config: ServerConfig, eval_state: EvalState, prompt: str
-    ) -> Tuple[Dict[str, Any], int, Optional[float], Optional[float], str]:
+    ) -> tuple[dict[str, Any], int, float | None, float | None, str]:
         url = f"{server_config.url}/v1/chat/completions"
         headers = {"Content-Type": "application/json"}
         data = {
-            "model": self.model_name if self.model_name else "llama",
+            "model": self.model_name or "llama",
             "messages": [{"role": "user", "content": prompt}],
-            "n_predict": self.n_predict
+            "n_predict": self.n_predict,
         }
         if eval_state.sampling_config.get("temperature") is not None:
             data["temperature"] = eval_state.sampling_config["temperature"]
@@ -1173,8 +1173,8 @@ class Processor:
         question_text, prompt, expected = eval_state.get_case(i)
 
         # Extract chunk_idx from task_id: "{dataset_type}_{chunk_idx:03d}_{index:03d}"
-        _parts = task_id.rsplit("_", 2)
-        chunk_idx = int(_parts[-2]) if len(_parts) >= 3 else 0
+        parts = task_id.rsplit("_", 2)
+        chunk_idx = int(parts[-2]) if len(parts) >= 3 else 0
         problem_idx = i
 
         task_state = TaskState(
@@ -1200,10 +1200,21 @@ class Processor:
             if finish_reason != "stop":
                 task_state.status = f"error: finish_reason={finish_reason}"
                 eval_state.add_result(
-                    task_id, prompt, expected, result, None,
-                    {"finish_reason": finish_reason}, False, task_state.status,
-                    tokens, tps_gen, t_gen_ms, reasoning_content, server_config.name,
-                    chunk_idx, problem_idx,
+                    task_id,
+                    prompt,
+                    expected,
+                    result,
+                    None,
+                    {"finish_reason": finish_reason},
+                    False,
+                    task_state.status,
+                    tokens,
+                    tps_gen,
+                    t_gen_ms,
+                    reasoning_content,
+                    server_config.name,
+                    chunk_idx,
+                    problem_idx,
                 )
                 eval_state.dump()
                 return task_state
@@ -1211,10 +1222,7 @@ class Processor:
             result_truncated = self.grader._truncate_response(result, max_lines=10)
             is_correct, answer = self.grader.grade(expected, result_truncated, prompt)
 
-            grader_log = {
-                "pred": result_truncated,
-                "grader_type": self.grader.grader_type
-            }
+            grader_log = {"pred": result_truncated, "grader_type": self.grader.grader_type}
             if self.grader.grader_type == "regex" and self.grader.pattern:
                 grader_log["pattern"] = self.grader.pattern
 
@@ -1224,16 +1232,27 @@ class Processor:
             task_state.status = "ok"
 
             eval_state.add_result(
-                task_id, prompt, expected, result, answer,
-                grader_log, is_correct, "ok",
-                tokens, tps_gen, t_gen_ms, reasoning_content, server_config.name,
-                chunk_idx, problem_idx,
+                task_id,
+                prompt,
+                expected,
+                result,
+                answer,
+                grader_log,
+                is_correct,
+                "ok",
+                tokens,
+                tps_gen,
+                t_gen_ms,
+                reasoning_content,
+                server_config.name,
+                chunk_idx,
+                problem_idx,
             )
 
             eval_state.dump()
 
         except Exception as e:
-            task_state.status = f"error: {str(e)}"
+            task_state.status = f"error: {e!s}"
 
         return task_state
 
@@ -1244,7 +1263,7 @@ class Processor:
         eval_state: EvalState,
         task_queue: Queue,
         results_queue: Queue,
-    ):
+    ) -> None:
         """Worker that pulls tasks from a shared queue and sends them to its server."""
         while True:
             task = task_queue.get()
@@ -1258,7 +1277,7 @@ class Processor:
             finally:
                 task_queue.task_done()
 
-    def evaluate(self, eval_state: EvalState, verbose: bool = False, resume: bool = False):
+    def evaluate(self, eval_state: EvalState, verbose: bool = False, resume: bool = False) -> None:
         total_tasks = len(eval_state.tasks)
         eval_state.total = len(eval_state.all_tasks) if eval_state.all_tasks else total_tasks
         eval_state.processed = 0
@@ -1272,10 +1291,15 @@ class Processor:
         print(f"Servers ({len(self.server_configs)}):")
         for i, sc in enumerate(self.server_configs):
             models_str = ", ".join(server_models[i]) if server_models[i] else "(none)"
-            print(f"  {i+1}. {sc.name} — {sc.url} ({sc.threads} threads) [{models_str}]")
+            print(f"  {i + 1}. {sc.name} — {sc.url} ({sc.threads} threads) [{models_str}]")
         print(f"Model: {self.model_name}")
         print(f"Grader: {self.grader.grader_type}")
-        print(f"Sampling: temp={eval_state.sampling_config.get('temperature', 'skip')}, top-k={eval_state.sampling_config.get('top_k', 'skip')}, top-p={eval_state.sampling_config.get('top_p', 'skip')}, min-p={eval_state.sampling_config.get('min_p', 'skip')}")
+        print(
+            f"Sampling: temp={eval_state.sampling_config.get('temperature', 'skip')}, "
+            f"top-k={eval_state.sampling_config.get('top_k', 'skip')}, "
+            f"top-p={eval_state.sampling_config.get('top_p', 'skip')}, "
+            f"min-p={eval_state.sampling_config.get('min_p', 'skip')}"
+        )
         print()
 
         # Shared task queue: all workers compete for tasks
@@ -1294,16 +1318,13 @@ class Processor:
             task_queue.put(None)
 
         # Launch workers: one ThreadPoolExecutor per server
-        executors: List[ThreadPoolExecutor] = []
-        worker_futures: List[Any] = []
+        executors: list[ThreadPoolExecutor] = []
+        worker_futures: list[Any] = []
         for server_config in self.server_configs:
             executor = ThreadPoolExecutor(max_workers=server_config.threads)
             executors.append(executor)
             for _ in range(server_config.threads):
-                future = executor.submit(
-                    self._worker, server_config, self, eval_state,
-                    task_queue, results_queue
-                )
+                future = executor.submit(self._worker, server_config, self, eval_state, task_queue, results_queue)
                 worker_futures.append(future)
 
         # Drain results as they complete
@@ -1342,124 +1363,64 @@ class Processor:
         eval_state.print_summary()
         eval_state.dump()
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Simplified evaluation tool for llama.cpp"
-    )
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Simplified evaluation tool for llama.cpp")
     parser.add_argument(
         "--server",
         type=str,
         default="http://localhost:8033",
-        help="Comma-separated local-inference-server URLs (default: http://localhost:8033)"
+        help="Comma-separated local-inference-server URLs (default: http://localhost:8033)",
     )
     parser.add_argument(
-        "--server-name",
-        type=str,
-        default="",
-        help="Comma-separated display names for servers (default: use URLs)"
+        "--server-name", type=str, default="", help="Comma-separated display names for servers (default: use URLs)"
     )
     parser.add_argument(
         "--dataset",
         type=str,
         default="aime",
         choices=["aime", "aime2025", "aime2026", "gsm8k", "gpqa"],
-        help="Dataset type (default: aime)"
+        help="Dataset type (default: aime)",
+    )
+    parser.add_argument("--n_cases", type=int, default=None, help="Number of cases to evaluate (default: all)")
+    parser.add_argument("--seed", type=int, default=1234, help="Random seed for shuffling (default: 1234)")
+    parser.add_argument(
+        "--n_predict", type=int, default=-1, help="Max tokens to predict per prompt (default: -1, infinite)"
+    )
+    parser.add_argument("--temperature", type=float, default=None, help="Sampling temperature (default: not passed)")
+    parser.add_argument("--top-k", type=int, default=None, help="Top K sampling (default: not passed)")
+    parser.add_argument("--top-p", type=float, default=None, help="Top P sampling (default: not passed)")
+    parser.add_argument("--min-p", type=float, default=None, help="Min P sampling (default: not passed)")
+    parser.add_argument(
+        "--threads", type=str, default="32", help="Comma-separated thread counts per server (default: 32)"
     )
     parser.add_argument(
-        "--n_cases",
-        type=int,
-        default=None,
-        help="Number of cases to evaluate (default: all)"
+        "--model", type=str, default=None, help="Model name to append as query parameter (e.g., gpt-oss-20b-hf)"
     )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=1234,
-        help="Random seed for shuffling (default: 1234)"
-    )
-    parser.add_argument(
-        "--n_predict",
-        type=int,
-        default=-1,
-        help="Max tokens to predict per prompt (default: -1, infinite)"
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=None,
-        help="Sampling temperature (default: not passed)"
-    )
-    parser.add_argument(
-        "--top-k",
-        type=int,
-        default=None,
-        help="Top K sampling (default: not passed)"
-    )
-    parser.add_argument(
-        "--top-p",
-        type=float,
-        default=None,
-        help="Top P sampling (default: not passed)"
-    )
-    parser.add_argument(
-        "--min-p",
-        type=float,
-        default=None,
-        help="Min P sampling (default: not passed)"
-    )
-    parser.add_argument(
-        "--threads",
-        type=str,
-        default="32",
-        help="Comma-separated thread counts per server (default: 32)"
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default=None,
-        help="Model name to append as query parameter (e.g., gpt-oss-20b-hf)"
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Show detailed output for each case"
-    )
+    parser.add_argument("--verbose", action="store_true", help="Show detailed output for each case")
     parser.add_argument(
         "--output",
         type=Path,
         default=Path("llama-eval-state.json"),
-        help="Output file for eval state (default: llama-eval-state.json)"
+        help="Output file for eval state (default: llama-eval-state.json)",
     )
     parser.add_argument(
         "--grader-type",
         type=str,
         default="llm",
         choices=["regex", "cli", "llm"],
-        help="Grader type: regex, cli, or llm (default: llm)"
+        help="Grader type: regex, cli, or llm (default: llm)",
     )
     parser.add_argument(
-        "--grader-script",
-        type=str,
-        default=None,
-        help="CLI grader script path (required for --grader-type cli)"
+        "--grader-script", type=str, default=None, help="CLI grader script path (required for --grader-type cli)"
     )
     parser.add_argument(
-        "--grader-server",
-        type=str,
-        default="",
-        help="Server URL for LLM grader (default: same as main server)"
+        "--grader-server", type=str, default="", help="Server URL for LLM grader (default: same as main server)"
     )
     parser.add_argument(
-        "--grader-model",
-        type=str,
-        default="",
-        help="Model name for LLM grader (default: same as main model)"
+        "--grader-model", type=str, default="", help="Model name for LLM grader (default: same as main model)"
     )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume from existing eval state"
-    )
+    parser.add_argument("--resume", action="store_true", help="Resume from existing eval state")
 
     args = parser.parse_args()
 
@@ -1468,21 +1429,27 @@ def main():
     thread_counts = [int(t.strip()) for t in args.threads.split(",") if t.strip()]
 
     if len(server_urls) != len(thread_counts):
-        print(f"Error: --server ({len(server_urls)} URLs) and --threads ({len(thread_counts)} values) must have the same count")
+        print(
+            f"Error: --server ({len(server_urls)} URLs) and --threads ({len(thread_counts)} values) "
+            "must have the same count"
+        )
         sys.exit(1)
 
     # Parse server names (optional, defaults to URLs)
     if args.server_name:
         server_names = [n.strip() for n in args.server_name.split(",") if n.strip()]
         if len(server_names) != len(server_urls):
-            print(f"Error: --server-name ({len(server_names)} names) and --server ({len(server_urls)} URLs) must have the same count")
+            print(
+                f"Error: --server-name ({len(server_names)} names) and --server ({len(server_urls)} URLs) "
+                "must have the same count"
+            )
             sys.exit(1)
     else:
         server_names = server_urls  # fallback to URLs
 
     server_configs = [
         ServerConfig(url=url, threads=threads, name=name)
-        for url, threads, name in zip(server_urls, thread_counts, server_names)
+        for url, threads, name in zip(server_urls, thread_counts, server_names, strict=False)
     ]
 
     if args.dataset == "gpqa" and args.grader_type != "llm":
@@ -1508,7 +1475,7 @@ def main():
         print()
 
         if not args.resume:
-            print(f"Evaluation incomplete. Run with --resume to continue.")
+            print("Evaluation incomplete. Run with --resume to continue.")
             return
 
         pending_tasks = eval_state.get_pending_tasks()
@@ -1519,8 +1486,8 @@ def main():
         eval_state.tasks = pending_tasks
         eval_state.task_states["cases"] = existing_cases
 
-        grader_server_url = args.grader_server if args.grader_server else server_configs[0].url
-        grader_model_name = args.grader_model if args.grader_model else args.model
+        grader_server_url = args.grader_server or server_configs[0].url
+        grader_model_name = args.grader_model or args.model
         if args.grader_type == "llm" and not grader_model_name:
             print("Error: --grader-type llm requires --grader-model or --model")
             sys.exit(1)
@@ -1529,7 +1496,7 @@ def main():
             grader_script=args.grader_script,
             grader_model_name=grader_model_name,
             grader_server_url=grader_server_url,
-            dataset_type=eval_state.dataset_type
+            dataset_type=eval_state.dataset_type,
         )
         resume = True
     else:
@@ -1537,8 +1504,8 @@ def main():
             print("Error: No existing eval state found to resume")
             sys.exit(1)
 
-        grader_server_url = args.grader_server if args.grader_server else server_configs[0].url
-        grader_model_name = args.grader_model if args.grader_model else args.model
+        grader_server_url = args.grader_server or server_configs[0].url
+        grader_model_name = args.grader_model or args.model
         if args.grader_type == "llm" and not grader_model_name:
             print("Error: --grader-type llm requires --grader-model or --model")
             sys.exit(1)
@@ -1548,7 +1515,7 @@ def main():
             grader_script=args.grader_script,
             grader_model_name=grader_model_name,
             grader_server_url=grader_server_url,
-            dataset_type=args.dataset
+            dataset_type=args.dataset,
         )
 
         if args.grader_type == "llm" and not args.grader_server:
@@ -1565,10 +1532,7 @@ def main():
             sampling_config["min_p"] = args.min_p
 
         eval_state = EvalState(
-            dataset_type=args.dataset,
-            sampling_config=sampling_config,
-            output_file=args.output,
-            model_name=args.model
+            dataset_type=args.dataset, sampling_config=sampling_config, output_file=args.output, model_name=args.model
         )
         eval_state.load_dataset(seed=args.seed)
         eval_state.setup_tasks(n_cases=args.n_cases, seed=args.seed)
@@ -1577,15 +1541,11 @@ def main():
 
         eval_state.print_all_tasks()
 
-    processor = Processor(
-        server_configs=server_configs,
-        grader=grader,
-        model_name=args.model,
-        n_predict=args.n_predict
-    )
+    processor = Processor(server_configs=server_configs, grader=grader, model_name=args.model, n_predict=args.n_predict)
 
     processor.evaluate(eval_state, verbose=args.verbose, resume=resume)
     print(f"\nEval state dumped to {args.output}")
+
 
 if __name__ == "__main__":
     main()

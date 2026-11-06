@@ -242,18 +242,24 @@ If you're using [Pydantic](https://pydantic.dev/) to generate schemas, you can e
 import json
 from typing import Annotated, List
 from pydantic import BaseModel, Extra, Field
+
+
 class QAPair(BaseModel):
     class Config:
-        extra = 'allow'  # triggers additionalProperties: true in the JSON schema
+        extra = "allow"  # triggers additionalProperties: true in the JSON schema
+
     question: str
     concise_answer: str
     justification: str
 
+
 class Summary(BaseModel):
     class Config:
-        extra = 'allow'
-    key_facts: List[Annotated[str, Field(pattern='- .{5,}')]]
+        extra = "allow"
+
+    key_facts: List[Annotated[str, Field(pattern="- .{5,}")]]
     question_answers: List[Annotated[List[QAPair], Field(min_items=5)]]
+
 
 print(json.dumps(Summary.model_json_schema(), indent=2))
 ```

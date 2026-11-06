@@ -1,6 +1,6 @@
+import contextlib
 import os
 from pathlib import Path
-
 
 SDK_CONFIGS = (
     {
@@ -29,14 +29,16 @@ def is_valid_sdk(config, target_dir):
 def get_hexagon_tools_dir(hexagon_dir):
     tools_parent = hexagon_dir / "tools" / "HEXAGON_Tools"
     if not tools_parent.is_dir():
-        raise RuntimeError(f"Expected Hexagon tools directory in {tools_parent}")
+        msg = f"Expected Hexagon tools directory in {tools_parent}"
+        raise RuntimeError(msg)
     tools_dirs = [path for path in tools_parent.iterdir() if path.is_dir()]
     if len(tools_dirs) != 1:
-        raise RuntimeError(f"Expected one Hexagon tools directory in {tools_parent}")
+        msg = f"Expected one Hexagon tools directory in {tools_parent}"
+        raise RuntimeError(msg)
     return tools_dirs[0]
 
 
-def validate_windows_sdks():
+def validate_windows_sdks() -> None:
     hexagon_config, opencl_config = SDK_CONFIGS
     hexagon_dir = os.environ.get("HEXAGON_SDK_ROOT")
     tools_dir = os.environ.get("HEXAGON_TOOLS_ROOT")
@@ -47,16 +49,12 @@ def validate_windows_sdks():
     if not hexagon_dir or not is_valid_sdk(hexagon_config, Path(hexagon_dir)):
         missing.append("HEXAGON_SDK_ROOT")
     else:
-        try:
+        with contextlib.suppress(RuntimeError):
             expected_tools_dir = get_hexagon_tools_dir(Path(hexagon_dir))
-        except RuntimeError:
-            pass
     if not tools_dir or not expected_tools_dir or Path(tools_dir) != expected_tools_dir:
         missing.append("HEXAGON_TOOLS_ROOT")
     if not opencl_dir or not is_valid_sdk(opencl_config, Path(opencl_dir)):
         missing.append("OPENCL_SDK_ROOT")
     if missing:
-        raise RuntimeError(
-            f"Missing or invalid Windows SDK paths: {', '.join(missing)}. "
-            "Run scripts/snapdragon/setup-sdk.py first."
-        )
+        msg = f"Missing or invalid Windows SDK paths: {', '.join(missing)}. Run scripts/snapdragon/setup-sdk.py first."
+        raise RuntimeError(msg)

@@ -2,7 +2,7 @@
 //
 //  1. no stale state: a cell freed by one seq and reused by another starts from a zeroed state
 //  2. bookkeeping: interleaved seqs over many steps in a small pool match a context whose pool is full size
-//  3. refusal: a batch that cannot get a cell is refused cleanly and leaves every other seq intact
+//  3. refusal: a batch that finds no room in a full box is refused cleanly and leaves every other seq intact
 //  4. rollback: MTP-style partial rollbacks while seqs join, leave and get their cells swapped
 //  5. nextn row order: the per-token hidden states MTP reads come back in batch order when the
 //     batch is split into ubatches out of order
@@ -60,7 +60,9 @@ static bool decode_prompt(llama_context * ctx, llama_seq_id seq, uint32_t salt, 
     return ok;
 }
 
-static llama_context * make_ctx(const common_params & params, llama_model * model, uint32_t n_seq_max, uint32_t n_rs_cells, uint8_t fill, uint32_t n_rs_seq = 0) {
+// box_bytes 0: the box holds n_ctx tokens and n_rs_cells states
+static llama_context * make_ctx(const common_params & params, llama_model * model, uint32_t n_seq_max, uint32_t n_rs_cells, uint8_t fill, uint32_t n_rs_seq = 0,
+        size_t box_bytes = 0) {
     auto cparams = common_context_params_to_llama(params);
     cparams.n_seq_max  = n_seq_max;
     cparams.n_rs_cells = n_rs_cells;
@@ -68,6 +70,7 @@ static llama_context * make_ctx(const common_params & params, llama_model * mode
     cparams.n_ctx      = 512;
     cparams.n_batch    = 256;
     cparams.n_ubatch   = 256;
+    cparams.box_bytes  = box_bytes;
 
     llama_context * ctx = llama_init_from_model(model, cparams);
     if (ctx == nullptr || fill == 0) {
@@ -81,7 +84,8 @@ static llama_context * make_ctx(const common_params & params, llama_model * mode
     }
     llama_synchronize(ctx);
     cache_buffer_collector collector;
-    llama_get_memory(ctx)->state_write(collector);
+    // the box saves single sequences: seq 0 holds the tokens above
+    llama_get_memory(ctx)->state_write(collector, 0);
     llama_memory_clear(llama_get_memory(ctx), true);
     if (collector.buffers.empty()) {
         fprintf(stderr, "%s : no cache buffers found\n", __func__);
@@ -213,9 +217,53 @@ static bool test_interleaved_small_pool(const common_params & params, llama_mode
     return true;
 }
 
+// the elastic memory has no fixed number of states: a box that seqs 0 and 1 fill completely refuses a third seq
+static size_t box_bytes_full_with_two_seqs(const common_params & params, llama_model * model, int n_vocab) {
+    // the size of a block and of a state, from a box of the default size
+    llama_context * probe = make_ctx(params, model, 4, 2, 0);
+    if (probe == nullptr) {
+        return 0;
+    }
+
+    llama_memory_box_info info = {};
+    const bool has_box = llama_memory_box_get_info(llama_get_memory(probe), &info);
+    llama_free(probe);
+    if (!has_box || info.n_blocks == 0) {
+        return 0;
+    }
+
+    const size_t block_bytes = info.total_bytes/info.n_blocks;
+
+    // room for the two seqs, measured below: per seq a state and a few blocks (tokens, and the compressed rows of models
+    // like DSV4); the blocks left free after the prompts are taken back
+    uint32_t n_blocks = 2*(4 + info.state_blocks);
+
+    llama_context * ctx = make_ctx(params, model, 4, 2, 0, 0, n_blocks*block_bytes);
+    if (ctx == nullptr) {
+        return 0;
+    }
+
+    const bool ok = decode_prompt(ctx, 0, 3, 15, n_vocab) && decode_prompt(ctx, 1, 4, 21, n_vocab) &&
+        llama_memory_box_get_info(llama_get_memory(ctx), &info);
+    llama_free(ctx);
+    if (!ok || info.n_free >= n_blocks) {
+        return 0;
+    }
+
+    n_blocks -= info.n_free;
+
+    return n_blocks*block_bytes;
+}
+
 static bool test_refusal_leaves_cache_intact(const common_params & params, llama_model * model, int n_vocab, uint8_t fill) {
-    llama_context * ctx = make_ctx(params, model, 4, 2, fill);
-    llama_context * ref = make_ctx(params, model, 4, 2, fill);
+    const size_t box_bytes = box_bytes_full_with_two_seqs(params, model, n_vocab);
+    if (box_bytes == 0) {
+        fprintf(stderr, "%s : failed to size the box\n", __func__);
+        return false;
+    }
+
+    llama_context * ctx = make_ctx(params, model, 4, 2, fill, 0, box_bytes);
+    llama_context * ref = make_ctx(params, model, 4, 2, fill, 0, box_bytes);
     if (ctx == nullptr || ref == nullptr) {
         fprintf(stderr, "%s : failed to init contexts\n", __func__);
         llama_free(ctx);
@@ -239,9 +287,16 @@ static bool test_refusal_leaves_cache_intact(const common_params & params, llama
         return false;
     }
 
-    // both cells are owned: a third seq must be refused, not crash
+    llama_memory_box_info info = {};
+    if (!llama_memory_box_get_info(llama_get_memory(ctx), &info) || info.n_free != 0) {
+        fprintf(stderr, "%s : FAILED: the box is not full after two seqs (%u free blocks)\n", __func__, info.n_free);
+        cleanup();
+        return false;
+    }
+
+    // the box is full: a third seq must be refused, not crash
     if (decode_prompt(ctx, 2, 6, 9, n_vocab)) {
-        fprintf(stderr, "%s : FAILED: decode for a third seq succeeded with only 2 cells\n", __func__);
+        fprintf(stderr, "%s : FAILED: decode for a third seq succeeded in a full box\n", __func__);
         cleanup();
         return false;
     }
@@ -535,6 +590,12 @@ static bool test_nextn_row_order(const common_params & params, llama_model * mod
         llama_batch_free(batch);
 
         const float * h = ok ? llama_get_embeddings_nextn(solo) : nullptr;
+        if (ok && h == nullptr) {
+            fprintf(stderr, "%s : skipping, the model has no nextn hidden states\n", __func__);
+            llama_free(solo);
+            llama_free(ctx);
+            return true;
+        }
         ok = ok && h != nullptr;
         if (ok) {
             ref.insert(ref.end(), h, h + (size_t) p.n_new*n_embd);
@@ -620,7 +681,9 @@ int main(int argc, char ** argv) {
 
     ggml_backend_load_all();
 
-    common_init_result_ptr llama_init = common_init_from_params(params);
+    // the tests make their own contexts: a context here would take the whole budget for its box, and theirs would size
+    // their boxes by it
+    common_init_result_ptr llama_init = common_init_from_params(params, /*model_only=*/ true);
     llama_model * model = llama_init->model();
     if (model == nullptr) {
         fprintf(stderr, "%s : failed to init model\n", __func__);
@@ -635,7 +698,8 @@ int main(int argc, char ** argv) {
     const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));
 
     bool ok = true;
-    for (uint8_t fill : { 0, 0x3e }) {
+    // 0xff is a NaN in f16 and f32: memory read before anything wrote it shows in the logits
+    for (uint8_t fill : { 0x00, 0x3e, 0xff }) {
         ok = test_no_stale_state(params, model, n_vocab, fill) && ok;
         ok = test_interleaved_small_pool(params, model, n_vocab, fill) && ok;
         ok = test_refusal_leaves_cache_intact(params, model, n_vocab, fill) && ok;

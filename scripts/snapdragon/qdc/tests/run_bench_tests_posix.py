@@ -11,11 +11,11 @@ Placeholders replaced at artifact creation time by run_qdc_jobs.py:
 """
 
 import os
+import pathlib
 import subprocess
 import sys
 
 import pytest
-
 from utils import (
     BIN_PATH,
     MODEL_DEVICE_PATH,
@@ -30,13 +30,15 @@ MODEL_URL = "<<MODEL_URL>>"
 
 
 @pytest.fixture(scope="session", autouse=True)
-def install(driver):
+def install(driver) -> None:
     push_bundle_if_needed(f"{BIN_PATH}/local-inference-cli")
     run_adb_command(f"mkdir -p /data/local/tmp/gguf {PROMPT_DIR}")
     run_adb_command(f"echo 'What is the capital of France?' > {PROMPT_DIR}/bench_prompt.txt")
     check = subprocess.run(
         ["adb", "shell", f"ls {MODEL_DEVICE_PATH}"],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
     if check.returncode != 0:
         run_adb_command(f'curl -L -J --output {MODEL_DEVICE_PATH} "{MODEL_URL}"')
@@ -50,23 +52,26 @@ def install(driver):
         pytest.param("HTP0", id="npu"),
     ],
 )
-def test_llama_completion(device):
+def test_llama_completion(device) -> None:
     args = [
         "local-inference-completion",
-        "-m", MODEL_DEVICE_PATH,
-        "-f", f"{PROMPT_DIR}/bench_prompt.txt",
+        "-m",
+        MODEL_DEVICE_PATH,
+        "-f",
+        f"{PROMPT_DIR}/bench_prompt.txt",
         "-no-cnv",
-        "--ctx-size", "8192",
-        "-n", "128",
-        "--seed", "42",
+        "--ctx-size",
+        "8192",
+        "-n",
+        "128",
+        "--seed",
+        "42",
     ]
     if device == "HTP0":
         args += ["--ubatch-size", "1024"]
     result = run_snapdragon(args, device=device)
     write_qdc_log(f"llama_completion_{device}.log", result.stdout or "")
-    assert result.returncode == 0, (
-        f"local-inference-completion {device} failed (exit {result.returncode})"
-    )
+    assert result.returncode == 0, f"local-inference-completion {device} failed (exit {result.returncode})"
 
 
 _DEVICE_LOG_NAME = {"none": "cpu", "GPUOpenCL": "gpu", "HTP0": "htp"}
@@ -80,26 +85,28 @@ _DEVICE_LOG_NAME = {"none": "cpu", "GPUOpenCL": "gpu", "HTP0": "htp"}
         pytest.param("HTP0", id="npu"),
     ],
 )
-def test_llama_bench(device):
+def test_llama_bench(device) -> None:
     args = [
         "local-inference-bench",
-        "-m", MODEL_DEVICE_PATH,
-        "-ngl", "99",
-        "-p", "128",
-        "-n", "32",
+        "-m",
+        MODEL_DEVICE_PATH,
+        "-ngl",
+        "99",
+        "-p",
+        "128",
+        "-n",
+        "32",
     ]
     if device == "HTP0":
         args += ["--ubatch-size", "1024"]
     result = run_snapdragon(args, device=device)
     write_qdc_log(f"llama_bench_{_DEVICE_LOG_NAME[device]}.log", result.stdout or "")
-    assert result.returncode == 0, (
-        f"local-inference-bench {device} failed (exit {result.returncode})"
-    )
+    assert result.returncode == 0, f"local-inference-bench {device} failed (exit {result.returncode})"
 
 
 if __name__ == "__main__":
     ret = pytest.main(["-s", "--junitxml=results.xml", os.path.realpath(__file__)])
-    if os.path.exists("results.xml"):
-        with open("results.xml") as f:
+    if pathlib.Path("results.xml").exists():
+        with pathlib.Path("results.xml").open(encoding="utf-8") as f:
             write_qdc_log("results.xml", f.read())
     sys.exit(ret)

@@ -7,7 +7,7 @@ The dataset handling follows the [aiperf SPEED-Bench tutorial](https://github.co
 ## Install
 
 ```bash
-pip install -r tools/server/bench/speed-bench/requirements.txt
+uv sync --no-dev --group bench
 ```
 
 ## Start a server

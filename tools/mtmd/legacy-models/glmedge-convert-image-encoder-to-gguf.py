@@ -1,29 +1,33 @@
 import argparse
-import os
 import json
+import os
+import pathlib
 import re
+import sys
 
-import torch
 import numpy as np
+import torch
+from transformers import SiglipVisionConfig, SiglipVisionModel
+
 from gguf import *
 
 TEXT = "clip.text"
 VISION = "clip.vision"
-from transformers import SiglipVisionModel, SiglipVisionConfig
+
 
 def k(raw_key: str, arch: str) -> str:
     return raw_key.format(arch=arch)
 
 
 def should_skip_tensor(name: str, has_text: bool, has_vision: bool, has_llava: bool) -> bool:
-    if name in (
+    if name in {
         "logit_scale",
         "text_model.embeddings.position_ids",
         "vision_model.embeddings.position_ids",
-    ):
+    }:
         return True
 
-    if name in (
+    if name in {
         "vision_model.head.probe",
         "vision_model.head.attention.in_proj_weight",
         "vision_model.head.attention.in_proj_bias",
@@ -34,17 +38,14 @@ def should_skip_tensor(name: str, has_text: bool, has_vision: bool, has_llava: b
         "vision_model.head.mlp.fc1.weight",
         "vision_model.head.mlp.fc1.bias",
         "vision_model.head.mlp.fc2.weight",
-        "vision_model.head.mlp.fc2.bias"
-    ):
+        "vision_model.head.mlp.fc2.bias",
+    }:
         return True
 
     if name.startswith("v") and not has_vision:
         return True
 
-    if name.startswith("t") and not has_text:
-        return True
-
-    return False
+    return bool(name.startswith("t") and not has_text)
 
 
 def get_tensor_name(name: str) -> str:
@@ -52,11 +53,24 @@ def get_tensor_name(name: str) -> str:
         return name
     if "mm_projector" in name:
         name = name.replace("model.mm_projector", "mm")
-        name = re.sub(r'mm\.mlp\.mlp', 'mm.model.mlp', name, count=1)
-        name = re.sub(r'mm\.peg\.peg', 'mm.model.peg', name, count=1)
-        return name
+        name = re.sub(r"mm\.mlp\.mlp", "mm.model.mlp", name, count=1)
+        return re.sub(r"mm\.peg\.peg", "mm.model.peg", name, count=1)
 
-    return name.replace("text_model", "t").replace("vision_model", "v").replace("encoder.layers", "blk").replace("embeddings.", "").replace("_proj", "").replace("self_attn.", "attn_").replace("layer_norm", "ln").replace("layernorm", "ln").replace("mlp.fc1", "ffn_down").replace("mlp.fc2", "ffn_up").replace("embedding", "embd").replace("final", "post").replace("layrnorm", "ln")
+    return (
+        name.replace("text_model", "t")
+        .replace("vision_model", "v")
+        .replace("encoder.layers", "blk")
+        .replace("embeddings.", "")
+        .replace("_proj", "")
+        .replace("self_attn.", "attn_")
+        .replace("layer_norm", "ln")
+        .replace("layernorm", "ln")
+        .replace("mlp.fc1", "ffn_down")
+        .replace("mlp.fc2", "ffn_up")
+        .replace("embedding", "embd")
+        .replace("final", "post")
+        .replace("layrnorm", "ln")
+    )
 
 
 def bytes_to_unicode():
@@ -69,11 +83,7 @@ def bytes_to_unicode():
     To avoid that, we want lookup tables between utf-8 bytes and unicode strings.
     And avoids mapping to whitespace/control characters the bpe code barfs on.
     """
-    bs = (
-        list(range(ord("!"), ord("~") + 1))
-        + list(range(ord("¡"), ord("¬") + 1))
-        + list(range(ord("®"), ord("ÿ") + 1))
-    )
+    bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
     cs = bs[:]
     n = 0
     for b in range(2**8):
@@ -82,29 +92,63 @@ def bytes_to_unicode():
             cs.append(2**8 + n)
             n += 1
     cs = [chr(n) for n in cs]
-    return dict(zip(bs, cs))
+    return dict(zip(bs, cs, strict=False))
 
 
 ap = argparse.ArgumentParser()
 ap.add_argument("-m", "--model-dir", help="Path to model directory cloned from HF Hub", required=True)
 ap.add_argument("--use-f32", action="store_true", default=False, help="Use f32 instead of f16")
-ap.add_argument("--text-only", action="store_true", required=False,
-                help="Save a text-only model. It can't be used to encode images")
-ap.add_argument("--vision-only", action="store_true", required=False,
-                help="Save a vision-only model. It can't be used to encode texts")
-ap.add_argument("--clip-model-is-vision", action="store_true", required=False,
-                help="The clip model is a pure vision model (ShareGPT4V vision extract for example)")
-ap.add_argument("--clip-model-is-openclip", action="store_true", required=False,
-                help="The clip model is from openclip (for ViT-SO400M type))")
-ap.add_argument("--llava-projector", help="Path to llava.projector file. If specified, save an image encoder for LLaVA models.")
-ap.add_argument("--projector-type", help="Type of projector. Possible values: mlp, ldp, ldpv2", choices=["mlp", "ldp", "ldpv2","adapter"], default="adapter")
-ap.add_argument("-o", "--output-dir", help="Directory to save GGUF files. Default is the original model directory", default=None)
+ap.add_argument(
+    "--text-only", action="store_true", required=False, help="Save a text-only model. It can't be used to encode images"
+)
+ap.add_argument(
+    "--vision-only",
+    action="store_true",
+    required=False,
+    help="Save a vision-only model. It can't be used to encode texts",
+)
+ap.add_argument(
+    "--clip-model-is-vision",
+    action="store_true",
+    required=False,
+    help="The clip model is a pure vision model (ShareGPT4V vision extract for example)",
+)
+ap.add_argument(
+    "--clip-model-is-openclip",
+    action="store_true",
+    required=False,
+    help="The clip model is from openclip (for ViT-SO400M type))",
+)
+ap.add_argument(
+    "--llava-projector", help="Path to llava.projector file. If specified, save an image encoder for LLaVA models."
+)
+ap.add_argument(
+    "--projector-type",
+    help="Type of projector. Possible values: mlp, ldp, ldpv2",
+    choices=["mlp", "ldp", "ldpv2", "adapter"],
+    default="adapter",
+)
+ap.add_argument(
+    "-o", "--output-dir", help="Directory to save GGUF files. Default is the original model directory", default=None
+)
 # Example --image_mean 0.48145466 0.4578275 0.40821073 --image_std 0.26862954 0.26130258 0.27577711
 # Example --image_mean 0.5 0.5 0.5 --image_std 0.5 0.5 0.5
 default_image_mean = [0.5, 0.5, 0.5]
 default_image_std = [0.5, 0.5, 0.5]
-ap.add_argument('--image-mean', type=float, nargs='+', help='Mean of the images for normalization (overrides processor) ', default=None)
-ap.add_argument('--image-std', type=float, nargs='+', help='Standard deviation of the images for normalization (overrides processor)', default=None)
+ap.add_argument(
+    "--image-mean",
+    type=float,
+    nargs="+",
+    help="Mean of the images for normalization (overrides processor) ",
+    default=None,
+)
+ap.add_argument(
+    "--image-std",
+    type=float,
+    nargs="+",
+    help="Standard deviation of the images for normalization (overrides processor)",
+    default=None,
+)
 
 # with proper
 args = ap.parse_args()
@@ -112,23 +156,27 @@ args = ap.parse_args()
 
 if args.text_only and args.vision_only:
     print("--text-only and --image-only arguments cannot be specified at the same time.")
-    exit(1)
+    sys.exit(1)
 
 if args.use_f32:
-    print("WARNING: Weights for the convolution op is always saved in f16, as the convolution op in GGML does not support 32-bit kernel weights yet.")
+    print(
+        "WARNING: Weights for the convolution op is always saved in f16, as the convolution op in GGML does not "
+        "support 32-bit kernel weights yet."
+    )
+
 
 # output in the same directory as the model if output_dir is None
 dir_model = args.model_dir
 
-if args.clip_model_is_vision or not os.path.exists(dir_model + "/vocab.json") or args.clip_model_is_openclip:
+if args.clip_model_is_vision or not pathlib.Path(dir_model + "/vocab.json").exists() or args.clip_model_is_openclip:
     vocab = None
     tokens = None
 else:
-    with open(dir_model + "/vocab.json", "r", encoding="utf-8") as f:
+    with pathlib.Path(dir_model + "/vocab.json").open(encoding="utf-8") as f:
         vocab = json.load(f)
-        tokens = [key for key in vocab]
+        tokens = list(vocab)
 
-with open(dir_model + "/config.json", "r", encoding="utf-8") as f:
+with pathlib.Path(dir_model + "/config.json").open(encoding="utf-8") as f:
     config = json.load(f)
     if args.clip_model_is_vision:
         v_hparams = config
@@ -170,8 +218,8 @@ else:
     fname_middle = ""
 
 output_dir = args.output_dir if args.output_dir is not None else dir_model
-os.makedirs(output_dir, exist_ok=True)
-output_prefix = os.path.basename(output_dir).replace("ggml_", "")
+pathlib.Path(output_dir).mkdir(exist_ok=True, parents=True)
+output_prefix = pathlib.Path(output_dir).name.replace("ggml_", "")
 fname_out = os.path.join(output_dir, f"{fname_middle}model-{ftype_str[ftype]}.gguf")
 fout = GGUFWriter(path=fname_out, arch="clip")
 
@@ -179,7 +227,7 @@ fout.add_bool("clip.has_text_encoder", has_text_encoder)
 fout.add_bool("clip.has_vision_encoder", has_vision_encoder)
 fout.add_bool("clip.has_glm_projector", has_glm_projector)
 fout.add_file_type(ftype)
-model_name = config["_name_or_path"] if "_name_or_path" in config else os.path.basename(dir_model)
+model_name = config["_name_or_path"] if "_name_or_path" in config else pathlib.Path(dir_model).name
 fout.add_name(model_name)
 if has_glm_projector:
     fout.add_description("image encoder for glm4v")
@@ -225,12 +273,12 @@ if has_glm_projector:
     for name, data in projector.items():
         name = get_tensor_name(name)
         # pw and dw conv ndim==4
-        if data.ndim == 2 or data.ndim == 4:
+        if data.ndim in {2, 4}:
             data = data.squeeze().numpy().astype(np.float16)
         else:
             data = data.squeeze().numpy().astype(np.float32)
         if name.startswith("vision."):
-            name=name.replace("vision.","")
+            name = name.replace("vision.", "")
         fout.add_tensor(name, data)
         print(f"Projector {name} - {data.dtype} - shape = {data.shape}")
         # print(f"Projector {name} tensors added\n")
@@ -262,12 +310,10 @@ for name, data in state_dict.items():
             # print("  Converting to float32")
             data = data.astype(np.float32)
             ftype_cur = 0
-    else:
-        if data.dtype != np.float32:
-            # print("  Converting to float32")
-            data = data.astype(np.float32)
-            ftype_cur = 0
-    print(f"siglip {name} - {data.dtype} - shape = {data.shape}")
+    elif data.dtype != np.float32:
+        # print("  Converting to float32")
+        data = data.astype(np.float32)
+        ftype_cur = 0
     # print(f"{name} - {ftype_str[ftype_cur]} - shape = {data.shape}")
     fout.add_tensor(name, data)
 

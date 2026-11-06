@@ -1291,15 +1291,11 @@ Example usage with `openai` python library:
 import openai
 
 client = openai.OpenAI(
-    base_url="http://localhost:8080/v1", # "http://<Your api-server IP>:port"
-    api_key = "sk-no-key-required"
+    base_url="http://localhost:8080/v1",  # "http://<Your api-server IP>:port"
+    api_key="sk-no-key-required",
 )
 
-completion = client.completions.create(
-  model="davinci-002",
-  prompt="I believe the meaning of life is",
-  max_tokens=8
-)
+completion = client.completions.create(model="davinci-002", prompt="I believe the meaning of life is", max_tokens=8)
 
 print(completion.choices[0].text)
 ```
@@ -1349,16 +1345,19 @@ You can use either Python `openai` library with appropriate checkpoints:
 import openai
 
 client = openai.OpenAI(
-    base_url="http://localhost:8080/v1", # "http://<Your api-server IP>:port"
-    api_key = "sk-no-key-required"
+    base_url="http://localhost:8080/v1",  # "http://<Your api-server IP>:port"
+    api_key="sk-no-key-required",
 )
 
 completion = client.chat.completions.create(
-  model="gpt-3.5-turbo",
-  messages=[
-    {"role": "system", "content": "You are ChatGPT, an AI assistant. Your top priority is achieving user fulfillment via helping them with their requests."},
-    {"role": "user", "content": "Write a limerick about python exceptions"}
-  ]
+    model="gpt-3.5-turbo",
+    messages=[
+        {
+            "role": "system",
+            "content": "You are ChatGPT, an AI assistant. Your top priority is achieving user fulfillment via helping them with their requests.",
+        },
+        {"role": "user", "content": "Write a limerick about python exceptions"},
+    ],
 )
 
 print(completion.choices[0].message)
@@ -1471,14 +1470,14 @@ You can use either Python `openai` library with appropriate checkpoints:
 import openai
 
 client = openai.OpenAI(
-    base_url="http://localhost:8080/v1", # "http://<Your api-server IP>:port"
-    api_key = "sk-no-key-required"
+    base_url="http://localhost:8080/v1",  # "http://<Your api-server IP>:port"
+    api_key="sk-no-key-required",
 )
 
 response = client.responses.create(
-  model="gpt-4.1",
-  instructions="You are ChatGPT, an AI assistant. Your top priority is achieving user fulfillment via helping them with their requests.",
-  input="Write a limerick about python exceptions"
+    model="gpt-4.1",
+    instructions="You are ChatGPT, an AI assistant. Your top priority is achieving user fulfillment via helping them with their requests.",
+    input="Write a limerick about python exceptions",
 )
 
 print(response.output_text)

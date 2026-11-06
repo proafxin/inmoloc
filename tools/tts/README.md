@@ -54,6 +54,6 @@ local-inference-tts -m pocket-tts.gguf \
 The [upstream repository](https://huggingface.co/kyutai/pocket-tts) holds one complete model per language under `languages/`, next to a set of shared files at the root. Convert one of the `languages/<name>` directories, **not** the root directory:
 
 ```sh
-python convert_hf_to_gguf.py path/to/pocket-tts/languages/english --outfile pocket-tts.gguf
-python convert_hf_to_gguf.py path/to/pocket-tts/languages/english --mmproj --outfile mmproj-pocket-tts.gguf
+uv run scripts/convert_hf_to_gguf.py path/to/pocket-tts/languages/english --outfile pocket-tts.gguf
+uv run scripts/convert_hf_to_gguf.py path/to/pocket-tts/languages/english --mmproj --outfile mmproj-pocket-tts.gguf
 ```

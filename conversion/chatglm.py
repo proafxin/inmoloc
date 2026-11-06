@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch import Tensor
 
-from .base import ModelBase, SentencePieceTokenTypes, TextModel, gguf
+import itertools
+
+from conversion.base import ModelBase, SentencePieceTokenTypes, TextModel, gguf
 
 
 @ModelBase.register("GlmForCausalLM", "ChatGLMModel", "ChatGLMForConditionalGeneration")
@@ -13,7 +17,7 @@ from .base import ModelBase, SentencePieceTokenTypes, TextModel, gguf
 class ChatGLMModel(TextModel):
     model_arch = gguf.MODEL_ARCH.CHATGLM
 
-    def set_vocab_chatglm3(self):
+    def set_vocab_chatglm3(self) -> None:
         dir_model = self.dir_model
         hparams = self.hparams
         tokens: list[bytes] = []
@@ -21,11 +25,12 @@ class ChatGLMModel(TextModel):
         scores: list[float] = []
 
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(dir_model, trust_remote_code=True)
         vocab_size = hparams.get("padded_vocab_size", len(tokenizer.get_vocab()))  # ty: ignore[unresolved-attribute]
         assert max(tokenizer.get_vocab().values()) < vocab_size  # ty: ignore[unresolved-attribute]
         role_special_tokens = ["<|system|>", "<|user|>", "<|assistant|>", "<|observation|>"]
-        special_tokens = ["[MASK]", "[gMASK]", "[sMASK]", "sop", "eop"] + role_special_tokens
+        special_tokens = ["[MASK]", "[gMASK]", "[sMASK]", "sop", "eop", *role_special_tokens]
         for token_id in range(vocab_size):
             piece = tokenizer._convert_id_to_token(token_id)  # ty: ignore[unresolved-attribute]
             if token_id == 0:
@@ -46,7 +51,7 @@ class ChatGLMModel(TextModel):
                 if piece in special_tokens:
                     toktype = SentencePieceTokenTypes.CONTROL
                 elif len(piece) == 0:  # ty: ignore[invalid-argument-type]
-                    text = f"[PAD{token_id}]".encode("utf-8")
+                    text = f"[PAD{token_id}]".encode()
                     toktype = SentencePieceTokenTypes.UNUSED
                 else:
                     toktype = SentencePieceTokenTypes.USER_DEFINED
@@ -83,8 +88,9 @@ class ChatGLMModel(TextModel):
     @staticmethod
     def token_bytes_to_string(b):
         from transformers.convert_slow_tokenizer import bytes_to_unicode
+
         byte_encoder = bytes_to_unicode()
-        return ''.join([byte_encoder[ord(char)] for char in b.decode('latin-1')])
+        return "".join([byte_encoder[ord(char)] for char in b.decode("latin-1")])
 
     @staticmethod
     def bpe(mergeable_ranks: dict[bytes, int], token: bytes, max_rank: int | None = None) -> list[bytes]:
@@ -92,7 +98,7 @@ class ChatGLMModel(TextModel):
         while True:
             min_idx = None
             min_rank = None
-            for i, pair in enumerate(zip(parts[:-1], parts[1:])):
+            for i, pair in enumerate(itertools.pairwise(parts)):
                 rank = mergeable_ranks.get(pair[0] + pair[1])
                 if rank is not None and (min_rank is None or rank < min_rank):
                     min_idx = i
@@ -100,10 +106,10 @@ class ChatGLMModel(TextModel):
             if min_rank is None or (max_rank is not None and min_rank >= max_rank):
                 break
             assert min_idx is not None
-            parts = parts[:min_idx] + [parts[min_idx] + parts[min_idx + 1]] + parts[min_idx + 2:]
+            parts = [*parts[:min_idx], parts[min_idx] + parts[min_idx + 1], *parts[min_idx + 2 :]]
         return parts
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         if "THUDM/chatglm3-6b" in self.hparams.get("_name_or_path", ""):
             self.set_vocab_chatglm3()
             return
@@ -114,8 +120,9 @@ class ChatGLMModel(TextModel):
         toktypes: list[int] = []
 
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(dir_model, trust_remote_code=True)
-        vocab_size = hparams.get("padded_vocab_size",hparams["vocab_size"])
+        vocab_size = hparams.get("padded_vocab_size", hparams["vocab_size"])
         assert max(tokenizer.get_vocab().values()) < vocab_size  # ty: ignore[unresolved-attribute]
 
         tokens, toktypes, tokpre = self.get_vocab_base()
@@ -131,7 +138,7 @@ class ChatGLMModel(TextModel):
         special_vocab._set_special_token("unk", tokenizer.get_added_vocab()["<|endoftext|>"])  # ty: ignore[unresolved-attribute]
         special_vocab.add_to_gguf(self.gguf_writer)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         n_embed = self.hparams.get("hidden_size", self.hparams.get("n_embed"))
         assert n_embed is not None
         n_head = self.hparams.get("n_head", self.hparams.get("num_attention_heads"))
@@ -139,21 +146,25 @@ class ChatGLMModel(TextModel):
         n_head_kv = self.hparams.get("multi_query_group_num", self.hparams.get("num_key_value_heads", n_head))
         self.gguf_writer.add_context_length(self.hparams.get("seq_length", n_embed))
         self.gguf_writer.add_embedding_length(n_embed)
-        self.gguf_writer.add_feed_forward_length(self.hparams.get("ffn_hidden_size", self.hparams.get("intermediate_size", 4 * n_embed)))
+        self.gguf_writer.add_feed_forward_length(
+            self.hparams.get("ffn_hidden_size", self.hparams.get("intermediate_size", 4 * n_embed))
+        )
         self.gguf_writer.add_block_count(self.block_count)
         self.gguf_writer.add_head_count(n_head)
         self.gguf_writer.add_head_count_kv(n_head_kv)
-        self.gguf_writer.add_layer_norm_rms_eps(self.hparams.get("layernorm_epsilon",1e-5))
+        self.gguf_writer.add_layer_norm_rms_eps(self.hparams.get("layernorm_epsilon", 1e-5))
         self.gguf_writer.add_file_type(self.ftype)
         if "attention_dim" in self.hparams:
             rope_dim = self.hparams["attention_dim"]
         else:
             rope_dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
-        self.gguf_writer.add_rope_dimension_count(int(rope_dim * self.rope_parameters.get("partial_rotary_factor", 0.5)))
+        self.gguf_writer.add_rope_dimension_count(
+            int(rope_dim * self.rope_parameters.get("partial_rotary_factor", 0.5))
+        )
         self.gguf_writer.add_add_bos_token(False)
         rope_freq = 10000
         if "rope_ratio" in self.hparams:
-            rope_freq = rope_freq * self.hparams["rope_ratio"]
+            rope_freq *= self.hparams["rope_ratio"]
         self.gguf_writer.add_rope_freq_base(rope_freq)
 
     @classmethod

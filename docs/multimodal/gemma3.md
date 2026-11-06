@@ -30,7 +30,7 @@ Simply to add `--mmproj` in when converting model via `convert_hf_to_gguf.py`:
 
 ```bash
 cd gemma-3-4b-it
-python ../llama.cpp/convert_hf_to_gguf.py --outfile model.gguf --outtype f16 --mmproj .
+uv run --project ../inmoloc ../inmoloc/scripts/convert_hf_to_gguf.py --outfile model.gguf --outtype f16 --mmproj .
 # output file: mmproj-model.gguf
 ```
 

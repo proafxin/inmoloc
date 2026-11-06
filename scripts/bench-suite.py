@@ -22,9 +22,11 @@
 
 import argparse
 import base64
+import contextlib
 import glob
 import json
 import os
+import pathlib
 import random
 import statistics
 import subprocess
@@ -33,14 +35,40 @@ import threading
 import time
 import urllib.request
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = pathlib.Path(pathlib.Path(pathlib.Path(__file__).resolve()).parent).parent
 
 SERVICE = {"llamacpp": "qwen-llamacpp", "inmoloc": "qwen"}
 PORT = {"llamacpp": 8120, "inmoloc": 8100}
 ENGINE_BIN = {"llamacpp": "/app/llama", "inmoloc": "/app/local-inference"}
 
-WORDS = ("river stone market winter engine signal harbor letter garden copper season ledger bridge lantern "
-         "orchard mirror valley thunder canvas anchor meadow compass silver timber beacon quarry").split()
+WORDS = [
+    "river",
+    "stone",
+    "market",
+    "winter",
+    "engine",
+    "signal",
+    "harbor",
+    "letter",
+    "garden",
+    "copper",
+    "season",
+    "ledger",
+    "bridge",
+    "lantern",
+    "orchard",
+    "mirror",
+    "valley",
+    "thunder",
+    "canvas",
+    "anchor",
+    "meadow",
+    "compass",
+    "silver",
+    "timber",
+    "beacon",
+    "quarry",
+]
 
 
 def log(msg: str) -> None:
@@ -55,7 +83,17 @@ def compose_env(target: dict) -> dict:
 
 def server_args(model: dict, target: dict) -> list:
     kind = target["kind"]
-    args = ["--model", f"/models/{model['file']}", "--host", "0.0.0.0", "--port", str(PORT[kind]), "-ngl", "999", "--metrics"]
+    args = [
+        "--model",
+        f"/models/{model['file']}",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(PORT[kind]),
+        "-ngl",
+        "999",
+        "--metrics",
+    ]
     # a target can add server arguments, e.g. to compare two settings of the same image in one run
     for text in (model.get("common_args", ""), model.get(f"{kind}_args", ""), target.get("args", "")):
         args += text.split()
@@ -71,16 +109,15 @@ def jsonl(text: str) -> list:
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("{"):
-            try:
+            with contextlib.suppress(json.JSONDecodeError):
                 rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
     return rows
 
 
 #
 # engine tier
 #
+
 
 def run_engine(model: dict, target: dict, raw: str, ecfg: dict) -> dict:
     env = compose_env(target)
@@ -90,20 +127,55 @@ def run_engine(model: dict, target: dict, raw: str, ecfg: dict) -> dict:
     res = {}
 
     b = ecfg.get("bench", {})
-    cmd = ["run", "--rm", *service, "bench", "-m", path, "-ngl", "999", "-r", str(b.get("repetitions", 3)),
-           "-p", b.get("n_prompt", "512"), "-n", b.get("n_gen", "128"), "-o", "jsonl", *extra]
+    cmd = [
+        "run",
+        "--rm",
+        *service,
+        "bench",
+        "-m",
+        path,
+        "-ngl",
+        "999",
+        "-r",
+        str(b.get("repetitions", 3)),
+        "-p",
+        b.get("n_prompt", "512"),
+        "-n",
+        b.get("n_gen", "128"),
+        "-o",
+        "jsonl",
+        *extra,
+    ]
     out = compose(cmd, env, capture_output=True, text=True)
-    open(raw + "-bench.log", "w").write(out.stdout + "\n--- stderr ---\n" + out.stderr)
+    pathlib.Path(raw + "-bench.log").open("w", encoding="utf-8").write(out.stdout + "\n--- stderr ---\n" + out.stderr)
     for row in jsonl(out.stdout):
         test = f"pp{row['n_prompt']}" if row.get("n_prompt") else f"tg{row['n_gen']}"
         res[f"bench/{test}/tok_s"] = row["avg_ts"]
 
     bb = ecfg.get("batched", {})
-    cmd = ["run", "--rm", *service, "batched-bench", "-m", path, "-ngl", "999", "-c", str(model.get("engine_ctx", 20480)),
-           "-npp", bb.get("npp", "512"), "-ntg", bb.get("ntg", "64"), "-npl", bb.get("npl", "1,8,32"),
-           "--output-format", "jsonl", *extra]
+    cmd = [
+        "run",
+        "--rm",
+        *service,
+        "batched-bench",
+        "-m",
+        path,
+        "-ngl",
+        "999",
+        "-c",
+        str(model.get("engine_ctx", 20480)),
+        "-npp",
+        bb.get("npp", "512"),
+        "-ntg",
+        bb.get("ntg", "64"),
+        "-npl",
+        bb.get("npl", "1,8,32"),
+        "--output-format",
+        "jsonl",
+        *extra,
+    ]
     out = compose(cmd, env, capture_output=True, text=True)
-    open(raw + "-batched.log", "w").write(out.stdout + "\n--- stderr ---\n" + out.stderr)
+    pathlib.Path(raw + "-batched.log").open("w", encoding="utf-8").write(out.stdout + "\n--- stderr ---\n" + out.stderr)
     for row in jsonl(out.stdout):
         key = f"batched/pp{row['pp']}-tg{row['tg']}-pl{row['pl']}"
         res[key + "/pp_tok_s"] = row["speed_pp"]
@@ -117,6 +189,7 @@ def run_engine(model: dict, target: dict, raw: str, ecfg: dict) -> dict:
 #
 # server tiers
 #
+
 
 def start_server(model: dict, target: dict, raw: str) -> str | None:
     service = SERVICE[target["kind"]]
@@ -132,9 +205,11 @@ def start_server(model: dict, target: dict, raw: str) -> str | None:
                 if r.status == 200:
                     log(f"  {service} ready in {time.time() - t0:.0f} s")
                     return url
-        except Exception:  # noqa: BLE001
+        except Exception:  # ruff: ignore[blind-except]
             pass
-        state = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", service], capture_output=True, text=True)
+        state = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", service], capture_output=True, text=True
+        )
         if state.stdout.strip() != "true":
             log(f"  {service} exited before it was ready, see {raw}-server.log")
             stop_server(target, raw)
@@ -148,7 +223,7 @@ def start_server(model: dict, target: dict, raw: str) -> str | None:
 def stop_server(target: dict, raw: str) -> None:
     service = SERVICE[target["kind"]]
     logs = subprocess.run(["docker", "logs", service], capture_output=True, text=True)
-    open(raw + "-server.log", "w").write(logs.stdout + logs.stderr)
+    pathlib.Path(raw + "-server.log").open("w", encoding="utf-8").write(logs.stdout + logs.stderr)
     subprocess.run(["docker", "rm", "-f", service], capture_output=True)
 
 
@@ -161,20 +236,31 @@ def run_server(model: dict, target: dict, raw: str, workloads: dict, seed: int) 
         for name in model["workloads"]:
             w = workloads[name]
             out_json = f"{raw}-{name}.json"
-            cmd = [sys.executable, os.path.join(ROOT, "scripts", "bench-server-concurrency.py"), "--url", url,
-                   "--levels", *map(str, model["levels"]), "--seed", str(seed), "--json", out_json,
-                   "--prompt-tokens", str(w["prompt_tokens"])]
+            cmd = [
+                sys.executable,
+                os.path.join(ROOT, "scripts", "bench-server-concurrency.py"),
+                "--url",
+                url,
+                "--levels",
+                *map(str, model["levels"]),
+                "--seed",
+                str(seed),
+                "--json",
+                out_json,
+                "--prompt-tokens",
+                str(w["prompt_tokens"]),
+            ]
             log(f"  workload {name}")
             out = subprocess.run(cmd, capture_output=True, text=True)
-            open(f"{raw}-{name}.log", "w").write(out.stdout + out.stderr)
+            pathlib.Path(f"{raw}-{name}.log").write_text(out.stdout + out.stderr, encoding="utf-8")
             print(out.stdout, flush=True)
             try:
                 with urllib.request.urlopen(url + "/metrics", timeout=30) as r:
-                    open(f"{raw}-{name}-metrics.txt", "wb").write(r.read())
-            except Exception as e:  # noqa: BLE001
+                    pathlib.Path(f"{raw}-{name}-metrics.txt").open("wb").write(r.read())
+            except Exception as e:  # ruff: ignore[blind-except]
                 log(f"  metrics not saved: {e}")
-            if os.path.exists(out_json):
-                for row in json.load(open(out_json)):
+            if pathlib.Path(out_json).exists():
+                for row in json.load(pathlib.Path(out_json).open(encoding="utf-8")):
                     key = f"{name}/c{row['level']}"
                     for m in ("agg_tps", "ttft_s", "itl_p50_ms", "itl_p99_ms", "accept", "failed"):
                         if row.get(m) is not None:
@@ -204,7 +290,7 @@ def run_pool(fn, items: list, conc: int) -> tuple[float, list]:
                 return
             try:
                 results[i] = fn(items[i])
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # ruff: ignore[blind-except]
                 results[i] = {"error": str(e)}
 
     threads = [threading.Thread(target=worker) for _ in range(conc)]
@@ -222,11 +308,14 @@ def run_embed(model: dict, target: dict, raw: str, seed: int) -> dict:
         return {}
     cfg = model["embed"]
     rng = random.Random(seed)
-    texts = [" ".join(rng.choice(WORDS) for _ in range(rng.randint(cfg["min_words"], cfg["max_words"])))
-             for _ in range(cfg["n_requests"])]
+    texts = [
+        " ".join(rng.choice(WORDS) for _ in range(rng.randint(cfg["min_words"], cfg["max_words"])))
+        for _ in range(cfg["n_requests"])
+    ]
     res = {}
     lines = []
     try:
+
         def one(text):
             t0 = time.time()
             r = post_json(url + "/v1/embeddings", {"input": text})
@@ -240,19 +329,24 @@ def run_embed(model: dict, target: dict, raw: str, seed: int) -> dict:
             res[f"embed/c{conc}/tok_s"] = sum(o["tokens"] for o in good) / wall
             res[f"embed/c{conc}/p50_ms"] = lat[len(lat) // 2] * 1e3 if lat else float("nan")
             res[f"embed/c{conc}/failed"] = len(outs) - len(good)
-            lines.append(f"c{conc}: {res[f'embed/c{conc}/req_s']:.1f} req/s, {res[f'embed/c{conc}/tok_s']:.0f} tok/s, "
-                         f"failed {len(outs) - len(good)}")
+            lines.append(
+                f"c{conc}: {res[f'embed/c{conc}/req_s']:.1f} req/s, {res[f'embed/c{conc}/tok_s']:.0f} tok/s, "
+                f"failed {len(outs) - len(good)}"
+            )
             log("  " + lines[-1])
     finally:
-        open(raw + "-embed.log", "w").write("\n".join(lines) + "\n")
+        pathlib.Path(raw + "-embed.log").open("w", encoding="utf-8").write("\n".join(lines) + "\n")
         stop_server(target, raw)
     return res
 
 
 def run_vision(model: dict, target: dict, raw: str, seed: int) -> dict:
     cfg = model["vision"]
-    images = sorted(f for ext in ("png", "jpg", "jpeg", "webp")
-                    for f in glob.glob(os.path.join(os.path.expanduser(cfg["images"]), f"**/*.{ext}"), recursive=True))
+    images = sorted(
+        f
+        for ext in ("png", "jpg", "jpeg", "webp")
+        for f in glob.glob(os.path.join(pathlib.Path(cfg["images"]).expanduser(), f"**/*.{ext}"), recursive=True)
+    )
     if not cfg.get("images") or not images:
         log("  vision: no images, set models[].vision.images in the config")
         return {}
@@ -264,13 +358,20 @@ def run_vision(model: dict, target: dict, raw: str, seed: int) -> dict:
     res = {}
     lines = []
     try:
+
         def one(path):
             ext = os.path.splitext(path)[1].lstrip(".").replace("jpg", "jpeg")
-            data = base64.b64encode(open(path, "rb").read()).decode()
+            data = base64.b64encode(pathlib.Path(path).open("rb").read()).decode()
             body = {
-                "messages": [{"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/{ext};base64,{data}"}},
-                    {"type": "text", "text": cfg["prompt"]}]}],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/{ext};base64,{data}"}},
+                            {"type": "text", "text": cfg["prompt"]},
+                        ],
+                    }
+                ],
                 "temperature": 0.0,
             }
             t0 = time.time()
@@ -285,11 +386,13 @@ def run_vision(model: dict, target: dict, raw: str, seed: int) -> dict:
             res[f"vision/c{conc}/req_s"] = len(good) / wall
             res[f"vision/c{conc}/p50_s"] = lat[len(lat) // 2] if lat else float("nan")
             res[f"vision/c{conc}/failed"] = len(outs) - len(good)
-            lines.append(f"c{conc}: {res[f'vision/c{conc}/tok_s']:.0f} tok/s, {res[f'vision/c{conc}/req_s']:.2f} req/s, "
-                         f"failed {len(outs) - len(good)}")
+            lines.append(
+                f"c{conc}: {res[f'vision/c{conc}/tok_s']:.0f} tok/s, {res[f'vision/c{conc}/req_s']:.2f} req/s, "
+                f"failed {len(outs) - len(good)}"
+            )
             log("  " + lines[-1])
     finally:
-        open(raw + "-vision.log", "w").write("\n".join(lines) + "\n")
+        pathlib.Path(raw + "-vision.log").open("w", encoding="utf-8").write("\n".join(lines) + "\n")
         stop_server(target, raw)
     return res
 
@@ -303,8 +406,16 @@ LOWER_BETTER = ("ttft_s", "itl_p50_ms", "itl_p99_ms", "p50_ms", "p50_s", "failed
 
 
 def summarize(out: str) -> None:
-    results = [json.loads(line) for line in open(os.path.join(out, "results.jsonl")) if line.strip()]
-    run_cfg = json.load(open(os.path.join(out, "run.json"))).get("config", {}) if os.path.exists(os.path.join(out, "run.json")) else {}
+    results = [
+        json.loads(line)
+        for line in pathlib.Path(os.path.join(out, "results.jsonl")).open(encoding="utf-8")
+        if line.strip()
+    ]
+    run_cfg = (
+        json.load(pathlib.Path(os.path.join(out, "run.json")).open(encoding="utf-8")).get("config", {})
+        if pathlib.Path(os.path.join(out, "run.json")).exists()
+        else {}
+    )
 
     # model -> tier -> metric -> target -> values over the repeats
     table = {}
@@ -313,7 +424,9 @@ def summarize(out: str) -> None:
         if r["target"] not in targets:
             targets.append(r["target"])
         for metric, value in r["metrics"].items():
-            table.setdefault(r["model"], {}).setdefault(r["tier"], {}).setdefault(metric, {}).setdefault(r["target"], []).append(value)
+            table.setdefault(r["model"], {}).setdefault(r["tier"], {}).setdefault(metric, {}).setdefault(
+                r["target"], []
+            ).append(value)
 
     def cell(values):
         values = [v for v in values if v is not None and v == v]
@@ -325,12 +438,17 @@ def summarize(out: str) -> None:
         return f"{med:.4g} [{min(values):.4g}-{max(values):.4g}]"
 
     # the comparisons: [target, reference] pairs of the config, else every target against the first one
-    pairs = [p for p in run_cfg.get("compare", []) if p[0] in targets and p[1] in targets] or \
-            [[t, targets[0]] for t in targets[1:]]
+    pairs = [p for p in run_cfg.get("compare", []) if p[0] in targets and p[1] in targets] or [
+        [t, targets[0]] for t in targets[1:]
+    ]
 
-    lines = ["# Benchmark summary", "",
-             "Median over the repeats, the range in brackets. The last columns compare a target with a reference: a",
-             "difference is marked when the two ranges do not overlap (+ better, - worse).", ""]
+    lines = [
+        "# Benchmark summary",
+        "",
+        "Median over the repeats, the range in brackets. The last columns compare a target with a reference: a",
+        "difference is marked when the two ranges do not overlap (+ better, - worse).",
+        "",
+    ]
     summary = {}
     for model, tiers in table.items():
         for tier, metrics in tiers.items():
@@ -356,17 +474,21 @@ def summarize(out: str) -> None:
                 summary.setdefault(model, {}).setdefault(tier, {})[metric] = {t: vals.get(t, []) for t in targets}
             lines.append("")
 
-    open(os.path.join(out, "summary.md"), "w").write("\n".join(lines))
-    json.dump(summary, open(os.path.join(out, "summary.json"), "w"), indent=1)
+    pathlib.Path(os.path.join(out, "summary.md")).open("w", encoding="utf-8").write("\n".join(lines))
+    json.dump(summary, pathlib.Path(os.path.join(out, "summary.json")).open("w", encoding="utf-8"), indent=1)
     log(f"summary: {os.path.join(out, 'summary.md')}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=os.path.join(ROOT, "scripts", "bench-suite.json"))
-    parser.add_argument("--out", default=os.path.expanduser(f"~/Projects/bench-results/{time.strftime('%Y%m%d-%H%M%S')}"))
+    parser.add_argument(
+        "--out", default=pathlib.Path(f"~/Projects/bench-results/{time.strftime('%Y%m%d-%H%M%S')}").expanduser()
+    )
     parser.add_argument("--models", nargs="*", help="model names of the config to run (default: all)")
-    parser.add_argument("--tiers", nargs="*", help="tiers to run: engine server embed vision (default: those of each model)")
+    parser.add_argument(
+        "--tiers", nargs="*", help="tiers to run: engine server embed vision (default: those of each model)"
+    )
     parser.add_argument("--targets", nargs="*", help="target names of the config to run (default: all)")
     parser.add_argument("--repeats", type=int, help="overrides the repeats of the config")
     parser.add_argument("--workloads", nargs="*", help="server workloads to run, overrides those of each model")
@@ -378,7 +500,7 @@ def main() -> int:
         summarize(args.summarize)
         return 0
 
-    cfg = json.load(open(args.config))
+    cfg = json.load(pathlib.Path(args.config).open(encoding="utf-8"))
     targets = [t for t in cfg["targets"] if not args.targets or t["name"] in args.targets]
     # models marked "default": false run only when named
     models = [m for m in cfg["models"] if (m["name"] in args.models if args.models else m.get("default", True))]
@@ -389,10 +511,18 @@ def main() -> int:
             m["levels"] = args.levels
     repeats = args.repeats or cfg.get("repeats", 3)
 
-    os.makedirs(os.path.join(args.out, "raw"), exist_ok=True)
-    json.dump({"config": cfg, "targets": [t["name"] for t in targets], "models": [m["name"] for m in models],
-               "repeats": repeats, "started": time.strftime("%Y-%m-%d %H:%M:%S")},
-              open(os.path.join(args.out, "run.json"), "w"), indent=1)
+    pathlib.Path(os.path.join(args.out, "raw")).mkdir(exist_ok=True, parents=True)
+    json.dump(
+        {
+            "config": cfg,
+            "targets": [t["name"] for t in targets],
+            "models": [m["name"] for m in models],
+            "repeats": repeats,
+            "started": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+        pathlib.Path(os.path.join(args.out, "run.json")).open("w", encoding="utf-8"),
+        indent=1,
+    )
     results_path = os.path.join(args.out, "results.jsonl")
 
     for model in models:
@@ -400,7 +530,9 @@ def main() -> int:
         for tier in tiers:
             for rep in range(repeats):
                 for target in targets:
-                    log(f"{model['name']} / {tier} / {target['name']} ({target['image']}) / repeat {rep + 1} of {repeats}")
+                    log(
+                        f"{model['name']} / {tier} / {target['name']} ({target['image']}) / repeat {rep + 1} of {repeats}"
+                    )
                     raw = os.path.join(args.out, "raw", f"{model['name']}-{tier}-{target['name']}-r{rep + 1}")
                     if tier == "engine":
                         metrics = run_engine(model, target, raw, cfg.get("engine", {}))
@@ -413,9 +545,19 @@ def main() -> int:
                     else:
                         log(f"  unknown tier {tier}")
                         continue
-                    with open(results_path, "a") as f:
-                        f.write(json.dumps({"model": model["name"], "tier": tier, "target": target["name"],
-                                            "repeat": rep + 1, "metrics": metrics}) + "\n")
+                    with pathlib.Path(results_path).open("a", encoding="utf-8") as f:
+                        f.write(
+                            json.dumps(
+                                {
+                                    "model": model["name"],
+                                    "tier": tier,
+                                    "target": target["name"],
+                                    "repeat": rep + 1,
+                                    "metrics": metrics,
+                                }
+                            )
+                            + "\n"
+                        )
             summarize(args.out)
 
     return 0

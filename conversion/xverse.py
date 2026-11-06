@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import re
-
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("XverseForCausalLM")
@@ -15,7 +16,7 @@ from .base import ModelBase, TextModel, gguf
 class XverseModel(TextModel):
     model_arch = gguf.MODEL_ARCH.XVERSE
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         assert (self.dir_model / "tokenizer.json").is_file()
         dir_model = self.dir_model
         hparams = self.hparams
@@ -24,6 +25,7 @@ class XverseModel(TextModel):
         toktypes: list[int] = []
 
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(dir_model)
         vocab_size = hparams.get("vocab_size", len(tokenizer.vocab))  # ty: ignore[unresolved-attribute]
         # Since we are checking the maximum index, we need to ensure it's strictly less than vocab_size,
@@ -36,12 +38,12 @@ class XverseModel(TextModel):
         added_vocab = tokenizer.get_added_vocab()  # ty: ignore[unresolved-attribute]
 
         for token_id in range(vocab_size):
-            token_text = reverse_vocab[token_id].encode('utf-8')
+            token_text = reverse_vocab[token_id].encode("utf-8")
             # replace "\x00" to string with length > 0
             if token_text == b"\x00":
                 toktype = gguf.TokenType.BYTE  # special
-                token_text = f"<{token_text}>".encode('utf-8')
-            elif re.fullmatch(br"<0x[0-9A-Fa-f]{2}>", token_text):
+                token_text = f"<{token_text}>".encode()
+            elif re.fullmatch(rb"<0x[0-9A-Fa-f]{2}>", token_text):
                 toktype = gguf.TokenType.BYTE  # special
             elif reverse_vocab[token_id] in added_vocab:
                 if tokenizer.added_tokens_decoder[token_id].special:  # ty: ignore[unresolved-attribute]
@@ -62,7 +64,7 @@ class XverseModel(TextModel):
         special_vocab = gguf.SpecialVocab(dir_model, n_vocab=len(tokens))
         special_vocab.add_to_gguf(self.gguf_writer)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         self.gguf_writer.add_tensor_data_layout("Meta AI original pth")

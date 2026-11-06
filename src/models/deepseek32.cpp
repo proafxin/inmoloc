@@ -681,4 +681,3 @@ llama_model_deepseek32::graph_mtp::graph_mtp(const llama_model & model, const ll
     res->t_logits = cur;
     ggml_build_forward_expand(gf, cur);
 }
-

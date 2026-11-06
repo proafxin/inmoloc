@@ -2352,6 +2352,19 @@ void llama_kv_cache::state_write_meta(llama_io_write_i & io, const cell_ranges_t
     }
 }
 
+// the bytes of rows [row, row + n) of a K or V tensor, rows of row_size bytes: one run when the rows are dense, else one
+// run per row, at the stride of the tensor (the views of the box space their rows by the row of the box, see llama_box)
+static void kv_rows_bytes(const ggml_tensor * t, size_t row_size, int64_t row, uint32_t n, const std::function<void(size_t, size_t)> & fn) {
+    if ((size_t) t->nb[1] == row_size) {
+        fn((size_t) row*row_size, (size_t) n*row_size);
+        return;
+    }
+
+    for (uint32_t j = 0; j < n; ++j) {
+        fn((size_t) (row + j)*t->nb[1], row_size);
+    }
+}
+
 void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t & cr) const {
     // the format keeps the flag of a transposed V, which the cache never is
     const uint32_t v_trans = 0;
@@ -2381,7 +2394,7 @@ void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t
         // the rows of a range of cells are contiguous, in the box within a block
         for (const auto & range : cr.data) {
             cell_row_runs(range.first, range.second, [&](int64_t row, uint32_t n) {
-                io.write_tensor(k, (size_t) row * k_size_row, (size_t) n * k_size_row);
+                kv_rows_bytes(k, k_size_row, row, n, [&](size_t offs, size_t size) { io.write_tensor(k, offs, size); });
             });
         }
     }
@@ -2407,7 +2420,7 @@ void llama_kv_cache::state_write_data(llama_io_write_i & io, const cell_ranges_t
         // Read each range of cells of v_size length and write out
         for (const auto & range : cr.data) {
             cell_row_runs(range.first, range.second, [&](int64_t row, uint32_t n) {
-                io.write_tensor(v, (size_t) row * v_size_row, (size_t) n * v_size_row);
+                kv_rows_bytes(v, v_size_row, row, n, [&](size_t offs, size_t size) { io.write_tensor(v, offs, size); });
             });
         }
     }
@@ -2421,7 +2434,17 @@ bool llama_kv_cache::state_read_meta(llama_io_read_i & io, uint32_t cell_count, 
             return false;
         }
 
-        seq_rm(dest_seq_id, -1, -1);
+        if (box) {
+            // only the cells of the sequence go, its blocks stay: the restored cells take them again, and the blocks it
+            // holds for others (the compressed rows of a DSV4 cache, which a partial state leaves in place) are kept
+            for (uint32_t i = 0; i < cells.size(); ++i) {
+                if (cells.seq_has(i, dest_seq_id)) {
+                    cells.seq_rm(i, dest_seq_id);
+                }
+            }
+        } else {
+            seq_rm(dest_seq_id, -1, -1);
+        }
 
         // the restored tokens go into the blocks of the sequence, which takes the blocks it lacks, see llama_box
         if (box && !sinfo_in) {
@@ -2662,7 +2685,7 @@ bool llama_kv_cache::state_read_data(llama_io_read_i & io, uint32_t cell_count, 
 
         for (const auto & r : runs) {
             cell_row_runs(r.from, r.to, [&](int64_t row, uint32_t n) {
-                io.read_tensor(k, (size_t) row * k_size_row, (size_t) n * k_size_row);
+                kv_rows_bytes(k, k_size_row, row, n, [&](size_t offs, size_t size) { io.read_tensor(k, offs, size); });
             });
         }
     }
@@ -2697,7 +2720,7 @@ bool llama_kv_cache::state_read_data(llama_io_read_i & io, uint32_t cell_count, 
 
         for (const auto & r : runs) {
             cell_row_runs(r.from, r.to, [&](int64_t row, uint32_t n) {
-                io.read_tensor(v, (size_t) row * v_size_row, (size_t) n * v_size_row);
+                kv_rows_bytes(v, v_size_row, row, n, [&](size_t offs, size_t size) { io.read_tensor(v, offs, size); });
             });
         }
     }
@@ -2761,7 +2784,7 @@ void llama_kv_cache::state_clear(llama_seq_id seq_id, const slot_info & sinfo) {
 
         for (const auto & r : runs) {
             cell_row_runs(r.from, r.to, [&](int64_t row, uint32_t n) {
-                llama_clear_tensor_data(k, (size_t) row * k_size_row, (size_t) n * k_size_row);
+                kv_rows_bytes(k, k_size_row, row, n, [&](size_t offs, size_t size) { llama_clear_tensor_data(k, offs, size); });
             });
         }
     }
@@ -2776,7 +2799,7 @@ void llama_kv_cache::state_clear(llama_seq_id seq_id, const slot_info & sinfo) {
 
         for (const auto & r : runs) {
             cell_row_runs(r.from, r.to, [&](int64_t row, uint32_t n) {
-                llama_clear_tensor_data(v, (size_t) row * v_size_row, (size_t) n * v_size_row);
+                kv_rows_bytes(v, v_size_row, row, n, [&](size_t offs, size_t size) { llama_clear_tensor_data(v, offs, size); });
             });
         }
     }

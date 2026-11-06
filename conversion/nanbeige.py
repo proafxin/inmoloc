@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from .base import ModelBase, gguf, logger
-from .llama import LlamaModel
+from conversion.base import ModelBase, gguf, logger
+from conversion.llama import LlamaModel
 
 
 @ModelBase.register("NanbeigeForCausalLM")
@@ -10,13 +10,12 @@ class NanbeigeModel(LlamaModel):
     model_arch = gguf.MODEL_ARCH.NANBEIGE
     undo_permute = True
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         hparams = self.hparams
 
         n_loops = int(hparams.get("num_loops", 1) or 1)
-        if n_loops < 1:
-            n_loops = 1
+        n_loops = max(n_loops, 1)
         self.gguf_writer.add_num_loops(n_loops)
         logger.info(f"gguf: num_loops = {n_loops}")
 

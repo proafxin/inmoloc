@@ -32,7 +32,7 @@ llama_kv_cache_dsa::llama_kv_cache_dsa(
     hparams_lid(model.hparams) {
 
     // with a SWA cache next to it, the layers it does not filter are the layers of both
-    std::shared_ptr<llama_box> box_own = llama_box_make(model, type_k, type_v, kv_size, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
+    std::shared_ptr<llama_box> box_own = llama_box_make(model, type_k, type_v, kv_size, n_seq_max, GGML_TYPE_F32, GGML_TYPE_F32, 0, 0, false, offload,
             box_bytes, box_deferred, box_draft,
             [&](int32_t il) { return box_swa || filter_mla == nullptr || filter_mla(il); }, nullptr,
             box_layers_lid(model, type_k, filter_lid));

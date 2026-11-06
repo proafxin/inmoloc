@@ -64,7 +64,8 @@ static llama_context * init_ctx(llama_model * model, llama_context_params cparam
     }
     llama_synchronize(ctx);
     cache_buffer_collector collector;
-    llama_get_memory(ctx)->state_write(collector);
+    // the box saves single sequences: seq 0 holds the tokens above
+    llama_get_memory(ctx)->state_write(collector, 0);
     llama_memory_clear(llama_get_memory(ctx), true);
     if (collector.buffers.empty()) {
         fprintf(stderr, "%s : no cache buffers found\n", __func__);
@@ -93,8 +94,8 @@ static float logit_diff(float a, float b) {
 // Roll back multiple sequences, then replay them in a single batch whose
 // per-seq token count exceeds n_ubatch: each seq's replay spans several
 // ubatches while its rollback restore is still pending. Compared against a
-// reference context that never advanced past the rollback point and decodes
-// the identical replay batch.
+// reference context that loaded the rolled back states, so it starts from the
+// same bits with no restore pending, and decodes the identical replay batch.
 static bool test_multi_seq_split_replay(const common_params & params, llama_model * model, const int n_vocab, uint8_t fill) {
     constexpr uint32_t  n_seqs     = 2;
     constexpr uint32_t  n_ubatch   = 16;
@@ -137,27 +138,35 @@ static bool test_multi_seq_split_replay(const common_params & params, llama_mode
 
     bool ok = true;
 
-    // both contexts decode the identical [0, p0) prefill; only ctx_roll decodes
-    // the tail, which is then rolled back so its restore is pending at replay
+    // ctx_roll decodes the [0, p0) prefill and a step from p0, then rolls back all of the step but its first token (a
+    // rollback does not reach past it), so its restore is pending at replay; ctx_ref loads the rolled back states: a
+    // decode of its own would compute the kept token in a step of another shape, which is not bitwise the same
+    const llama_pos p1 = p0 + 1;
+
     for (uint32_t s = 0; s < n_seqs && ok; ++s) {
         llama_batch batch = llama_batch_init(n_prompt, 0, 1);
         for (llama_pos pos = 0; pos < (llama_pos) p0; ++pos) {
             common_batch_add(batch, tok(s, pos), pos, { (llama_seq_id) s }, false);
         }
         ok = ok && llama_decode(ctx_roll, batch) == 0;
-        ok = ok && llama_decode(ctx_ref,  batch) == 0;
 
         common_batch_clear(batch);
-        for (llama_pos pos = p0; pos < (llama_pos) n_prompt; ++pos) {
+        for (llama_pos pos = p0; pos < p1 + (llama_pos) n_rollback; ++pos) {
             common_batch_add(batch, tok(s, pos), pos, { (llama_seq_id) s }, false);
         }
         ok = ok && llama_decode(ctx_roll, batch) == 0;
         llama_batch_free(batch);
 
-        ok = ok && llama_memory_seq_rm(llama_get_memory(ctx_roll), (llama_seq_id) s, p0, -1);
+        ok = ok && llama_memory_seq_rm(llama_get_memory(ctx_roll), (llama_seq_id) s, p1, -1);
 
         // a second partial removal while one is pending must be refused
-        ok = ok && !llama_memory_seq_rm(llama_get_memory(ctx_roll), (llama_seq_id) s, p0 - 1, -1);
+        ok = ok && !llama_memory_seq_rm(llama_get_memory(ctx_roll), (llama_seq_id) s, p0, -1);
+    }
+
+    for (uint32_t s = 0; s < n_seqs && ok; ++s) {
+        std::vector<uint8_t> state(llama_state_seq_get_size(ctx_roll, (llama_seq_id) s));
+        state.resize(llama_state_seq_get_data(ctx_roll, state.data(), state.size(), (llama_seq_id) s));
+        ok = !state.empty() && llama_state_seq_set_data(ctx_ref, state.data(), state.size(), (llama_seq_id) s) == state.size();
     }
     if (!ok) {
         fprintf(stderr, "%s : multi-seq prefill/rollback failed\n", __func__);
@@ -168,7 +177,7 @@ static bool test_multi_seq_split_replay(const common_params & params, llama_mode
     llama_batch batch = llama_batch_init(n_seqs*n_replay, 0, 1);
     for (uint32_t s = 0; s < n_seqs; ++s) {
         for (uint32_t i = 0; i < n_replay; ++i) {
-            const llama_pos pos = p0 + (llama_pos) i;
+            const llama_pos pos = p1 + (llama_pos) i;
             common_batch_add(batch, tok(s, pos), pos, { (llama_seq_id) s }, true);
         }
     }
@@ -188,6 +197,12 @@ static bool test_multi_seq_split_replay(const common_params & params, llama_mode
     float    diff_max  = 0.0f;
     uint32_t seq_first = 0;
     int32_t  pos_first = -1;
+
+    // the outputs with a logit that is not finite, in each context, and of the rolled back one per seq
+    uint32_t n_bad_roll = 0;
+    uint32_t n_bad_ref  = 0;
+    std::vector<uint32_t> n_bad_roll_seq(n_seqs, 0);
+
     for (uint32_t i = 0; i < n_seqs*n_replay; ++i) {
         const float * l_roll = llama_get_logits_ith(ctx_roll, i);
         const float * l_ref  = llama_get_logits_ith(ctx_ref,  i);
@@ -196,19 +211,32 @@ static bool test_multi_seq_split_replay(const common_params & params, llama_mode
             cleanup();
             return false;
         }
+        bool bad_roll = false;
+        bool bad_ref  = false;
         for (int t = 0; t < n_vocab; ++t) {
             const float diff = logit_diff(l_roll[t], l_ref[t]);
             if (diff > eps && pos_first < 0) {
                 seq_first = i/n_replay;
-                pos_first = p0 + (int32_t) (i%n_replay);
+                pos_first = p1 + (int32_t) (i%n_replay);
             }
             diff_max = std::max(diff_max, diff);
+
+            bad_roll = bad_roll || !std::isfinite(l_roll[t]);
+            bad_ref  = bad_ref  || !std::isfinite(l_ref[t]);
         }
+        n_bad_roll += bad_roll;
+        n_bad_ref  += bad_ref;
+        n_bad_roll_seq[i/n_replay] += bad_roll;
     }
 
     if (diff_max > eps) {
-        fprintf(stderr, "%s : multi-seq split replay logits mismatch (max diff %g, first at seq %u pos %d)\n",
-                __func__, (double) diff_max, seq_first, pos_first);
+        std::string per_seq;
+        for (uint32_t s = 0; s < n_seqs; ++s) {
+            per_seq += " " + std::to_string(n_bad_roll_seq[s]);
+        }
+        fprintf(stderr, "%s : multi-seq split replay logits mismatch (max diff %g, first at seq %u pos %d; outputs not finite: "
+                "rolled back %u (per seq:%s), reference %u of %u)\n",
+                __func__, (double) diff_max, seq_first, pos_first, n_bad_roll, per_seq.c_str(), n_bad_ref, n_seqs*n_replay);
         cleanup();
         return false;
     }
@@ -222,7 +250,7 @@ static bool test_multi_seq_split_replay(const common_params & params, llama_mode
     {
         llama_batch batch_tail = llama_batch_init(n_tail, 0, 1);
         for (uint32_t i = 0; i < n_tail; ++i) {
-            const llama_pos pos = p0 + (llama_pos) (n_replay + i);
+            const llama_pos pos = p1 + (llama_pos) (n_replay + i);
             common_batch_add(batch_tail, tok(0, pos + 7), pos, { 0 }, false);
         }
         ok = llama_decode(ctx_ref, batch_tail) == 0;
@@ -231,7 +259,7 @@ static bool test_multi_seq_split_replay(const common_params & params, llama_mode
 
     float diff_tail = 0.0f;
     for (uint32_t i = 0; i < n_tail && ok; ++i) {
-        const llama_pos pos = p0 + (llama_pos) (n_replay + i);
+        const llama_pos pos = p1 + (llama_pos) (n_replay + i);
         llama_batch batch_one = llama_batch_init(1, 0, 1);
         common_batch_add(batch_one, tok(1, pos), pos, { 1 }, true);
         ok = llama_decode(ctx_roll, batch_one) == 0;
@@ -420,25 +448,76 @@ static int test_rollback(const common_params & params, llama_model * model, uint
     ckpt.update_tgt(ctx_src, 0, 0);
     GGML_ASSERT(ckpt.load_tgt(ctx_dst, 0, 0));
 
+    // a restored state saves back to the same bytes
+    {
+        const auto seq_state = [](llama_context * ctx) {
+            std::vector<uint8_t> data(llama_state_seq_get_size(ctx, 0));
+            data.resize(llama_state_seq_get_data(ctx, data.data(), data.size(), 0));
+            return data;
+        };
+
+        // the restored side first: a save of the source must not change it
+        const std::vector<uint8_t> state_dst = seq_state(ctx_dst);
+        const std::vector<uint8_t> state_src = seq_state(ctx_src);
+
+        // the checkpoint, saved before the restore: it tells whether the source changed after it was saved
+        const std::vector<uint8_t> state_ckpt(ckpt.data_tgt.data(), ckpt.data_tgt.data() + ckpt.data_tgt.size());
+        if (state_ckpt != state_src || state_ckpt != state_dst) {
+            fprintf(stderr, "%s : checkpoint %s the source saved again, %s the restored state\n", __func__,
+                    state_ckpt == state_src ? "matches" : "differs from", state_ckpt == state_dst ? "matches" : "differs from");
+        }
+
+        if (state_src != state_dst) {
+            size_t i = 0;
+            while (i < state_src.size() && i < state_dst.size() && state_src[i] == state_dst[i]) {
+                ++i;
+            }
+            size_t n_diff = 0;
+            for (size_t j = i; j < std::min(state_src.size(), state_dst.size()); ++j) {
+                n_diff += state_src[j] != state_dst[j];
+            }
+            fprintf(stderr, "%s : the restored state saves back differently: %zu vs %zu bytes, first difference at byte %zu, %zu bytes differ\n",
+                    __func__, state_src.size(), state_dst.size(), i, n_diff);
+            for (const auto * s : { &state_src, &state_dst }) {
+                fprintf(stderr, "%s :   %s:", __func__, s == &state_src ? "saved   " : "restored");
+                for (size_t j = i - std::min<size_t>(i, 8); j < std::min(s->size(), i + 8); ++j) {
+                    fprintf(stderr, " %02x", (*s)[j]);
+                }
+                fprintf(stderr, "\n");
+            }
+            return 1;
+        }
+    }
+
     // the tokens after the prompt repeat its last one
     const auto tok_at = [&](llama_pos pos) {
         return pos < (llama_pos) n_tokens ? tokens[pos] : tokens.back();
     };
 
+    // a context that decodes only up to the rollback point: on a mismatch it tells which side is wrong, the one that
+    // rolled back (src) or the one restored from it (dst)
+    llama_context * ctx_ref = make_ctx(params, model, fill);
+    if (ctx_ref == nullptr || !decode_tokens(ctx_ref, tokens, (uint32_t) rollback_pos)) {
+        fprintf(stderr, "%s : failed to init the reference context\n", __func__);
+        return 1;
+    }
+
     constexpr float eps = 1e-5f;
     std::vector<std::vector<float>> logits_src_replay(n_rollback);
-    const auto replay_and_compare = [&](const char * mode, llama_pos pos0, bool keep_logits) {
+    const auto replay_and_compare = [&](const char * mode, llama_pos pos0, bool keep_logits, llama_context * ref) {
         for (uint32_t i = 0; i < n_rollback; ++i) {
             const llama_pos pos = pos0 + i;
             if (!decode_one(ctx_src, tok_at(pos), pos) ||
-                !decode_one(ctx_dst, tok_at(pos), pos)) {
+                !decode_one(ctx_dst, tok_at(pos), pos) ||
+                (ref && !decode_one(ref, tok_at(pos), pos))) {
                 fprintf(stderr, "%s : %s replay failed at position %d\n", __func__, mode, pos);
                 return false;
             }
 
             const float * logits_src = llama_get_logits_ith(ctx_src, 0);
             const float * logits_dst = llama_get_logits_ith(ctx_dst, 0);
-            if (logits_src == nullptr || logits_dst == nullptr) {
+            const float * logits_ref = ref ? llama_get_logits_ith(ref, 0) : nullptr;
+            if (logits_src == nullptr || logits_dst == nullptr || (ref && logits_ref == nullptr)) {
                 fprintf(stderr, "%s : missing %s logits at position %d\n", __func__, mode, pos);
                 return false;
             }
@@ -446,33 +525,54 @@ static int test_rollback(const common_params & params, llama_model * model, uint
             if (keep_logits) {
                 logits_src_replay[i].assign(logits_src, logits_src + n_vocab);
             }
+
+            float diff_src = 0.0f;
+            float diff_dst = 0.0f;
+            for (int token = 0; logits_ref && token < n_vocab; ++token) {
+                diff_src = std::max(diff_src, logit_diff(logits_src[token], logits_ref[token]));
+                diff_dst = std::max(diff_dst, logit_diff(logits_dst[token], logits_ref[token]));
+            }
+
+            // the logits that are not finite in each context
+            const auto n_bad = [&](const float * logits) {
+                int n = 0;
+                for (int token = 0; logits && token < n_vocab; ++token) {
+                    n += !std::isfinite(logits[token]);
+                }
+                return n;
+            };
+
             for (int token = 0; token < n_vocab; ++token) {
                 if (logit_diff(logits_src[token], logits_dst[token]) > eps) {
-                    fprintf(stderr, "%s : %s logits mismatch at position %d, token %d (%g != %g)\n",
+                    fprintf(stderr, "%s : %s logits mismatch at position %d, token %d (%g != %g)",
                             __func__, mode, pos, token, (double) logits_src[token], (double) logits_dst[token]);
+                    if (logits_ref) {
+                        fprintf(stderr, ", max diff to the reference: rolled back %g, restored %g", (double) diff_src, (double) diff_dst);
+                    }
+                    fprintf(stderr, "; not finite of %d: rolled back %d, restored %d, reference %d",
+                            n_vocab, n_bad(logits_src), n_bad(logits_dst), n_bad(logits_ref));
+                    fprintf(stderr, "\n");
                     return false;
                 }
             }
         }
         return true;
     };
-    if (!replay_and_compare("full", rollback_pos, true)) {
+    if (!replay_and_compare("full", rollback_pos, true, ctx_ref)) {
         return 1;
     }
+    llama_free(ctx_ref);
 
-    // a rollback reaches back only into the last step, like the rejected drafts of a speculative one: both contexts
-    // decode n_rollback more tokens in one step and remove them again
+    // a rollback reaches back only into the last step, and not past its first token, like the rejected drafts of a
+    // speculative one: both contexts decode n_rollback + 1 more tokens in one step and remove the last n_rollback
+    const uint32_t n_step = n_rollback + 1;
     {
-        std::vector<llama_token> step;
-        for (uint32_t i = 0; i < n_rollback; ++i) {
-            step.push_back(tok_at((llama_pos) (n_tokens + i)));
-        }
-
         bool ok = true;
         for (llama_context * ctx : { ctx_src, ctx_dst }) {
-            llama_batch batch = llama_batch_init(n_rollback, 0, 1);
-            for (uint32_t i = 0; i < n_rollback; ++i) {
-                common_batch_add(batch, step[i], (llama_pos) (n_tokens + i), { 0 }, i + 1 == n_rollback);
+            llama_batch batch = llama_batch_init(n_step, 0, 1);
+            for (uint32_t i = 0; i < n_step; ++i) {
+                const llama_pos pos = (llama_pos) (n_tokens + i);
+                common_batch_add(batch, tok_at(pos), pos, { 0 }, i + 1 == n_step);
             }
             ok = ok && llama_decode(ctx, batch) == 0;
             llama_batch_free(batch);
@@ -483,8 +583,8 @@ static int test_rollback(const common_params & params, llama_model * model, uint
         }
     }
 
-    if (!llama_memory_seq_rm(llama_get_memory(ctx_src), 0, n_tokens, -1) ||
-        !llama_memory_seq_rm(llama_get_memory(ctx_dst), 0, n_tokens, -1)) {
+    if (!llama_memory_seq_rm(llama_get_memory(ctx_src), 0, n_tokens + 1, -1) ||
+        !llama_memory_seq_rm(llama_get_memory(ctx_dst), 0, n_tokens + 1, -1)) {
         fprintf(stderr, "%s : partial rollback failed\n", __func__);
         return 1;
     }
@@ -494,7 +594,7 @@ static int test_rollback(const common_params & params, llama_model * model, uint
     ckpt_partial.update_tgt(ctx_src, 0, partial_flags);
     GGML_ASSERT(ckpt_partial.load_tgt(ctx_dst, 0, partial_flags));
 
-    if (!replay_and_compare("partial", n_tokens, false)) {
+    if (!replay_and_compare("partial", n_tokens + 1, false, nullptr)) {
         return 1;
     }
 
@@ -578,7 +678,9 @@ int main(int argc, char ** argv) {
 
     ggml_backend_load_all();
 
-    common_init_result_ptr llama_init = common_init_from_params(params);
+    // the tests make their own contexts: a context here would take the whole budget for its box, and theirs would size
+    // their boxes by it
+    common_init_result_ptr llama_init = common_init_from_params(params, /*model_only=*/ true);
     llama_model * model = llama_init->model();
     if (model == nullptr) {
         fprintf(stderr, "%s : failed to init model\n", __func__);
@@ -590,7 +692,8 @@ int main(int argc, char ** argv) {
         return 0;
     }
 
-    for (uint8_t fill : { 0, 0x3e }) {
+    // 0xff is a NaN in f16 and f32: memory read before anything wrote it shows in the logits
+    for (uint8_t fill : { 0x00, 0x3e, 0xff }) {
         fprintf(stderr, "%s : testing with cache fill 0x%02x\n", __func__, fill);
         if (test_rollback(params, model, fill) != 0) {
             return 1;

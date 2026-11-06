@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import math
-
-from typing import Any, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("DeciLMForCausalLM")
@@ -30,15 +31,15 @@ class DeciModel(TextModel):
             return n
         return n + k - (n % k)
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        if "block_configs" in self.hparams: # Llama-3_1-Nemotron-51B
-            _block_configs: list[dict[str,Any]] = self.hparams["block_configs"]
-            assert self.block_count == len(_block_configs)
-            self._num_kv_heads = list()
-            self._num_heads = list()
-            _ffn_multipliers = list()
+        if "block_configs" in self.hparams:  # Llama-3_1-Nemotron-51B
+            block_configs: list[dict[str, Any]] = self.hparams["block_configs"]
+            assert self.block_count == len(block_configs)
+            self._num_kv_heads = []
+            self._num_heads = []
+            ffn_multipliers = []
             # ***linear attention layer***
             # if n_heads_in_group is None and replace_with_linear is True
             # then _num_kv_heads[il] is 0 and _num_heads[il] is num_attention_heads
@@ -52,33 +53,38 @@ class DeciModel(TextModel):
             # ***dummy layer*** for nemotron 253B
             # if n_heads_in_group is None and ffn_mult is None
             # then _num_kv_heads[il] is 0 and _num_heads[il] is 0 and _ffn_dims is 0
-            for il in range(len(_block_configs)):
-                if _block_configs[il]["attention"]["n_heads_in_group"] is None:
-                    if _block_configs[il]["attention"]["replace_with_linear"] is True:
+            for il in range(len(block_configs)):
+                if block_configs[il]["attention"]["n_heads_in_group"] is None:
+                    if block_configs[il]["attention"]["replace_with_linear"] is True:
                         self._num_kv_heads.append(0)
                         self._num_heads.append(self.hparams["num_attention_heads"])
                     else:
                         self._num_kv_heads.append(0)
                         self._num_heads.append(0)
                 else:
-                    self._num_kv_heads.append(self.hparams["num_attention_heads"] // _block_configs[il]["attention"]["n_heads_in_group"])
+                    self._num_kv_heads.append(
+                        self.hparams["num_attention_heads"] // block_configs[il]["attention"]["n_heads_in_group"]
+                    )
                     self._num_heads.append(self.hparams["num_attention_heads"])
-                if _block_configs[il]["ffn"]["ffn_mult"] is None: # dummy layer
-                    _ffn_multipliers.append(0.0)
+                if block_configs[il]["ffn"]["ffn_mult"] is None:  # dummy layer
+                    ffn_multipliers.append(0.0)
                 else:
-                    _ffn_multipliers.append(_block_configs[il]["ffn"]["ffn_mult"])
+                    ffn_multipliers.append(block_configs[il]["ffn"]["ffn_mult"])
             assert self.block_count == len(self._num_kv_heads)
             assert self.block_count == len(self._num_heads)
-            assert self.block_count == len(_ffn_multipliers)
-            assert isinstance(self._num_kv_heads, list) and isinstance(self._num_kv_heads[0], int)
-            assert isinstance(self._num_heads, list) and isinstance(self._num_heads[0], int)
-            assert isinstance(_ffn_multipliers, list) and isinstance(_ffn_multipliers[0], float)
+            assert self.block_count == len(ffn_multipliers)
+            assert isinstance(self._num_kv_heads, list)
+            assert isinstance(self._num_kv_heads[0], int)
+            assert isinstance(self._num_heads, list)
+            assert isinstance(self._num_heads[0], int)
+            assert isinstance(ffn_multipliers, list)
+            assert isinstance(ffn_multipliers[0], float)
             self._ffn_dims: list[int] = [
                 DeciModel._ffn_mult_to_intermediate_size(multiplier, self.hparams["hidden_size"])
-                for multiplier in _ffn_multipliers
+                for multiplier in ffn_multipliers
             ]
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         # Please change tokenizer_config.json of Llama-3_1-Nemotron-51B's
         # eos_token from '|eot_id|' to '|end_of_text|'
         if self.hparams.get("vocab_size", 128256) == 128256:
@@ -94,8 +100,8 @@ class DeciModel(TextModel):
             # DeciLM-7B
             self._set_vocab_llama_hf()
 
-    def set_gguf_parameters(self):
-        if "block_configs" in self.hparams: # Llama-3_1-Nemotron-51B
+    def set_gguf_parameters(self) -> None:
+        if "block_configs" in self.hparams:  # Llama-3_1-Nemotron-51B
             assert self.block_count == len(self._num_kv_heads)
             assert self.block_count == len(self._num_heads)
             assert self.block_count == len(self._ffn_dims)
@@ -111,9 +117,9 @@ class DeciModel(TextModel):
             self.gguf_writer.add_key_length(self.hparams["hidden_size"] // self.hparams["num_attention_heads"])
             self.gguf_writer.add_value_length(self.hparams["hidden_size"] // self.hparams["num_attention_heads"])
             self.gguf_writer.add_file_type(self.ftype)
-        else: # DeciLM-7B
+        else:  # DeciLM-7B
             super().set_gguf_parameters()
-            if "num_key_value_heads_per_layer" in self.hparams: # DeciLM-7B
+            if "num_key_value_heads_per_layer" in self.hparams:  # DeciLM-7B
                 self._num_kv_heads: list[int] = self.hparams["num_key_value_heads_per_layer"]
                 assert self.block_count == len(self._num_kv_heads)
                 self.gguf_writer.add_head_count_kv(self._num_kv_heads)
@@ -128,9 +134,11 @@ class DeciModel(TextModel):
     def permute(weights: Tensor, n_head: int, n_head_kv: int | None):
         if n_head_kv is not None and n_head != n_head_kv:
             n_head = n_head_kv
-        return (weights.reshape(n_head, 2, weights.shape[0] // n_head // 2, *weights.shape[1:])
-                .swapaxes(1, 2)
-                .reshape(weights.shape))
+        return (
+            weights.reshape(n_head, 2, weights.shape[0] // n_head // 2, *weights.shape[1:])
+            .swapaxes(1, 2)
+            .reshape(weights.shape)
+        )
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         n_head = self.hparams["num_attention_heads"]
@@ -153,7 +161,7 @@ class DeciModel(TextModel):
 
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
         if rope_params := self.rope_parameters.get("full_attention", self.rope_parameters):
-            if rope_params.get("rope_type", '').lower() == "llama3":
+            if rope_params.get("rope_type", "").lower() == "llama3":
                 base = rope_params.get("rope_theta", 10000.0)
                 if (dim := self.hparams.get("head_dim")) is None:
                     dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
@@ -179,7 +187,10 @@ class DeciModel(TextModel):
                         smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
                         rope_factors.append(1 / ((1 - smooth) / factor + smooth))
 
-                yield (self.format_tensor_name(gguf.MODEL_TENSOR.ROPE_FREQS), torch.tensor(rope_factors, dtype=torch.float32))
+                yield (
+                    self.format_tensor_name(gguf.MODEL_TENSOR.ROPE_FREQS),
+                    torch.tensor(rope_factors, dtype=torch.float32),
+                )
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
