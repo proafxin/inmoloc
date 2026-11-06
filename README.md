@@ -72,6 +72,28 @@ Setup: same RTX 5090 Laptop at different settings, `Kvark-Sparkle-1.0-27B-Q4_K_M
 - In 23G one inmoloc request can use up to ~164k tokens, while each llama.cpp slot gets 1024.
 - On the same GPU, vLLM 0.33.0 does not start with a 4-bit Qwen3.8 27B (INT4 W4A16) and MTP drafting, while inmoloc serves the same model at Q4_K_XL with MTP drafting 2 at 387 tok/s with 64 requests in a 22826 MiB budget.
 
+### OCR vision benchmark: PaddleOCR-VL-1.6 at 300 DPI
+
+Setup: same RTX 5090 Laptop, `PaddleOCR-VL-1.6-Q8_0` model + mmproj, 257 pages rendered at 300 DPI (322 KiB median PNG), `max_tokens 1024`, one image per request.
+
+inmoloc: `--vram-budget 2.5G --max-output-tokens 1024`; llama.cpp: `-c 24576 --parallel 6 --cache-ram 0 --n-predict 1024`.
+
+| Level | inmoloc wall s | inmoloc tok/s | inmoloc GPU MiB | llama.cpp wall s | llama.cpp tok/s | llama.cpp GPU MiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 0.8 | 392 | 2262 | 0.9 | 367 | 2248 |
+| 2 | 4.4 | 244 | 2262 | 2.1 | 514 | 2248 |
+| 4 | 2.3 | 470 | 2262 | 2.9 | 373 | 2248 |
+| 8 | 5.5 | 664 | 2262 | 6.7 | 560 | 2248 |
+| 16 | 11.0 | 866 | 2262 | 12.5 | 772 | 2248 |
+| 32 | 20.2 | 809 | 2262 | 23.9 | 684 | 2248 |
+| 64 | 40.4 | 834 | 2262 | 47.0 | 692 | 2248 |
+| 128 | 86.8 | 701 | 2262 | 93.2 | 640 | 2248 |
+
+- Peak tok/s: inmoloc ~866 at level 16 vs llama.cpp ~772 at level 16 (~12% higher)
+- At level 128: inmoloc 701 tok/s / 86.8 s vs llama.cpp 640 tok/s / 93.2 s (~10% faster)
+- VRAM: essentially identical (~2260 MiB both), inmoloc's vision encoder no longer pinned to GPU
+- inmoloc's level-2 outlier (4.4 s vs llama.cpp 2.1 s) is warmup on the first concurrent batch; throughput rises once the encoder is warm
+
 ## Usage
 
 Run the published CUDA image (built with CUDA 12.8, so it needs NVIDIA driver 570 or newer, like llama.cpp's; see [Docker](docs/docker.md)):
