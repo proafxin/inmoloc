@@ -1107,7 +1107,7 @@ def pick_output_type(model: LazyModel, output_type_str: str | None) -> GGMLFileT
     wq_type = model[gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.ATTN_Q].format(bid=0) + ".weight"].data_type
 
     # a tuple: the data types are not hashable (frozen dataclasses with a list field)
-    if output_type_str == "f32" or (output_type_str is None and wq_type in (DT_F32, DT_BF16)):  # noqa: PLR6201
+    if output_type_str == "f32" or (output_type_str is None and wq_type in (DT_F32, DT_BF16)):  # ruff: ignore[literal-membership]
         return GGMLFileType.AllF32
     if output_type_str == "f16" or (output_type_str is None and wq_type == DT_F16):
         return GGMLFileType.MostlyF16

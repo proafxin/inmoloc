@@ -263,7 +263,7 @@ class EvalState:
         print(
             f"{self.processed:3}/{total_tasks:3}  {task_state.task_id:<20} {self.dataset_type.upper()}   "
             f"{truncated_question:<40}    {task_state.expected:<10} {display_answer:<10} {display_tokens:<6} "
-            f"{display_tps:<6} {display_t_gen:<8} {'✓' if task_state.correct else '✗'}  "  # noqa: RUF001
+            f"{display_tps:<6} {display_t_gen:<8} {'✓' if task_state.correct else '✗'}  "
             f"[{n_correct:3}/{self.processed:3}, {success_ratio:.3f}]  {display_server}"
         )
 
@@ -654,7 +654,7 @@ class EvalState:
             t_gen_str = f"{t_gen_ms / 1000:.1f}" if t_gen_ms is not None else "N/A"
             server_name = case.get("server_name", "") or ""
             is_correct = case.get("correct", False) if status == "ok" else False
-            symbol = "✓ " if is_correct else ("✗ " if status == "ok" else "")  # noqa: RUF001
+            symbol = "✓ " if is_correct else ("✗ " if status == "ok" else "")
             first_line = question.split("\n")[0]
             question_trunc = first_line[:43]
             if len(first_line) > 43:

@@ -1,29 +1,42 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import logging
 import argparse
-import os
-import sys
-import numpy
 import enum
-from pathlib import Path
-from typing import Any, Optional, Tuple, Type
+import logging
+import sys
 import warnings
+from pathlib import Path
+from typing import Any
 
+import numpy
 import numpy as np
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QLineEdit, QFileDialog, QTableWidget,
-    QTableWidgetItem, QComboBox, QMessageBox, QTabWidget,
-    QTextEdit, QFormLayout,
-    QHeaderView, QDialog, QDialogButtonBox
-)
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 import gguf
-from gguf import GGUFReader, GGUFWriter, GGUFValueType, ReaderField
-from gguf.constants import TokenType, RopeScalingType, PoolingType, GGMLQuantizationType
+from gguf import GGUFReader, GGUFValueType, GGUFWriter, ReaderField
+from gguf.constants import GGMLQuantizationType, PoolingType, RopeScalingType, TokenType
 
 logger = logging.getLogger("gguf-editor-gui")
 
@@ -36,11 +49,7 @@ KEY_TO_ENUM_TYPE = {
 }
 
 # Define the tokenizer keys that should be edited together
-TOKENIZER_LINKED_KEYS = [
-    gguf.Keys.Tokenizer.LIST,
-    gguf.Keys.Tokenizer.TOKEN_TYPE,
-    gguf.Keys.Tokenizer.SCORES
-]
+TOKENIZER_LINKED_KEYS = [gguf.Keys.Tokenizer.LIST, gguf.Keys.Tokenizer.TOKEN_TYPE, gguf.Keys.Tokenizer.SCORES]
 
 
 class TokenizerEditorDialog(QDialog):
@@ -463,10 +472,9 @@ class ArrayEditorDialog(QDialog):
                         # If not a valid enum value, just check the raw value
                         if filter_text in str(value).lower():
                             self.filtered_indices.append(i)
-                else:
-                    # For non-enum values, just check the string representation
-                    if filter_text in str(value).lower():
-                        self.filtered_indices.append(i)
+                # For non-enum values, just check the string representation
+                elif filter_text in str(value).lower():
+                    self.filtered_indices.append(i)
 
         # Reset to first page and reload
         self.total_pages = max(1, (len(self.filtered_indices) + self.page_size - 1) // self.page_size)
@@ -565,8 +573,7 @@ class ArrayEditorDialog(QDialog):
             return
 
         selected_rows = set()
-        for item in self.items_table.selectedItems():
-            selected_rows.add(item.row())
+        selected_rows.update(item.row() for item in self.items_table.selectedItems())
 
         if not selected_rows:
             QMessageBox.information(self, "No Selection", "Please select at least one row to edit.")
@@ -617,11 +624,10 @@ class ArrayEditorDialog(QDialog):
             # Default to first enum value
             default_value = list(self.enum_type)[0].value
             self.array_values.append(default_value)
+        elif self.element_type == GGUFValueType.STRING:
+            self.array_values.append("")
         else:
-            if self.element_type == GGUFValueType.STRING:
-                self.array_values.append("")
-            else:
-                self.array_values.append(0)
+            self.array_values.append(0)
 
         # Add to filtered indices if it matches the current filter
         self.filtered_indices.append(orig_idx)
@@ -665,20 +671,18 @@ class ArrayEditorDialog(QDialog):
         for i, value in enumerate(self.array_values):
             if not filter_text:
                 self.filtered_indices.append(i)
-            else:
-                # Apply filter
-                if self.enum_type is not None and isinstance(value, int):
-                    try:
-                        enum_val = self.enum_type(value)
-                        display_text = f"{enum_val.name} ({value})".lower()
-                        if filter_text in display_text:
-                            self.filtered_indices.append(i)
-                    except (ValueError, KeyError):
-                        if filter_text in str(value).lower():
-                            self.filtered_indices.append(i)
-                else:
+            # Apply filter
+            elif self.enum_type is not None and isinstance(value, int):
+                try:
+                    enum_val = self.enum_type(value)
+                    display_text = f"{enum_val.name} ({value})".lower()
+                    if filter_text in display_text:
+                        self.filtered_indices.append(i)
+                except (ValueError, KeyError):
                     if filter_text in str(value).lower():
                         self.filtered_indices.append(i)
+            elif filter_text in str(value).lower():
+                self.filtered_indices.append(i)
 
         # Update pagination
         self.total_pages = max(1, (len(self.filtered_indices) + self.page_size - 1) // self.page_size)
@@ -688,14 +692,14 @@ class ArrayEditorDialog(QDialog):
         # Reload the page
         self.load_page()
 
-    def edit_enum_value(self, row: int, enum_type: Type[enum.Enum]):
+    def edit_enum_value(self, row: int, enum_type: type[enum.Enum]):
         """Edit an enum value using a dialog with a dropdown of all enum options."""
         # Get the original index from the table item
         orig_item = self.items_table.item(row, 0)
         if orig_item:
             orig_idx = orig_item.data(Qt.ItemDataRole.UserRole)
         else:
-            return
+            return None
         current_value = self.array_values[orig_idx]
 
         # Create a dialog with enum options
@@ -777,7 +781,7 @@ class AddMetadataDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def get_data(self) -> Tuple[str, GGUFValueType, Any]:
+    def get_data(self) -> tuple[str, GGUFValueType, Any]:
         key = self.key_edit.text()
         value_type = self.type_combo.currentData()
         value_text = self.value_edit.toPlainText()
@@ -798,7 +802,7 @@ class AddMetadataDialog(QDialog):
         elif value_type == GGUFValueType.FLOAT32:
             value = np.float32(float(value_text))
         elif value_type == GGUFValueType.BOOL:
-            value = value_text.lower() in ('true', 'yes', '1')
+            value = value_text.lower() in ("true", "yes", "1")
         elif value_type == GGUFValueType.STRING:
             value = value_text
         else:
@@ -903,7 +907,7 @@ class GGUFEditorWindow(QMainWindow):
             self.statusBar().showMessage(f"Loading {file_path}...")
             QApplication.processEvents()
 
-            self.reader = GGUFReader(file_path, 'r')
+            self.reader = GGUFReader(file_path, "r")
             self.current_file = file_path
             self.file_path_edit.setText(file_path)
 
@@ -917,14 +921,12 @@ class GGUFEditorWindow(QMainWindow):
             self.statusBar().showMessage(f"Loaded {file_path}")
             return True
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to open file: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to open file: {e!s}")
             self.statusBar().showMessage("Error loading file")
             return False
 
     def open_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Open GGUF File", "", "GGUF Files (*.gguf);;All Files (*)"
-        )
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open GGUF File", "", "GGUF Files (*.gguf);;All Files (*)")
 
         if not file_path:
             return
@@ -940,7 +942,7 @@ class GGUFEditorWindow(QMainWindow):
         # Disconnect to prevent triggering during loading
         if self.on_metadata_changed_is_connected:
             with warnings.catch_warnings():
-                warnings.filterwarnings('ignore')
+                warnings.filterwarnings("ignore")
                 self.metadata_table.itemChanged.disconnect(self.on_metadata_changed)
             self.on_metadata_changed_is_connected = False
 
@@ -962,7 +964,7 @@ class GGUFEditorWindow(QMainWindow):
                 enum_type = self.get_enum_for_key(key)
                 if enum_type is not None and field.types[-1] == GGUFValueType.INT32:
                     element_type = enum_type.__name__
-                type_str = '[' * nest_count + element_type + ']' * nest_count
+                type_str = "[" * nest_count + element_type + "]" * nest_count
             else:
                 type_str = str(field.types[0].name)
                 # Check if this is an enum field
@@ -1033,7 +1035,7 @@ class GGUFEditorWindow(QMainWindow):
 
         if curr_type == GGUFValueType.STRING:
             for element_pos in range(total_elements):
-                value_string = str(bytes(field.parts[-1 - (total_elements - element_pos - 1) * 2]), encoding='utf-8')
+                value_string = str(bytes(field.parts[-1 - (total_elements - element_pos - 1) * 2]), encoding="utf-8")
                 array_values.append(value_string)
         elif self.reader and curr_type in self.reader.gguf_scalar_to_np:
             for element_pos in range(total_elements):
@@ -1041,11 +1043,11 @@ class GGUFEditorWindow(QMainWindow):
 
         return array_values
 
-    def get_enum_for_key(self, key: str) -> Optional[Type[enum.Enum]]:
+    def get_enum_for_key(self, key: str) -> type[enum.Enum] | None:
         """Get the enum type for a given key if it exists."""
         return KEY_TO_ENUM_TYPE.get(key)
 
-    def format_enum_value(self, value: Any, enum_type: Type[enum.Enum]) -> str:
+    def format_enum_value(self, value: Any, enum_type: type[enum.Enum]) -> str:
         """Format a value as an enum if possible."""
         try:
             if isinstance(value, (int, str)):
@@ -1062,8 +1064,8 @@ class GGUFEditorWindow(QMainWindow):
         if len(field.types) == 1:
             curr_type = field.types[0]
             if curr_type == GGUFValueType.STRING:
-                return str(bytes(field.parts[-1]), encoding='utf-8')
-            elif self.reader and curr_type in self.reader.gguf_scalar_to_np:
+                return str(bytes(field.parts[-1]), encoding="utf-8")
+            if self.reader and curr_type in self.reader.gguf_scalar_to_np:
                 value = field.parts[-1][0]
                 # Check if this field has an enum type
                 enum_type = self.get_enum_for_key(field.name)
@@ -1085,7 +1087,9 @@ class GGUFEditorWindow(QMainWindow):
             else:
                 array_elements = [str(array_values[i]) for i in range(render_element)]
 
-            return f"[ {', '.join(array_elements).strip()}{', ...' if len(array_values) > len(array_elements) else ''} ]"
+            return (
+                f"[ {', '.join(array_elements).strip()}{', ...' if len(array_values) > len(array_elements) else ''} ]"
+            )
 
         return "Complex value"
 
@@ -1154,9 +1158,9 @@ class GGUFEditorWindow(QMainWindow):
                     converted_value = enum_val.value
                 except (KeyError, AttributeError):
                     # Check if it's a number or "NAME (value)" format
-                    if '(' in new_value and ')' in new_value:
+                    if "(" in new_value and ")" in new_value:
                         # Extract the value from "NAME (value)" format
-                        value_part = new_value.split('(')[1].split(')')[0].strip()
+                        value_part = new_value.split("(")[1].split(")")[0].strip()
                         converted_value = int(value_part)
                     else:
                         # Try to convert directly to int
@@ -1180,7 +1184,8 @@ class GGUFEditorWindow(QMainWindow):
                     self,
                     f"Invalid Enum Value ({e})",
                     f"'{new_value}' is not a valid {enum_type.__name__} value.\n"
-                    f"Valid values are: {', '.join(v.name for v in enum_type)}")
+                    f"Valid values are: {', '.join(v.name for v in enum_type)}",
+                )
 
                 # Revert to original value
                 original_value = self.format_field_value(field)
@@ -1204,7 +1209,7 @@ class GGUFEditorWindow(QMainWindow):
             elif value_type == GGUFValueType.FLOAT32:
                 converted_value = np.float32(float(new_value))
             elif value_type == GGUFValueType.BOOL:
-                converted_value = new_value.lower() in ('true', 'yes', '1')
+                converted_value = new_value.lower() in ("true", "yes", "1")
             elif value_type == GGUFValueType.STRING:
                 converted_value = new_value
             else:
@@ -1217,7 +1222,9 @@ class GGUFEditorWindow(QMainWindow):
 
             self.statusBar().showMessage(f"Changed {key} to {new_value}")
         except ValueError:
-            QMessageBox.warning(self, "Invalid Value", f"The value '{new_value}' is not valid for type {value_type.name}")
+            QMessageBox.warning(
+                self, "Invalid Value", f"The value '{new_value}' is not valid for type {value_type.name}"
+            )
 
             # Revert to original value
             original_value = self.format_field_value(field)
@@ -1229,9 +1236,11 @@ class GGUFEditorWindow(QMainWindow):
         row = button.property("row")
 
         reply = QMessageBox.question(
-            self, "Confirm Removal",
+            self,
+            "Confirm Removal",
             f"Are you sure you want to remove the metadata key '{key}'?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
 
         if reply == QMessageBox.StandardButton.Yes:
@@ -1380,19 +1389,19 @@ class GGUFEditorWindow(QMainWindow):
             if tokens_field:
                 self.metadata_changes[gguf.Keys.Tokenizer.LIST] = (
                     GGUFValueType.ARRAY,
-                    (tokens_field.types[1], new_tokens)
+                    (tokens_field.types[1], new_tokens),
                 )
 
             if token_types_field:
                 self.metadata_changes[gguf.Keys.Tokenizer.TOKEN_TYPE] = (
                     GGUFValueType.ARRAY,
-                    (token_types_field.types[1], new_token_types)
+                    (token_types_field.types[1], new_token_types),
                 )
 
             if scores_field:
                 self.metadata_changes[gguf.Keys.Tokenizer.SCORES] = (
                     GGUFValueType.ARRAY,
-                    (scores_field.types[1], new_scores)
+                    (scores_field.types[1], new_scores),
                 )
 
             self.modified = True
@@ -1478,9 +1487,7 @@ class GGUFEditorWindow(QMainWindow):
             QMessageBox.information(self, "No Changes", "No changes to save")
             return
 
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save GGUF File As", "", "GGUF Files (*.gguf);;All Files (*)"
-        )
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save GGUF File As", "", "GGUF Files (*.gguf);;All Files (*)")
 
         if not file_path:
             return
@@ -1490,7 +1497,7 @@ class GGUFEditorWindow(QMainWindow):
             QApplication.processEvents()
 
             # Get architecture and endianness from the original file
-            arch = 'unknown'
+            arch = "unknown"
             field = self.reader.get_field(gguf.Keys.General.ARCHITECTURE)
             if field:
                 arch = field.contents()
@@ -1509,7 +1516,7 @@ class GGUFEditorWindow(QMainWindow):
             # Copy metadata with changes
             for field in self.reader.fields.values():
                 # Skip virtual fields and fields written by GGUFWriter
-                if field.name == gguf.Keys.General.ARCHITECTURE or field.name.startswith('GGUF.'):
+                if field.name == gguf.Keys.General.ARCHITECTURE or field.name.startswith("GGUF."):
                     continue
 
                 # Skip fields marked for removal
@@ -1548,7 +1555,13 @@ class GGUFEditorWindow(QMainWindow):
 
             # Add tensors (including data)
             for tensor in self.reader.tensors:
-                writer.add_tensor(tensor.name, tensor.data, raw_shape=tensor.data.shape, raw_dtype=tensor.tensor_type, tensor_endianess=self.reader.endianess)
+                writer.add_tensor(
+                    tensor.name,
+                    tensor.data,
+                    raw_shape=tensor.data.shape,
+                    raw_dtype=tensor.tensor_type,
+                    tensor_endianess=self.reader.endianess,
+                )
 
             # Write header and metadata
             writer.open_output_file(Path(file_path))
@@ -1564,13 +1577,15 @@ class GGUFEditorWindow(QMainWindow):
 
             # Ask if user wants to open the new file
             reply = QMessageBox.question(
-                self, "Open Saved File",
+                self,
+                "Open Saved File",
                 "Would you like to open the newly saved file?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
             )
 
             if reply == QMessageBox.StandardButton.Yes:
-                self.reader = GGUFReader(file_path, 'r')
+                self.reader = GGUFReader(file_path, "r")
                 self.current_file = file_path
                 self.file_path_edit.setText(file_path)
 
@@ -1582,7 +1597,7 @@ class GGUFEditorWindow(QMainWindow):
                 self.modified = False
 
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save file: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to save file: {e!s}")
             self.statusBar().showMessage("Error saving file")
 
 
@@ -1601,17 +1616,18 @@ def main() -> None:
 
     # Load model if specified
     if args.model_path:
-        if os.path.isfile(args.model_path) and args.model_path.endswith('.gguf'):
+        if Path(args.model_path).is_file() and args.model_path.endswith(".gguf"):
             window.load_file(args.model_path)
         else:
             logger.error(f"Invalid model path: {args.model_path}")
             QMessageBox.warning(
                 window,
                 "Invalid Model Path",
-                f"The specified file does not exist or is not a GGUF file: {args.model_path}")
+                f"The specified file does not exist or is not a GGUF file: {args.model_path}",
+            )
 
     sys.exit(app.exec())
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

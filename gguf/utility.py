@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-import os
-import json
 import numpy as np
 
 
@@ -13,21 +13,21 @@ def fill_templated_filename(filename: str, output_type: str | None) -> str:
     # Given a file name fill in any type templates e.g. 'some-model-name.{ftype}.gguf'
     ftype_lowercase: str = output_type.lower() if output_type is not None else ""
     ftype_uppercase: str = output_type.upper() if output_type is not None else ""
-    return filename.format(ftype_lowercase,
-                           outtype=ftype_lowercase, ftype=ftype_lowercase,
-                           OUTTYPE=ftype_uppercase, FTYPE=ftype_uppercase)
+    return filename.format(
+        ftype_lowercase, outtype=ftype_lowercase, ftype=ftype_lowercase, OUTTYPE=ftype_uppercase, FTYPE=ftype_uppercase
+    )
 
 
 def model_weight_count_rounded_notation(model_params_count: int, min_digits: int = 2) -> str:
-    if model_params_count > 1e12 :
+    if model_params_count > 1e12:
         # Trillions Of Parameters
         scaled_model_params = model_params_count * 1e-12
         scale_suffix = "T"
-    elif model_params_count > 1e9 :
+    elif model_params_count > 1e9:
         # Billions Of Parameters
         scaled_model_params = model_params_count * 1e-9
         scale_suffix = "B"
-    elif model_params_count > 1e6 :
+    elif model_params_count > 1e6:
         # Millions Of Parameters
         scaled_model_params = model_params_count * 1e-6
         scale_suffix = "M"
@@ -36,7 +36,7 @@ def model_weight_count_rounded_notation(model_params_count: int, min_digits: int
         scaled_model_params = model_params_count * 1e-3
         scale_suffix = "K"
 
-    fix = max(min_digits - len(str(round(scaled_model_params)).lstrip('0')), 0)
+    fix = max(min_digits - len(str(round(scaled_model_params)).lstrip("0")), 0)
 
     return f"{scaled_model_params:.{fix}f}{scale_suffix}"
 
@@ -52,13 +52,21 @@ def size_label(total_params: int, shared_params: int, expert_params: int, expert
     return size_class
 
 
-def naming_convention(model_name: str | None, base_name: str | None, finetune_string: str | None, version_string: str | None, size_label: str | None, output_type: str | None, model_type: Literal['vocab', 'LoRA'] | None = None) -> str:
+def naming_convention(
+    model_name: str | None,
+    base_name: str | None,
+    finetune_string: str | None,
+    version_string: str | None,
+    size_label: str | None,
+    output_type: str | None,
+    model_type: Literal["vocab", "LoRA"] | None = None,
+) -> str:
     # Reference: https://github.com/ggml-org/ggml/blob/master/docs/gguf.md#gguf-naming-convention
 
     if base_name is not None:
-        name = base_name.strip().replace(' ', '-').replace('/', '-')
+        name = base_name.strip().replace(" ", "-").replace("/", "-")
     elif model_name is not None:
-        name = model_name.strip().replace(' ', '-').replace('/', '-')
+        name = model_name.strip().replace(" ", "-").replace("/", "-")
     else:
         name = "ggml-model"
 
@@ -131,13 +139,13 @@ class SafetensorRemote:
         if is_multiple_files:
             # read the index file
             index_data = cls.get_data_by_range(index_url, 0)
-            index_str = index_data.decode('utf-8')
+            index_str = index_data.decode("utf-8")
             index_json = json.loads(index_str)
             assert index_json.get("weight_map") is not None, "weight_map not found in index file"
             weight_map = index_json["weight_map"]
             # get the list of files
             all_files = list(set(weight_map.values()))
-            all_files.sort() # make sure we load shard files in order
+            all_files.sort()  # make sure we load shard files in order
             # get the list of tensors
             tensors: dict[str, RemoteTensor] = {}
             for file in all_files:
@@ -199,7 +207,7 @@ class SafetensorRemote:
         # First 8 bytes contain the metadata length as u64 little-endian
         if len(raw_data) < 8:
             raise ValueError("Not enough data to read metadata size")
-        metadata_length = int.from_bytes(raw_data[:8], byteorder='little')
+        metadata_length = int.from_bytes(raw_data[:8], byteorder="little")
 
         # Calculate the data start offset
         data_start_offset = 8 + metadata_length
@@ -209,8 +217,8 @@ class SafetensorRemote:
             raise ValueError(f"Could not read complete metadata. Need {8 + metadata_length} bytes, got {len(raw_data)}")
 
         # Extract metadata bytes and parse as JSON
-        metadata_bytes = raw_data[8:8 + metadata_length]
-        metadata_str = metadata_bytes.decode('utf-8')
+        metadata_bytes = raw_data[8 : 8 + metadata_length]
+        metadata_str = metadata_bytes.decode("utf-8")
         try:
             metadata = json.loads(metadata_str)
             return metadata, data_start_offset
@@ -223,8 +231,9 @@ class SafetensorRemote:
         Get raw byte data from a remote file by range.
         If size is not specified, it will read the entire file.
         """
-        import requests
         from urllib.parse import urlparse
+
+        import requests
 
         parsed_url = urlparse(url)
         if not parsed_url.scheme or not parsed_url.netloc:
@@ -245,8 +254,9 @@ class SafetensorRemote:
         Check if a file exists at the given URL.
         Returns True if the file exists, False otherwise.
         """
-        import requests
         from urllib.parse import urlparse
+
+        import requests
 
         parsed_url = urlparse(url)
         if not parsed_url.scheme or not parsed_url.netloc:
@@ -284,27 +294,27 @@ class LocalTensor:
     data_range: LocalTensorRange
 
     def mmap_bytes(self) -> np.ndarray:
-        return np.memmap(self.data_range.filename, mode='c', offset=self.data_range.offset, shape=self.data_range.size)
+        return np.memmap(self.data_range.filename, mode="c", offset=self.data_range.offset, shape=self.data_range.size)
 
 
 class SafetensorsLocal:
     """
-        Read a safetensors file from the local filesystem.
+    Read a safetensors file from the local filesystem.
 
-        Custom parsing gives a bit more control over the memory usage.
-        The official safetensors library doesn't expose file ranges.
+    Custom parsing gives a bit more control over the memory usage.
+    The official safetensors library doesn't expose file ranges.
     """
 
     tensors: dict[str, LocalTensor]
 
     def __init__(self, filename: Path):
-        with open(filename, "rb") as f:
-            metadata_length = int.from_bytes(f.read(8), byteorder='little')
+        with Path(filename).open("rb") as f:
+            metadata_length = int.from_bytes(f.read(8), byteorder="little")
             file_size = os.stat(filename).st_size
             if file_size < 8 + metadata_length:
                 raise ValueError(f"Could not read complete metadata. Need {8 + metadata_length} bytes, got {file_size}")
 
-            metadata_str = f.read(metadata_length).decode('utf-8')
+            metadata_str = f.read(metadata_length).decode("utf-8")
             try:
                 metadata = json.loads(metadata_str)
             except json.JSONDecodeError as e:

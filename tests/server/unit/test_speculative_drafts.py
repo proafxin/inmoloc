@@ -1,4 +1,4 @@
-import os
+import pathlib
 
 import pytest
 from utils import (
@@ -17,16 +17,17 @@ from utils import (
 DRAFTS = [
     # (preset of the target, draft file: a URL of TEST_FILE_URLS or a file of the cache, spec type)
     ("qwen3_4b", DFLASH_DRAFT_FILE_URL, "draft-dflash"),
-    ("qwen3_4b", EAGLE3_DRAFT_FILE,     "draft-eagle3"),
+    ("qwen3_4b", EAGLE3_DRAFT_FILE, "draft-eagle3"),
 ]
 
 
 def draft_path(draft: str) -> str:
     if draft.startswith("https://"):
         return download_file(draft)
-    if not os.path.exists(draft):
+    if not pathlib.Path(draft).exists():
         pytest.fail(f"{draft} is missing: convert the draft once, from tests/server:\n{EAGLE3_DRAFT_CONVERT}")
     return draft
+
 
 REQUEST = {
     "prompt": "The capital of France is Paris. The capital of Germany is",

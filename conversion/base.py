@@ -304,7 +304,7 @@ class ModelBase:
                             dtype = LazyTorchTensor._dtype_str_map[data.dtype]
                             data_gen = lambda data=data, dtype=dtype: (
                                 torch.from_numpy(data.mmap_bytes()).view(dtype).reshape(data.shape)
-                            )  # ruff: ignore[lambda-assignment]
+                            )
                     else:
                         data_torch: Tensor = model_part[name]
                         if self.lazy:
@@ -642,7 +642,7 @@ class ModelBase:
             msg = f"Missing {key!r} for MODEL_TENSORS of {self.model_arch!r}"
             raise ValueError(msg)
         name: str = gguf.TENSOR_NAMES[key]
-        if "{bid}" in name:  # noqa: RUF027 - the placeholder of the template, not an f-string
+        if "{bid}" in name:  # ruff: ignore[missing-f-string-syntax] - the placeholder of the template, not an f-string
             assert bid is not None
             name = name.format(bid=bid)
         return name + suffix
@@ -653,7 +653,7 @@ class ModelBase:
         if key not in gguf.MODEL_TENSORS[self.model_arch]:
             return False
         key_name: str = gguf.TENSOR_NAMES[key]
-        if "{bid}" in key_name:  # noqa: RUF027 - the placeholder of the template, not an f-string
+        if "{bid}" in key_name:  # ruff: ignore[missing-f-string-syntax] - the placeholder of the template, not an f-string
             if bid is None:
                 return False
             key_name = key_name.format(bid=bid)
@@ -999,11 +999,11 @@ class ModelBase:
                 and all(g.get("format") == "nvfp4-pack-quantized" for g in quant_groups.values() if isinstance(g, dict))
             )
         )
-        if quant_algo != "NVFP4":
-            if nvfp4_compressed_tensors or any(
-                str(v.get("quant_algo")).endswith("NVFP4") for v in quant_layers.values() if isinstance(v, dict)
-            ):
-                quant_algo = "NVFP4"
+        if quant_algo != "NVFP4" and (
+            nvfp4_compressed_tensors
+            or any(str(v.get("quant_algo")).endswith("NVFP4") for v in quant_layers.values() if isinstance(v, dict))
+        ):
+            quant_algo = "NVFP4"
 
         self._is_nvfp4 = quant_algo in {"NVFP4", "W4A16_NVFP4"}
         self._is_mxfp4 = quant_method == "mxfp4"

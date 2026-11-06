@@ -268,10 +268,10 @@ def test_cors_proxy_only_forwards_explicit_proxy_headers() -> None:
     ("media_path", "image_url", "success"),
     [
         (None, "file://mtmd/test-1.jpeg", False),  # disabled media path, should fail
-        ("../../tools","file://mtmd/test-1.jpeg", True),
-        ("../../tools","file:////mtmd//test-1.jpeg", True),  # should be the same file as above
-        ("../../tools","file://mtmd/notfound.jpeg", False),  # non-existent file
-        ("../../tools","file://../mtmd/test-1.jpeg", False),  # no directory traversal
+        ("../../tools", "file://mtmd/test-1.jpeg", True),
+        ("../../tools", "file:////mtmd//test-1.jpeg", True),  # should be the same file as above
+        ("../../tools", "file://mtmd/notfound.jpeg", False),  # non-existent file
+        ("../../tools", "file://../mtmd/test-1.jpeg", False),  # no directory traversal
     ],
 )
 def test_local_media_file(media_path, image_url, success) -> None:

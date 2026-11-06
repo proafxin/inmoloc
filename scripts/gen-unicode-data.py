@@ -157,7 +157,7 @@ for codepoint, norm in table_nfd:
 
 
 def out(line="") -> None:
-    print(line, end="\n")  # ruff: ignore[bad-quotes-inline-string, print]
+    print(line, end="\n")  # ruff: ignore[print]
 
 
 out("""\

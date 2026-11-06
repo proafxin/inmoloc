@@ -132,7 +132,9 @@ def window_tokens(log_path: str, seconds: float = 20.0) -> None:
 
     n_gen = sum(at(v, t1) - at(v, t0) for v in gen.values())
     n_pp = sum(at(v, t1) - at(v, t0) for v in pp.values())
-    print(f"   window tokens: generated {n_gen:.0f} ({n_gen / seconds:.1f}/s), prompt {n_pp:.0f} ({n_pp / seconds:.0f}/s)")
+    print(
+        f"   window tokens: generated {n_gen:.0f} ({n_gen / seconds:.1f}/s), prompt {n_pp:.0f} ({n_pp / seconds:.0f}/s)"
+    )
 
 
 for p in sys.argv[1:]:

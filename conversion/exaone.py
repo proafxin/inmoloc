@@ -174,10 +174,10 @@ class ExaoneMoEModel(Exaone4Model):
             else:
                 # mtp fc/norm weights: templates, filled for each NextN/MTP layer below
                 remapper = {
-                    "mtp.fc": "model.layers.{bid}.eh_proj",  # noqa: RUF027
-                    "mtp.pre_fc_norm_embedding": "model.layers.{bid}.enorm",  # noqa: RUF027
-                    "mtp.pre_fc_norm_hidden": "model.layers.{bid}.hnorm",  # noqa: RUF027
-                    "mtp.norm": "model.layers.{bid}.shared_head.norm",  # noqa: RUF027
+                    "mtp.fc": "model.layers.{bid}.eh_proj",  # ruff: ignore[missing-f-string-syntax]
+                    "mtp.pre_fc_norm_embedding": "model.layers.{bid}.enorm",  # ruff: ignore[missing-f-string-syntax]
+                    "mtp.pre_fc_norm_hidden": "model.layers.{bid}.hnorm",  # ruff: ignore[missing-f-string-syntax]
+                    "mtp.norm": "model.layers.{bid}.shared_head.norm",  # ruff: ignore[missing-f-string-syntax]
                 }
                 n = Path(name)
                 new_name = remapper[n.stem] + n.suffix

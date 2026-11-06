@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 
@@ -12,14 +11,13 @@ from pathlib import Path
 import torch
 
 import gguf
-
 from conversion.base import (
     ModelBase,
     ModelType,
-    get_model_architecture,
-    logger,
     _mistral_common_installed,
     _mistral_import_error_msg,
+    get_model_architecture,
+    logger,
 )
 from conversion.registry import get_model_class, print_registered_models
 
@@ -43,123 +41,151 @@ def split_str_to_n_bytes(split_str: str) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Convert a huggingface model to a GGML compatible file")
+    parser = argparse.ArgumentParser(description="Convert a huggingface model to a GGML compatible file")
     parser.add_argument(
-        "--vocab-only", action="store_true",
+        "--vocab-only",
+        action="store_true",
         help="extract only the vocab",
     )
     parser.add_argument(
-        "--outfile", type=Path,
+        "--outfile",
+        type=Path,
         help="path to write to; default: based on input. {ftype} will be replaced by the outtype.",
     )
     parser.add_argument(
-        "--outtype", type=str, choices=["f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "auto"], default="auto",
+        "--outtype",
+        type=str,
+        choices=["f32", "f16", "bf16", "q8_0", "tq1_0", "tq2_0", "auto"],
+        default="auto",
         help="output format - use f32 for float32, f16 for float16, bf16 for bfloat16, q8_0 for Q8_0, tq1_0 or tq2_0 for ternary, and auto for the highest-fidelity 16-bit float type",
     )
     parser.add_argument(
-        "--bigendian", action="store_true",
+        "--bigendian",
+        action="store_true",
         help="model is executed on big endian machine",
     )
     parser.add_argument(
-        "model", type=str,
+        "model",
+        type=str,
         help="directory containing model file or huggingface repository ID (if --remote)",
         nargs="?",
     )
     parser.add_argument(
-        "--use-temp-file", action="store_true",
+        "--use-temp-file",
+        action="store_true",
         help="use the tempfile library while processing (helpful when running out of memory, process killed)",
     )
     parser.add_argument(
-        "--no-lazy", action="store_true",
+        "--no-lazy",
+        action="store_true",
         help="use more RAM by computing all outputs before writing (use in case lazy evaluation is broken)",
     )
     parser.add_argument(
-        "--model-name", type=str, default=None,
+        "--model-name",
+        type=str,
+        default=None,
         help="name of the model",
     )
     parser.add_argument(
-        "--verbose", action="store_true",
+        "--verbose",
+        action="store_true",
         help="increase output verbosity",
     )
     parser.add_argument(
-        "--split-max-tensors", type=int, default=0,
+        "--split-max-tensors",
+        type=int,
+        default=0,
         help="max tensors in each split",
     )
     parser.add_argument(
-        "--split-max-size", type=str, default="0",
+        "--split-max-size",
+        type=str,
+        default="0",
         help="max size per split N(M|G)",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="only print out a split plan and exit, without writing any new files",
     )
     parser.add_argument(
-        "--no-tensor-first-split", action="store_true",
-        help="do not add tensors to the first split (disabled by default)"
+        "--no-tensor-first-split",
+        action="store_true",
+        help="do not add tensors to the first split (disabled by default)",
     )
+    parser.add_argument("--metadata", type=Path, help="Specify the path for an authorship metadata override file")
+    parser.add_argument("--print-supported-models", action="store_true", help="Print the supported models")
     parser.add_argument(
-        "--metadata", type=Path,
-        help="Specify the path for an authorship metadata override file"
-    )
-    parser.add_argument(
-        "--print-supported-models", action="store_true",
-        help="Print the supported models"
-    )
-    parser.add_argument(
-        "--remote", action="store_true",
+        "--remote",
+        action="store_true",
         help="(Experimental) Read safetensors file remotely without downloading to disk. Config and tokenizer files will still be downloaded. To use this feature, you need to specify Hugging Face model repo name instead of a local directory. For example: 'HuggingFaceTB/SmolLM2-1.7B-Instruct'. Note: To access gated repo, set HF_TOKEN environment variable to your Hugging Face token.",
     )
     parser.add_argument(
-        "--mmproj", action="store_true",
+        "--mmproj",
+        action="store_true",
         help="Export multimodal projector (mmproj) for vision models. This will only work on some vision models. An 'mmproj-' prefix will be added to the output file name.",
     )
     parser.add_argument(
-        "--mtp", action="store_true",
+        "--mtp",
+        action="store_true",
         help="Export only the multi-token prediction (MTP) head as a separate GGUF, suitable for use as a speculative draft. An 'mtp-' prefix will be added to the output file name.",
     )
     parser.add_argument(
-        "--no-nextn", "--no-mtp", dest="no_mtp", action="store_true",
+        "--no-nextn",
+        "--no-mtp",
+        dest="no_mtp",
+        action="store_true",
         help="Exclude NextN speculative draft tensors from the converted GGUF. Pair with --mtp or --dspark on a second run to publish target and draft as two files.",
     )
     parser.add_argument(
-        "--dspark", action="store_true",
+        "--dspark",
+        action="store_true",
         help="Export only the DeepSeek-V4 DSpark draft tensors as a separate GGUF.",
     )
     parser.add_argument(
-        "--mistral-format", action="store_true",
+        "--mistral-format",
+        action="store_true",
         help="Whether the model is stored following the Mistral format.",
     )
     parser.add_argument(
-        "--disable-mistral-community-chat-template", action="store_true",
+        "--disable-mistral-community-chat-template",
+        action="store_true",
         help=(
             "Whether to disable usage of Mistral community chat templates. If set, use the Mistral official `mistral-common` library for tokenization and detokenization of Mistral models. "
             "Using `mistral-common` ensure correctness and zero-day support of tokenization for models converted from the Mistral format but requires to manually setup the tokenization server."
-        )
+        ),
     )
 
     parser.add_argument(
-        "--sentence-transformers-dense-modules", action="store_true",
-        help=("Whether to include sentence-transformers dense modules. "
-              "It can be used for sentence-transformers models, like google/embeddinggemma-300m. "
-              "Default these modules are not included.")
+        "--sentence-transformers-dense-modules",
+        action="store_true",
+        help=(
+            "Whether to include sentence-transformers dense modules. "
+            "It can be used for sentence-transformers models, like google/embeddinggemma-300m. "
+            "Default these modules are not included."
+        ),
     )
 
     parser.add_argument(
-        "--fuse-gate-up-exps", action="store_true",
+        "--fuse-gate-up-exps",
+        action="store_true",
         help="Fuse gate_exps and up_exps tensors into a single gate_up_exps tensor for MoE models.",
     )
     parser.add_argument(
-        "--fp8-as-q8", action="store_true",
+        "--fp8-as-q8",
+        action="store_true",
         help="Store tensors dequantized from FP8 as Q8_0 instead of BF16/F16.",
     )
 
     parser.add_argument(
-        "--fuse-qkv", action="store_true",
+        "--fuse-qkv",
+        action="store_true",
         help="Fuse separate Q, K, V weight tensors into a single QKV tensor.",
     )
     parser.add_argument(
-        "--target-model-dir", type=str, default=None,
+        "--target-model-dir",
+        type=str,
+        default=None,
         help=(
             "path to the target model directory; required when converting a standalone draft model "
             "(e.g. EAGLE3 / DFlash) that needs target-model metadata such as tokenizer, hidden size, and "
@@ -189,13 +215,12 @@ def main() -> None:
     if args.remote:
         hf_repo_id = args.model
         from huggingface_hub import snapshot_download
+
         allowed_patterns = ["LICENSE", "*.json", "*.md", "*.txt", "tokenizer.model"]
         if args.sentence_transformers_dense_modules:
             # include sentence-transformers dense modules safetensors files
             allowed_patterns.append("*.safetensors")
-        local_dir = snapshot_download(
-            repo_id=hf_repo_id,
-            allow_patterns=allowed_patterns)
+        local_dir = snapshot_download(repo_id=hf_repo_id, allow_patterns=allowed_patterns)
         dir_model = Path(local_dir)
         logger.info(f"Downloaded config and tokenizer to {local_dir}")
     else:
@@ -203,7 +228,7 @@ def main() -> None:
         dir_model = Path(args.model)
 
     if not dir_model.is_dir():
-        logger.error(f'Error: {dir_model} is not a directory')
+        logger.error(f"Error: {dir_model} is not a directory")
         sys.exit(1)
 
     ftype_map: dict[str, gguf.LlamaFileType] = {
@@ -251,12 +276,15 @@ def main() -> None:
         elif args.mmproj:
             assert hparams.get("vision_encoder") is not None, "This model does not support multimodal"
             from conversion.pixtral import PixtralModel
+
             model_class = PixtralModel
         elif hparams.get("moe") is not None:
             from conversion.mistral import MistralMoeModel
+
             model_class = MistralMoeModel
         else:
             from conversion.mistral import MistralModel
+
             model_class = MistralModel
 
         if sum((args.mtp, args.no_mtp, args.dspark)) > 1:
@@ -268,6 +296,7 @@ def main() -> None:
                 logger.error("--dspark is only supported for DeepseekV4ForCausalLM")
                 sys.exit(1)
             from conversion.deepseek import DeepseekV4DSparkModel
+
             model_class = DeepseekV4DSparkModel
 
         if args.mtp or args.no_mtp:
@@ -279,20 +308,27 @@ def main() -> None:
             if args.mtp:
                 model_class.mtp_only = True
 
-        model_instance = model_class(dir_model, output_type, fname_out,
-                                     is_big_endian=args.bigendian, use_temp_file=args.use_temp_file,
-                                     eager=args.no_lazy,
-                                     metadata_override=args.metadata, model_name=args.model_name,
-                                     split_max_tensors=args.split_max_tensors,
-                                     split_max_size=split_str_to_n_bytes(args.split_max_size), dry_run=args.dry_run,
-                                     small_first_shard=args.no_tensor_first_split,
-                                     remote_hf_model_id=hf_repo_id, disable_mistral_community_chat_template=disable_mistral_community_chat_template,
-                                     sentence_transformers_dense_modules=args.sentence_transformers_dense_modules,
-                                     target_model_dir=Path(args.target_model_dir) if args.target_model_dir else None,
-                                     fuse_gate_up_exps=args.fuse_gate_up_exps,
-                                     fp8_as_q8=args.fp8_as_q8,
-                                     fuse_qkv=args.fuse_qkv,
-                                     )
+        model_instance = model_class(
+            dir_model,
+            output_type,
+            fname_out,
+            is_big_endian=args.bigendian,
+            use_temp_file=args.use_temp_file,
+            eager=args.no_lazy,
+            metadata_override=args.metadata,
+            model_name=args.model_name,
+            split_max_tensors=args.split_max_tensors,
+            split_max_size=split_str_to_n_bytes(args.split_max_size),
+            dry_run=args.dry_run,
+            small_first_shard=args.no_tensor_first_split,
+            remote_hf_model_id=hf_repo_id,
+            disable_mistral_community_chat_template=disable_mistral_community_chat_template,
+            sentence_transformers_dense_modules=args.sentence_transformers_dense_modules,
+            target_model_dir=Path(args.target_model_dir) if args.target_model_dir else None,
+            fuse_gate_up_exps=args.fuse_gate_up_exps,
+            fp8_as_q8=args.fp8_as_q8,
+            fuse_qkv=args.fuse_qkv,
+        )
 
         if args.vocab_only:
             logger.info("Exporting model vocab...")
@@ -305,5 +341,5 @@ def main() -> None:
             logger.info(f"Model successfully exported to {out_path}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

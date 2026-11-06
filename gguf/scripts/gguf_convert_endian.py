@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import logging
 import argparse
+import logging
 import sys
-from tqdm import tqdm
 
 import numpy as np
+from tqdm import tqdm
 
 import gguf
 
@@ -22,7 +22,7 @@ def byteswap_q4_0(tensor, block_offs):
     # Each block_q4_0 consists of an f16 delta (scaling factor) followed by 16 int8 quantizations.
 
     # Byte-Swap f16 sized delta field
-    delta = tensor.data[block_offs:block_offs + 2].view(dtype=np.uint16)
+    delta = tensor.data[block_offs : block_offs + 2].view(dtype=np.uint16)
     delta.byteswap(inplace=True)
 
 
@@ -30,7 +30,7 @@ def byteswap_q8_0(tensor, block_offs):
     # Each block_q8_0 consists of an f16 delta (scaling factor) followed by 32 int8 quantizations.
 
     # Byte-Swap f16 sized delta field
-    delta = tensor.data[block_offs:block_offs + 2].view(dtype=np.uint16)
+    delta = tensor.data[block_offs : block_offs + 2].view(dtype=np.uint16)
     delta.byteswap(inplace=True)
 
 
@@ -38,10 +38,10 @@ def byteswap_q4_k(tensor, block_offs):
     # Each block_q4_k consists of 2 f16 values followed by 140 int8 values.
 
     # Byte-Swap f16 sized fields
-    delta = tensor.data[block_offs:block_offs + 2].view(dtype=np.uint16)
+    delta = tensor.data[block_offs : block_offs + 2].view(dtype=np.uint16)
     delta.byteswap(inplace=True)
 
-    delta = tensor.data[block_offs + 2:block_offs + 4].view(dtype=np.uint16)
+    delta = tensor.data[block_offs + 2 : block_offs + 4].view(dtype=np.uint16)
     delta.byteswap(inplace=True)
 
 
@@ -49,7 +49,7 @@ def byteswap_q6_k(tensor, block_offs):
     # Each block_q6_k consists of 208 int8 values followed by 1 f16 value.
 
     # Byte-Swap f16 sized field
-    delta = tensor.data[block_offs + 208:block_offs + 210].view(dtype=np.uint16)
+    delta = tensor.data[block_offs + 208 : block_offs + 210].view(dtype=np.uint16)
     delta.byteswap(inplace=True)
 
 
@@ -57,7 +57,7 @@ def byteswap_q1_0(tensor, block_offs):
     # Each block_q1_0 consists of an f16 delta followed by 16 int8 quantizations.
 
     # Byte-Swap f16 sized delta field
-    delta = tensor.data[block_offs:block_offs + 2].view(dtype=np.uint16)
+    delta = tensor.data[block_offs : block_offs + 2].view(dtype=np.uint16)
     delta.byteswap(inplace=True)
 
 
@@ -65,16 +65,16 @@ def byteswap_tq2_0(tensor, block_offs):
     # Each block_tq2_0 consists of 64 int8 values followed by 1 f16 value.
 
     # Byte-Swap f16 sized field
-    delta = tensor.data[block_offs + 64:block_offs + 66].view(dtype=np.uint16)
+    delta = tensor.data[block_offs + 64 : block_offs + 66].view(dtype=np.uint16)
     delta.byteswap(inplace=True)
 
 
 byteswap_tensors = {
-    gguf.GGMLQuantizationType.Q1_0:  byteswap_q1_0,
-    gguf.GGMLQuantizationType.Q4_0:  byteswap_q4_0,
-    gguf.GGMLQuantizationType.Q8_0:  byteswap_q8_0,
-    gguf.GGMLQuantizationType.Q4_K:  byteswap_q4_k,
-    gguf.GGMLQuantizationType.Q6_K:  byteswap_q6_k,
+    gguf.GGMLQuantizationType.Q1_0: byteswap_q1_0,
+    gguf.GGMLQuantizationType.Q4_0: byteswap_q4_0,
+    gguf.GGMLQuantizationType.Q8_0: byteswap_q8_0,
+    gguf.GGMLQuantizationType.Q4_K: byteswap_q4_k,
+    gguf.GGMLQuantizationType.Q6_K: byteswap_q6_k,
     gguf.GGMLQuantizationType.TQ2_0: byteswap_tq2_0,
     gguf.GGMLQuantizationType.MXFP4: byteswap_noop,
     gguf.GGMLQuantizationType.NVFP4: byteswap_noop,
@@ -83,25 +83,24 @@ byteswap_tensors = {
 
 def convert_byteorder(reader: gguf.GGUFReader, args: argparse.Namespace) -> None:
     file_endian = reader.endianess.name
-    if reader.byte_order == 'S':
-        host_endian = 'BIG' if file_endian == 'LITTLE' else 'LITTLE'
+    if reader.byte_order == "S":
+        host_endian = "BIG" if file_endian == "LITTLE" else "LITTLE"
     else:
         host_endian = file_endian
     order = host_endian if args.order == "native" else args.order.upper()
-    logger.info(f"* Host is {host_endian} endian, GGUF file seems to be {file_endian} endian")
+    logger.info("* Host is %s endian, GGUF file seems to be %s endian", host_endian, file_endian)
     if file_endian == order:
-        logger.info(f"* File is already {order} endian. Nothing to do.")
+        logger.info("* File is already %s endian. Nothing to do.", order)
         sys.exit(0)
     logger.info("* Checking tensors for conversion compatibility")
     for tensor in reader.tensors:
-        if tensor.tensor_type not in byteswap_tensors and \
-           tensor.tensor_type not in (
-                gguf.GGMLQuantizationType.F32,
-                gguf.GGMLQuantizationType.F16,
-                gguf.GGMLQuantizationType.BF16,
-           ):
-            raise ValueError(f"Cannot handle type {tensor.tensor_type.name} for tensor {repr(tensor.name)}")
-    logger.info(f"* Preparing to convert from {file_endian} to {order}")
+        if tensor.tensor_type not in byteswap_tensors and tensor.tensor_type not in (
+            gguf.GGMLQuantizationType.F32,
+            gguf.GGMLQuantizationType.F16,
+            gguf.GGMLQuantizationType.BF16,
+        ):
+            raise ValueError(f"Cannot handle type {tensor.tensor_type.name} for tensor {tensor.name!r}")
+    logger.info("* Preparing to convert from %s to %s", file_endian, order)
     if args.dry_run:
         return
     logger.warning("*** Warning *** Warning *** Warning **")
@@ -116,16 +115,14 @@ def convert_byteorder(reader: gguf.GGUFReader, args: argparse.Namespace) -> None
         sys.exit(0)
     logger.info(f"* Converting fields ({len(reader.fields)})")
     for idx, field in enumerate(reader.fields.values()):
-        logger.info(f"- {idx:4}: Converting field {repr(field.name)}, part count: {len(field.parts)}")
+        logger.info(f"- {idx:4}: Converting field {field.name!r}, part count: {len(field.parts)}")
         for part in field.parts:
             part.byteswap(inplace=True)
     logger.info(f"* Converting tensors ({len(reader.tensors)})")
 
     for idx, tensor in enumerate(pbar := tqdm(reader.tensors, desc="Converting tensor")):
         log_message = (
-            f"Converting tensor {repr(tensor.name)}, "
-            f"type={tensor.tensor_type.name}, "
-            f"elements={tensor.n_elements} "
+            f"Converting tensor {tensor.name!r}, type={tensor.tensor_type.name}, elements={tensor.n_elements} "
         )
 
         # Byte-swap each part of the tensor's field
@@ -142,7 +139,7 @@ def convert_byteorder(reader: gguf.GGUFReader, args: argparse.Namespace) -> None
 
             tensor.data.resize(newshape)
 
-            block_size    = gguf.constants.GGML_QUANT_SIZES[tensor.tensor_type][1]
+            block_size = gguf.constants.GGML_QUANT_SIZES[tensor.tensor_type][1]
             byteswap_func = byteswap_tensors[tensor.tensor_type]
 
             n_blocks = len(tensor.data) // block_size
@@ -173,15 +170,19 @@ def convert_byteorder(reader: gguf.GGUFReader, args: argparse.Namespace) -> None
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert GGUF file byte order")
     parser.add_argument(
-        "model", type=str,
+        "model",
+        type=str,
         help="GGUF format model filename",
     )
     parser.add_argument(
-        "order", type=str, choices=['big', 'little', 'native'],
+        "order",
+        type=str,
+        choices=["big", "little", "native"],
         help="Requested byte order",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Don't actually change anything",
     )
     parser.add_argument("--verbose", action="store_true", help="increase output verbosity")
@@ -190,8 +191,8 @@ def main() -> None:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
-    logger.info(f'* Loading: {args.model}')
-    reader = gguf.GGUFReader(args.model, 'r' if args.dry_run else 'r+')
+    logger.info(f"* Loading: {args.model}")
+    reader = gguf.GGUFReader(args.model, "r" if args.dry_run else "r+")
     convert_byteorder(reader, args)
 
 

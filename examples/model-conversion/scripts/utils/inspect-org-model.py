@@ -205,7 +205,7 @@ def print_tensor_info(model_path: Path, tensor_name: str, num_values: int | None
         dtype_str = tensor_meta.get("dtype")
 
         with safe_open(file_path, framework="pt", device="cpu") as f:
-            if tensor_name in f.keys():  # noqa: SIM118 - safe_open handles are not iterable
+            if tensor_name in f.keys():  # ruff: ignore[in-dict-keys] - safe_open handles are not iterable
                 tensor_slice = f.get_slice(tensor_name)
                 shape = tensor_slice.get_shape()
                 print(f"Tensor: {tensor_name}")

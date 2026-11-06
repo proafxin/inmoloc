@@ -1,18 +1,17 @@
 from __future__ import annotations
-from abc import ABC, ABCMeta, abstractmethod
 
 import logging
-from typing import Any, Callable
+from abc import ABC, ABCMeta, abstractmethod
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 from numpy.typing import DTypeLike
-
 
 logger = logging.getLogger(__name__)
 
 
 class LazyMeta(ABCMeta):
-
     def __new__(cls, name: str, bases: tuple[type, ...], namespace: dict[str, Any], **kwargs):
         def __getattr__(self, name: str) -> Any:
             meta_attr = getattr(self._meta, name)
@@ -21,13 +20,12 @@ class LazyMeta(ABCMeta):
                     (lambda s, *args, **kwargs: getattr(s, name)(*args, **kwargs)),
                     use_self=self,
                 )
-            elif isinstance(meta_attr, self._tensor_type):
+            if isinstance(meta_attr, self._tensor_type):
                 # e.g. self.T with torch.Tensor should still be wrapped
                 return type(self)._wrap_fn(lambda s: getattr(s, name))(self)
-            else:
-                # no need to wrap non-tensor properties,
-                # and they likely don't depend on the actual contents of the tensor
-                return meta_attr
+            # no need to wrap non-tensor properties,
+            # and they likely don't depend on the actual contents of the tensor
+            return meta_attr
 
         namespace["__getattr__"] = __getattr__
 
@@ -41,6 +39,7 @@ class LazyMeta(ABCMeta):
                     getattr(type(self)._tensor_type, op_name),
                     meta_noop=meta_noop,
                 )(self, *args, **kwargs)
+
             return wrapped_special_op
 
         # special methods bypass __getattr__, so they need to be added manually
@@ -48,11 +47,44 @@ class LazyMeta(ABCMeta):
         # NOTE: doing this from a metaclass is very convenient
         # TODO: make this even more comprehensive
         for binary_op in (
-            "lt", "le", "eq", "ne", "ge", "gt",
-            "add", "and", "floordiv", "lshift", "mod", "mul", "matmul",
-            "or", "pow", "rshift", "sub", "truediv", "xor",
-            "iadd", "iand", "ifloordiv", "ilshift", "imod", "imul", "ior", "irshift", "isub", "ixor",
-            "radd", "rand", "rfloordiv", "rmul", "ror", "rpow", "rsub", "rtruediv", "rxor",
+            "lt",
+            "le",
+            "eq",
+            "ne",
+            "ge",
+            "gt",
+            "add",
+            "and",
+            "floordiv",
+            "lshift",
+            "mod",
+            "mul",
+            "matmul",
+            "or",
+            "pow",
+            "rshift",
+            "sub",
+            "truediv",
+            "xor",
+            "iadd",
+            "iand",
+            "ifloordiv",
+            "ilshift",
+            "imod",
+            "imul",
+            "ior",
+            "irshift",
+            "isub",
+            "ixor",
+            "radd",
+            "rand",
+            "rfloordiv",
+            "rmul",
+            "ror",
+            "rpow",
+            "rsub",
+            "rtruediv",
+            "rxor",
         ):
             attr_name = f"__{binary_op}__"
             # evaluation on the meta tensor is needed in case there's broadcasting
@@ -65,7 +97,9 @@ class LazyMeta(ABCMeta):
             namespace[attr_name] = mk_wrap(attr_name, meta_noop=True)
 
         for special_op in (
-            "getitem", "setitem", "len",
+            "getitem",
+            "setitem",
+            "len",
         ):
             attr_name = f"__{special_op}__"
             namespace[attr_name] = mk_wrap(attr_name, meta_noop=False)
@@ -82,7 +116,15 @@ class LazyBase(ABC, metaclass=LazyMeta):
     _kwargs: dict[str, Any]
     _func: Callable[[Any], Any] | None
 
-    def __init__(self, *, meta: Any, data: Any | None = None, args: tuple = (), kwargs: dict[str, Any] | None = None, func: Callable[[Any], Any] | None = None):
+    def __init__(
+        self,
+        *,
+        meta: Any,
+        data: Any | None = None,
+        args: tuple = (),
+        kwargs: dict[str, Any] | None = None,
+        func: Callable[[Any], Any] | None = None,
+    ):
         super().__init__()
         self._meta = meta
         self._data = data
@@ -106,13 +148,18 @@ class LazyBase(ABC, metaclass=LazyMeta):
             if isinstance(o, tuple):
                 L = tuple(L)
             return L
-        elif isinstance(o, LazyBase):
+        if isinstance(o, LazyBase):
             return fn(o)
-        else:
-            return o
+        return o
 
     @classmethod
-    def _wrap_fn(cls, fn: Callable, *, use_self: LazyBase | None = None, meta_noop: bool | DTypeLike | tuple[DTypeLike, Callable[[tuple[int, ...]], tuple[int, ...]]] = False) -> Callable[[Any], Any]:
+    def _wrap_fn(
+        cls,
+        fn: Callable,
+        *,
+        use_self: LazyBase | None = None,
+        meta_noop: bool | DTypeLike | tuple[DTypeLike, Callable[[tuple[int, ...]], tuple[int, ...]]] = False,
+    ) -> Callable[[Any], Any]:
         def wrapped_fn(*args, **kwargs):
             if kwargs is None:
                 kwargs = {}
@@ -144,7 +191,7 @@ class LazyBase(ABC, metaclass=LazyMeta):
 
             if isinstance(res, cls._tensor_type):
                 return cls(meta=cls.eager_to_meta(res), args=args, kwargs=kwargs, func=fn)
-            elif isinstance(res, tuple) and all(isinstance(t, cls._tensor_type) for t in res):
+            if isinstance(res, tuple) and all(isinstance(t, cls._tensor_type) for t in res):
                 # share the evaluation between lazy tuple elements
                 shared_args: list = [args, None]
 
@@ -153,13 +200,17 @@ class LazyBase(ABC, metaclass=LazyMeta):
                     if a[1] is None:
                         a[1] = fn(*a[0], **kw)
                     return a[1][i]
-                return tuple(cls(meta=cls.eager_to_meta(res[i]), args=(shared_args, i), kwargs=kwargs, func=eager_tuple_element) for i in range(len(res)))
-            else:
-                del res  # not needed
-                # non-tensor return likely relies on the contents of the args
-                # (e.g. the result of torch.equal)
-                eager_args = cls.to_eager(args)
-                return fn(*eager_args, **kwargs)
+
+                return tuple(
+                    cls(meta=cls.eager_to_meta(res[i]), args=(shared_args, i), kwargs=kwargs, func=eager_tuple_element)
+                    for i in range(len(res))
+                )
+            del res  # not needed
+            # non-tensor return likely relies on the contents of the args
+            # (e.g. the result of torch.equal)
+            eager_args = cls.to_eager(args)
+            return fn(*eager_args, **kwargs)
+
         return wrapped_fn
 
     @classmethod
@@ -190,17 +241,17 @@ class LazyBase(ABC, metaclass=LazyMeta):
     # must be overridden, meta tensor init is backend-specific
     @classmethod
     @abstractmethod
-    def meta_with_dtype_and_shape(cls, dtype: Any, shape: Any) -> Any: pass
+    def meta_with_dtype_and_shape(cls, dtype: Any, shape: Any) -> Any:
+        pass
 
     @classmethod
     def from_eager(cls, t: Any) -> Any:
         if type(t) is cls:
             # already lazy
             return t
-        elif isinstance(t, cls._tensor_type):
+        if isinstance(t, cls._tensor_type):
             return cls(meta=cls.eager_to_meta(t), data=t)
-        else:
-            return TypeError(f"{type(t)!r} is not compatible with {cls._tensor_type!r}")
+        return TypeError(f"{type(t)!r} is not compatible with {cls._tensor_type!r}")
 
 
 class LazyNumpyTensor(LazyBase):
@@ -218,8 +269,10 @@ class LazyNumpyTensor(LazyBase):
 
     def astype(self, dtype, *args, **kwargs):
         meta = type(self).meta_with_dtype_and_shape(dtype, self._meta.shape)
-        full_args = (self, dtype,) + args
-        return type(self)(meta=meta, args=full_args, kwargs=kwargs, func=(lambda a, *args, **kwargs: a.astype(*args, **kwargs)))
+        full_args = (self, dtype) + args
+        return type(self)(
+            meta=meta, args=full_args, kwargs=kwargs, func=(lambda a, *args, **kwargs: a.astype(*args, **kwargs))
+        )
 
     def tofile(self, *args, **kwargs):
         eager = LazyNumpyTensor.to_eager(self)
@@ -230,10 +283,13 @@ class LazyNumpyTensor(LazyBase):
 
 # Tensor written to file one row-chunk at a time
 class LazyChunkedTensor:
-
     def __init__(
-        self, chunks: list[Callable[[], np.ndarray]], shape: tuple[int, ...], dtype: DTypeLike,
-        qtype: Any = None, byteswap: bool = False,
+        self,
+        chunks: list[Callable[[], np.ndarray]],
+        shape: tuple[int, ...],
+        dtype: DTypeLike,
+        qtype: Any = None,
+        byteswap: bool = False,
     ):
         self._chunks = chunks
         self._qtype = qtype

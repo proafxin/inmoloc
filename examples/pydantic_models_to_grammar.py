@@ -600,7 +600,7 @@ def generate_gbnf_grammar_from_pydantic_models(
             mod_rule = rf"{format_model_and_field_name(model.__name__)}-grammar-model ::= "
             mod_rule += (
                 rf'"\"{model.__name__}\"" "," ws "\"{outer_object_content}\"" ":" ws {format_model_and_field_name(model.__name__)}'
-                + "\n"
+                "\n"
             )
             mod_rules.append(mod_rule)
         grammar_model_rules += "\n" + "\n".join(mod_rules)

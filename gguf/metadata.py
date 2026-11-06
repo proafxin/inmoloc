@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-import re
 import json
-import yaml
 import logging
-from pathlib import Path
-from typing import Any, Literal, Optional
+import re
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
 
-from .constants import Keys
+import yaml
 
 import gguf
+
+from .constants import Keys
 
 logger = logging.getLogger("metadata")
 
@@ -18,47 +19,52 @@ logger = logging.getLogger("metadata")
 @dataclass
 class Metadata:
     # Recommended Sampler Parameters to be written to GGUF KV Store
-    sampling_sequence: Optional[str] = None
-    sampling_top_k: Optional[int] = None
-    sampling_top_p: Optional[float] = None
-    sampling_min_p: Optional[float] = None
-    sampling_xtc_probability: Optional[float] = None
-    sampling_xtc_threshold: Optional[float] = None
-    sampling_temp: Optional[float] = None
-    sampling_penalty_last_n: Optional[int] = None
-    sampling_penalty_repeat: Optional[float] = None
-    sampling_mirostat: Optional[int] = None
-    sampling_mirostat_tau: Optional[float] = None
-    sampling_mirostat_eta: Optional[float] = None
+    sampling_sequence: str | None = None
+    sampling_top_k: int | None = None
+    sampling_top_p: float | None = None
+    sampling_min_p: float | None = None
+    sampling_xtc_probability: float | None = None
+    sampling_xtc_threshold: float | None = None
+    sampling_temp: float | None = None
+    sampling_penalty_last_n: int | None = None
+    sampling_penalty_repeat: float | None = None
+    sampling_mirostat: int | None = None
+    sampling_mirostat_tau: float | None = None
+    sampling_mirostat_eta: float | None = None
 
     # Authorship Metadata to be written to GGUF KV Store
-    name: Optional[str] = None
-    author: Optional[str] = None
-    version: Optional[str] = None
-    organization: Optional[str] = None
-    finetune: Optional[str] = None
-    basename: Optional[str] = None
-    description: Optional[str] = None
-    quantized_by: Optional[str] = None
-    size_label: Optional[str] = None
-    url: Optional[str] = None
-    doi: Optional[str] = None
-    uuid: Optional[str] = None
-    repo_url: Optional[str] = None
-    source_url: Optional[str] = None
-    source_doi: Optional[str] = None
-    source_uuid: Optional[str] = None
-    source_repo_url: Optional[str] = None
-    license: Optional[str] = None
-    license_name: Optional[str] = None
-    license_link: Optional[str] = None
-    base_models: Optional[list[dict]] = None
-    tags: Optional[list[str]] = None
-    languages: Optional[list[str]] = None
-    datasets: Optional[list[dict]] = None
+    name: str | None = None
+    author: str | None = None
+    version: str | None = None
+    organization: str | None = None
+    finetune: str | None = None
+    basename: str | None = None
+    description: str | None = None
+    quantized_by: str | None = None
+    size_label: str | None = None
+    url: str | None = None
+    doi: str | None = None
+    uuid: str | None = None
+    repo_url: str | None = None
+    source_url: str | None = None
+    source_doi: str | None = None
+    source_uuid: str | None = None
+    source_repo_url: str | None = None
+    license: str | None = None
+    license_name: str | None = None
+    license_link: str | None = None
+    base_models: list[dict] | None = None
+    tags: list[str] | None = None
+    languages: list[str] | None = None
+    datasets: list[dict] | None = None
 
     @staticmethod
-    def load(metadata_override_path: Optional[Path] = None, model_path: Optional[Path] = None, model_name: Optional[str] = None, total_params: int = 0) -> Metadata:
+    def load(
+        metadata_override_path: Path | None = None,
+        model_path: Path | None = None,
+        model_name: str | None = None,
+        total_params: int = 0,
+    ) -> Metadata:
         # This grabs as many contextual authorship metadata as possible from the model repository
         # making any conversion as required to match the gguf kv store metadata format
         # as well as giving users the ability to override any authorship metadata that may be incorrect
@@ -75,69 +81,83 @@ class Metadata:
         metadata = Metadata.apply_metadata_heuristic(metadata, model_card, hf_params, model_path, total_params)
 
         if gen_config:
-            metadata.sampling_sequence        = gen_config.get("sequence",        metadata.sampling_sequence)
-            metadata.sampling_top_k           = gen_config.get("top_k",           metadata.sampling_top_k)
-            metadata.sampling_top_p           = gen_config.get("top_p",           metadata.sampling_top_p)
-            metadata.sampling_min_p           = gen_config.get("min_p",           metadata.sampling_min_p)
+            metadata.sampling_sequence = gen_config.get("sequence", metadata.sampling_sequence)
+            metadata.sampling_top_k = gen_config.get("top_k", metadata.sampling_top_k)
+            metadata.sampling_top_p = gen_config.get("top_p", metadata.sampling_top_p)
+            metadata.sampling_min_p = gen_config.get("min_p", metadata.sampling_min_p)
             metadata.sampling_xtc_probability = gen_config.get("xtc_probability", metadata.sampling_xtc_probability)
-            metadata.sampling_xtc_threshold   = gen_config.get("xtc_threshold",   metadata.sampling_xtc_threshold)
-            metadata.sampling_temp            = gen_config.get("temperature",     metadata.sampling_temp)
-            metadata.sampling_penalty_last_n  = gen_config.get("penalty_last_n",  metadata.sampling_penalty_last_n)
-            metadata.sampling_penalty_repeat  = gen_config.get("penalty_repeat",  gen_config.get("repetition_penalty", metadata.sampling_penalty_repeat))
-            metadata.sampling_mirostat        = gen_config.get("mirostat",        metadata.sampling_mirostat)
-            metadata.sampling_mirostat_tau    = gen_config.get("mirostat_tau",    metadata.sampling_mirostat_tau)
-            metadata.sampling_mirostat_eta    = gen_config.get("mirostat_eta",    metadata.sampling_mirostat_eta)
+            metadata.sampling_xtc_threshold = gen_config.get("xtc_threshold", metadata.sampling_xtc_threshold)
+            metadata.sampling_temp = gen_config.get("temperature", metadata.sampling_temp)
+            metadata.sampling_penalty_last_n = gen_config.get("penalty_last_n", metadata.sampling_penalty_last_n)
+            metadata.sampling_penalty_repeat = gen_config.get(
+                "penalty_repeat", gen_config.get("repetition_penalty", metadata.sampling_penalty_repeat)
+            )
+            metadata.sampling_mirostat = gen_config.get("mirostat", metadata.sampling_mirostat)
+            metadata.sampling_mirostat_tau = gen_config.get("mirostat_tau", metadata.sampling_mirostat_tau)
+            metadata.sampling_mirostat_eta = gen_config.get("mirostat_eta", metadata.sampling_mirostat_eta)
 
         # Metadata Override File Provided
         # This is based on LLM_KV_NAMES mapping in llama.cpp
         metadata_override = Metadata.load_metadata_override(metadata_override_path)
 
-        metadata.sampling_sequence        = metadata_override.get(Keys.General.SAMPLING_SEQUENCE,        metadata.sampling_sequence)
-        metadata.sampling_top_k           = metadata_override.get(Keys.General.SAMPLING_TOP_K,           metadata.sampling_top_k)
-        metadata.sampling_top_p           = metadata_override.get(Keys.General.SAMPLING_TOP_P,           metadata.sampling_top_p)
-        metadata.sampling_min_p           = metadata_override.get(Keys.General.SAMPLING_MIN_P,           metadata.sampling_min_p)
-        metadata.sampling_xtc_probability = metadata_override.get(Keys.General.SAMPLING_XTC_PROBABILITY, metadata.sampling_xtc_probability)
-        metadata.sampling_xtc_threshold   = metadata_override.get(Keys.General.SAMPLING_XTC_THRESHOLD,   metadata.sampling_xtc_threshold)
-        metadata.sampling_temp            = metadata_override.get(Keys.General.SAMPLING_TEMP,            metadata.sampling_temp)
-        metadata.sampling_penalty_last_n  = metadata_override.get(Keys.General.SAMPLING_PENALTY_LAST_N,  metadata.sampling_penalty_last_n)
-        metadata.sampling_penalty_repeat  = metadata_override.get(Keys.General.SAMPLING_PENALTY_REPEAT,  metadata.sampling_penalty_repeat)
-        metadata.sampling_mirostat        = metadata_override.get(Keys.General.SAMPLING_MIROSTAT,        metadata.sampling_mirostat)
-        metadata.sampling_mirostat_tau    = metadata_override.get(Keys.General.SAMPLING_MIROSTAT_TAU,    metadata.sampling_mirostat_tau)
-        metadata.sampling_mirostat_eta    = metadata_override.get(Keys.General.SAMPLING_MIROSTAT_ETA,    metadata.sampling_mirostat_eta)
+        metadata.sampling_sequence = metadata_override.get(Keys.General.SAMPLING_SEQUENCE, metadata.sampling_sequence)
+        metadata.sampling_top_k = metadata_override.get(Keys.General.SAMPLING_TOP_K, metadata.sampling_top_k)
+        metadata.sampling_top_p = metadata_override.get(Keys.General.SAMPLING_TOP_P, metadata.sampling_top_p)
+        metadata.sampling_min_p = metadata_override.get(Keys.General.SAMPLING_MIN_P, metadata.sampling_min_p)
+        metadata.sampling_xtc_probability = metadata_override.get(
+            Keys.General.SAMPLING_XTC_PROBABILITY, metadata.sampling_xtc_probability
+        )
+        metadata.sampling_xtc_threshold = metadata_override.get(
+            Keys.General.SAMPLING_XTC_THRESHOLD, metadata.sampling_xtc_threshold
+        )
+        metadata.sampling_temp = metadata_override.get(Keys.General.SAMPLING_TEMP, metadata.sampling_temp)
+        metadata.sampling_penalty_last_n = metadata_override.get(
+            Keys.General.SAMPLING_PENALTY_LAST_N, metadata.sampling_penalty_last_n
+        )
+        metadata.sampling_penalty_repeat = metadata_override.get(
+            Keys.General.SAMPLING_PENALTY_REPEAT, metadata.sampling_penalty_repeat
+        )
+        metadata.sampling_mirostat = metadata_override.get(Keys.General.SAMPLING_MIROSTAT, metadata.sampling_mirostat)
+        metadata.sampling_mirostat_tau = metadata_override.get(
+            Keys.General.SAMPLING_MIROSTAT_TAU, metadata.sampling_mirostat_tau
+        )
+        metadata.sampling_mirostat_eta = metadata_override.get(
+            Keys.General.SAMPLING_MIROSTAT_ETA, metadata.sampling_mirostat_eta
+        )
 
-        metadata.name            = metadata_override.get(Keys.General.NAME,            metadata.name)
-        metadata.author          = metadata_override.get(Keys.General.AUTHOR,          metadata.author)
-        metadata.version         = metadata_override.get(Keys.General.VERSION,         metadata.version)
-        metadata.organization    = metadata_override.get(Keys.General.ORGANIZATION,    metadata.organization)
+        metadata.name = metadata_override.get(Keys.General.NAME, metadata.name)
+        metadata.author = metadata_override.get(Keys.General.AUTHOR, metadata.author)
+        metadata.version = metadata_override.get(Keys.General.VERSION, metadata.version)
+        metadata.organization = metadata_override.get(Keys.General.ORGANIZATION, metadata.organization)
 
-        metadata.finetune        = metadata_override.get(Keys.General.FINETUNE,        metadata.finetune)
-        metadata.basename        = metadata_override.get(Keys.General.BASENAME,        metadata.basename)
+        metadata.finetune = metadata_override.get(Keys.General.FINETUNE, metadata.finetune)
+        metadata.basename = metadata_override.get(Keys.General.BASENAME, metadata.basename)
 
-        metadata.description     = metadata_override.get(Keys.General.DESCRIPTION,     metadata.description)
-        metadata.quantized_by    = metadata_override.get(Keys.General.QUANTIZED_BY,    metadata.quantized_by)
+        metadata.description = metadata_override.get(Keys.General.DESCRIPTION, metadata.description)
+        metadata.quantized_by = metadata_override.get(Keys.General.QUANTIZED_BY, metadata.quantized_by)
 
-        metadata.size_label      = metadata_override.get(Keys.General.SIZE_LABEL,      metadata.size_label)
-        metadata.license_name    = metadata_override.get(Keys.General.LICENSE_NAME,    metadata.license_name)
-        metadata.license_link    = metadata_override.get(Keys.General.LICENSE_LINK,    metadata.license_link)
+        metadata.size_label = metadata_override.get(Keys.General.SIZE_LABEL, metadata.size_label)
+        metadata.license_name = metadata_override.get(Keys.General.LICENSE_NAME, metadata.license_name)
+        metadata.license_link = metadata_override.get(Keys.General.LICENSE_LINK, metadata.license_link)
 
-        metadata.url             = metadata_override.get(Keys.General.URL,             metadata.url)
-        metadata.doi             = metadata_override.get(Keys.General.DOI,             metadata.doi)
-        metadata.uuid            = metadata_override.get(Keys.General.UUID,            metadata.uuid)
-        metadata.repo_url        = metadata_override.get(Keys.General.REPO_URL,        metadata.repo_url)
+        metadata.url = metadata_override.get(Keys.General.URL, metadata.url)
+        metadata.doi = metadata_override.get(Keys.General.DOI, metadata.doi)
+        metadata.uuid = metadata_override.get(Keys.General.UUID, metadata.uuid)
+        metadata.repo_url = metadata_override.get(Keys.General.REPO_URL, metadata.repo_url)
 
-        metadata.source_url      = metadata_override.get(Keys.General.SOURCE_URL,      metadata.source_url)
-        metadata.source_doi      = metadata_override.get(Keys.General.SOURCE_DOI,      metadata.source_doi)
-        metadata.source_uuid     = metadata_override.get(Keys.General.SOURCE_UUID,     metadata.source_uuid)
+        metadata.source_url = metadata_override.get(Keys.General.SOURCE_URL, metadata.source_url)
+        metadata.source_doi = metadata_override.get(Keys.General.SOURCE_DOI, metadata.source_doi)
+        metadata.source_uuid = metadata_override.get(Keys.General.SOURCE_UUID, metadata.source_uuid)
         metadata.source_repo_url = metadata_override.get(Keys.General.SOURCE_REPO_URL, metadata.source_repo_url)
 
         # Base Models is received here as an array of models
-        metadata.base_models     = metadata_override.get("general.base_models",        metadata.base_models)
+        metadata.base_models = metadata_override.get("general.base_models", metadata.base_models)
 
         # Datasets is received here as an array of datasets
-        metadata.datasets        = metadata_override.get("general.datasets",           metadata.datasets)
+        metadata.datasets = metadata_override.get("general.datasets", metadata.datasets)
 
-        metadata.tags            = metadata_override.get(Keys.General.TAGS,            metadata.tags)
-        metadata.languages       = metadata_override.get(Keys.General.LANGUAGES,       metadata.languages)
+        metadata.tags = metadata_override.get(Keys.General.TAGS, metadata.tags)
+        metadata.languages = metadata_override.get(Keys.General.LANGUAGES, metadata.languages)
 
         # Direct Metadata Override (via direct cli argument)
         if model_name is not None:
@@ -146,15 +166,15 @@ class Metadata:
         return metadata
 
     @staticmethod
-    def load_metadata_override(metadata_override_path: Optional[Path] = None) -> dict[str, Any]:
+    def load_metadata_override(metadata_override_path: Path | None = None) -> dict[str, Any]:
         if metadata_override_path is None or not metadata_override_path.is_file():
             return {}
 
-        with open(metadata_override_path, "r", encoding="utf-8") as f:
+        with Path(metadata_override_path).open(encoding="utf-8") as f:
             return json.load(f)
 
     @staticmethod
-    def load_model_card(model_path: Optional[Path] = None) -> dict[str, Any]:
+    def load_model_card(model_path: Path | None = None) -> dict[str, Any]:
         if model_path is None or not model_path.is_dir():
             return {}
 
@@ -166,7 +186,7 @@ class Metadata:
         # The model card metadata is assumed to always be in YAML (frontmatter)
         # ref: https://github.com/huggingface/transformers/blob/a5c642fe7a1f25d3bdcd76991443ba6ff7ee34b2/src/transformers/modelcard.py#L468-L473
         yaml_content: str = ""
-        with open(model_card_path, "r", encoding="utf-8") as f:
+        with Path(model_card_path).open(encoding="utf-8") as f:
             content = f.read()
             lines = content.splitlines()
             lines_yaml = []
@@ -178,14 +198,13 @@ class Metadata:
                 return {}
             for line in lines[1:]:
                 if line == "---":
-                    break # End of frontmatter
-                else:
-                    lines_yaml.append(line)
+                    break  # End of frontmatter
+                lines_yaml.append(line)
             yaml_content = "\n".join(lines_yaml) + "\n"
 
         # Quick hack to fix the Norway problem
         # https://hitchdev.com/strictyaml/why/implicit-typing-removed/
-        yaml_content = yaml_content.replace("- no\n", "- \"no\"\n")
+        yaml_content = yaml_content.replace("- no\n", '- "no"\n')
         # yaml should use 2 spaces instead of tab
         # this issue has came up with the Qwen/Qwen3-235B-A22B-Instruct-2507 model card
         #    (I've also sent a pr tp fix the modelcard too)
@@ -195,14 +214,12 @@ class Metadata:
             data = yaml.safe_load(yaml_content)
             if isinstance(data, dict):
                 return data
-            else:
-                logger.error(f"while reading YAML model card frontmatter, data is {type(data)} instead of dict")
-                return {}
-        else:
+            logger.error(f"while reading YAML model card frontmatter, data is {type(data)} instead of dict")
             return {}
+        return {}
 
     @staticmethod
-    def load_hf_parameters(model_path: Optional[Path] = None) -> dict[str, Any]:
+    def load_hf_parameters(model_path: Path | None = None) -> dict[str, Any]:
         if model_path is None or not model_path.is_dir():
             return {}
 
@@ -211,11 +228,11 @@ class Metadata:
         if not config_path.is_file():
             return {}
 
-        with open(config_path, "r", encoding="utf-8") as f:
+        with Path(config_path).open(encoding="utf-8") as f:
             return json.load(f)
 
     @staticmethod
-    def load_generation_config(model_path: Optional[Path] = None) -> dict[str, Any]:
+    def load_generation_config(model_path: Path | None = None) -> dict[str, Any]:
         if model_path is None or not model_path.is_dir():
             return {}
 
@@ -225,19 +242,26 @@ class Metadata:
             return {}
 
         try:
-            with open(generation_config_path, "r", encoding="utf-8") as f:
+            with Path(generation_config_path).open(encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (OSError, json.JSONDecodeError):
             # not all models have valid generation_config.json
             return {}
 
     @staticmethod
     def id_to_title(string):
         # Convert capitalization into title form unless acronym or version number
-        return ' '.join([w.title() if w.islower() and not re.match(r'^(v\d+(?:\.\d+)*|\d.*)$', w) else w for w in string.strip().replace('-', ' ').split()])
+        return " ".join(
+            [
+                w.title() if w.islower() and not re.match(r"^(v\d+(?:\.\d+)*|\d.*)$", w) else w
+                for w in string.strip().replace("-", " ").split()
+            ]
+        )
 
     @staticmethod
-    def get_model_id_components(model_id: Optional[str] = None, total_params: int = 0) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
+    def get_model_id_components(
+        model_id: str | None = None, total_params: int = 0
+    ) -> tuple[str | None, str | None, str | None, str | None, str | None, str | None]:
         # Huggingface often store model id as '<org>/<model name>'
         # so let's parse it and apply some heuristics if possible for model name components
 
@@ -245,53 +269,54 @@ class Metadata:
             # model ID missing
             return None, None, None, None, None, None
 
-        if ' ' in model_id:
+        if " " in model_id:
             # model ID is actually a normal human sentence
             # which means its most likely a normal model name only
             # not part of the hugging face naming standard, but whatever
             return model_id, None, None, None, None, None
 
-        if '/' in model_id:
+        if "/" in model_id:
             # model ID (huggingface style)
-            org_component, model_full_name_component = model_id.split('/', 1)
+            org_component, model_full_name_component = model_id.split("/", 1)
         else:
             # model ID but missing org components
             org_component, model_full_name_component = None, model_id
 
         # Check if we erroneously matched against './' or '../' etc...
-        if org_component is not None and len(org_component) > 0 and org_component[0] == '.':
+        if org_component is not None and len(org_component) > 0 and org_component[0] == ".":
             org_component = None
 
-        name_parts: list[str] = model_full_name_component.split('-')
+        name_parts: list[str] = model_full_name_component.split("-")
 
         # Remove empty parts
         for i in reversed(range(len(name_parts))):
             if len(name_parts[i]) == 0:
                 del name_parts[i]
 
-        name_types: list[
-            set[Literal["basename", "size_label", "finetune", "version", "type"]]
-        ] = [set() for _ in name_parts]
+        name_types: list[set[Literal["basename", "size_label", "finetune", "version", "type"]]] = [
+            set() for _ in name_parts
+        ]
 
         # Annotate the name
         for i, part in enumerate(name_parts):
             # Version
-            if re.fullmatch(r'(v|iter)?\d+([.]\d+)*', part, re.IGNORECASE):
+            if re.fullmatch(r"(v|iter)?\d+([.]\d+)*", part, re.IGNORECASE):
                 name_types[i].add("version")
             # Quant type (should not be there for base models, but still annotated)
-            elif re.fullmatch(r'i?q\d(_\w)*|b?fp?(16|32)', part, re.IGNORECASE):
+            elif re.fullmatch(r"i?q\d(_\w)*|b?fp?(16|32)", part, re.IGNORECASE):
                 name_types[i].add("type")
                 name_parts[i] = part.upper()
             # Model size
-            elif i > 0 and re.fullmatch(r'(([A]|\d+[x])?\d+([._]\d+)?[KMBT][\d]?|small|mini|medium|large|x?xl)', part, re.IGNORECASE):
+            elif i > 0 and re.fullmatch(
+                r"(([A]|\d+[x])?\d+([._]\d+)?[KMBT][\d]?|small|mini|medium|large|x?xl)", part, re.IGNORECASE
+            ):
                 part = part.replace("_", ".")
                 # Handle weird bloom-7b1 notation
                 if part[-1].isdecimal():
                     part = part[:-2] + "." + part[-1] + part[-2]
                 # Normalize the size suffixes
-                if len(part) > 1 and part[-2].isdecimal():
-                    if part[-1] in "kmbt":
-                        part = part[:-1] + part[-1].upper()
+                if len(part) > 1 and part[-2].isdecimal() and part[-1] in "kmbt":
+                    part = part[:-1] + part[-1].upper()
                 if total_params != 0:
                     try:
                         label_params = float(part[:-1]) * pow(1000, " KMBT".find(part[-1]))
@@ -314,7 +339,7 @@ class Metadata:
                     name_types[i].add("size_label")
                 name_parts[i] = part
             # Some easy to recognize finetune names
-            elif i > 0 and re.fullmatch(r'chat|instruct|vision|lora', part, re.IGNORECASE):
+            elif i > 0 and re.fullmatch(r"chat|instruct|vision|lora", part, re.IGNORECASE):
                 if total_params < 0 and part.lower() == "lora":
                     # ignore redundant "lora" in the finetune part when the output is a lora adapter
                     name_types[i].add("type")
@@ -325,9 +350,8 @@ class Metadata:
         # TODO: should word-based size labels always be removed instead?
         if any(c.isdecimal() for n, t in zip(name_parts, name_types) if "size_label" in t for c in n):
             for n, t in zip(name_parts, name_types):
-                if "size_label" in t:
-                    if all(c.isalpha() for c in n):
-                        t.remove("size_label")
+                if "size_label" in t and all(c.isalpha() for c in n):
+                    t.remove("size_label")
 
         at_start = True
         # Find the basename through the annotated name
@@ -349,11 +373,13 @@ class Metadata:
 
         basename = "-".join(n for n, t in zip(name_parts, name_types) if "basename" in t) or None
         # Deduplicate size labels using order-preserving 'dict' ('set' seems to sort the keys)
-        size_label = "-".join(dict.fromkeys(s for s, t in zip(name_parts, name_types) if "size_label" in t).keys()) or None
+        size_label = (
+            "-".join(dict.fromkeys(s for s, t in zip(name_parts, name_types) if "size_label" in t).keys()) or None
+        )
         finetune = "-".join(f for f, t in zip(name_parts, name_types) if "finetune" in t) or None
         # TODO: should the basename version always be excluded?
         # NOTE: multiple finetune versions are joined together
-        version = "-".join(v for v, t, in zip(name_parts, name_types) if "version" in t and "basename" not in t) or None
+        version = "-".join(v for v, t in zip(name_parts, name_types) if "version" in t and "basename" not in t) or None
 
         if size_label is None and finetune is None and version is None:
             # Too ambiguous, output nothing
@@ -362,7 +388,13 @@ class Metadata:
         return model_full_name_component, org_component, basename, finetune, version, size_label
 
     @staticmethod
-    def apply_metadata_heuristic(metadata: Metadata, model_card: Optional[dict] = None, hf_params: Optional[dict] = None, model_path: Optional[Path] = None, total_params: int = 0) -> Metadata:
+    def apply_metadata_heuristic(
+        metadata: Metadata,
+        model_card: dict | None = None,
+        hf_params: dict | None = None,
+        model_path: Path | None = None,
+        total_params: int = 0,
+    ) -> Metadata:
         # Reference Model Card Metadata: https://github.com/huggingface/hub-docs/blob/main/modelcard.md?plain=1
 
         # Model Card Heuristics
@@ -436,7 +468,9 @@ class Metadata:
                 # Example: stabilityai/stable-diffusion-xl-base-1.0. Can also be a list (for merges)
                 # Example of merges: https://huggingface.co/EmbeddedLLM/Mistral-7B-Merge-14-v0.1/blob/main/README.md
                 metadata_base_models = []
-                base_model_value = model_card.get("base_model", model_card.get("base_models", model_card.get("base_model_sources", None)))
+                base_model_value = model_card.get(
+                    "base_model", model_card.get("base_models", model_card.get("base_model_sources", None))
+                )
 
                 if base_model_value is not None:
                     if isinstance(base_model_value, str):
@@ -451,7 +485,11 @@ class Metadata:
                     # NOTE: model size of base model is assumed to be similar to the size of the current model
                     base_model = {}
                     if isinstance(model_id, str):
-                        if model_id.startswith("http://") or model_id.startswith("https://") or model_id.startswith("ssh://"):
+                        if (
+                            model_id.startswith("http://")
+                            or model_id.startswith("https://")
+                            or model_id.startswith("ssh://")
+                        ):
                             base_model["repo_url"] = model_id
 
                             # Check if Hugging Face ID is present in URL
@@ -459,7 +497,14 @@ class Metadata:
                                 match = re.match(r"https?://huggingface.co/([^/]+/[^/]+)$", model_id)
                                 if match:
                                     model_id_component = match.group(1)
-                                    model_full_name_component, org_component, basename, finetune, version, size_label = Metadata.get_model_id_components(model_id_component, total_params)
+                                    (
+                                        model_full_name_component,
+                                        org_component,
+                                        basename,
+                                        finetune,
+                                        version,
+                                        size_label,
+                                    ) = Metadata.get_model_id_components(model_id_component, total_params)
 
                                     # Populate model dictionary with extracted components
                                     if model_full_name_component is not None:
@@ -471,7 +516,9 @@ class Metadata:
 
                         else:
                             # Likely a Hugging Face ID
-                            model_full_name_component, org_component, basename, finetune, version, size_label = Metadata.get_model_id_components(model_id, total_params)
+                            model_full_name_component, org_component, basename, finetune, version, size_label = (
+                                Metadata.get_model_id_components(model_id, total_params)
+                            )
 
                             # Populate model dictionary with extracted components
                             if model_full_name_component is not None:
@@ -481,20 +528,24 @@ class Metadata:
                             if version is not None:
                                 base_model["version"] = version
                             if org_component is not None and model_full_name_component is not None:
-                                base_model["repo_url"] = f"https://huggingface.co/{org_component}/{model_full_name_component}"
+                                base_model["repo_url"] = (
+                                    f"https://huggingface.co/{org_component}/{model_full_name_component}"
+                                )
 
                     elif isinstance(model_id, dict):
                         base_model = model_id
 
                     else:
-                        logger.error(f"base model entry '{str(model_id)}' not in a known format")
+                        logger.error(f"base model entry '{model_id!s}' not in a known format")
 
                     metadata.base_models.append(base_model)
 
             if "datasets" in model_card or "dataset" in model_card or "dataset_sources" in model_card:
                 # This represents the datasets that this was trained from
                 metadata_datasets = []
-                dataset_value = model_card.get("datasets", model_card.get("dataset", model_card.get("dataset_sources", None)))
+                dataset_value = model_card.get(
+                    "datasets", model_card.get("dataset", model_card.get("dataset_sources", None))
+                )
 
                 if dataset_value is not None:
                     if isinstance(dataset_value, str):
@@ -517,7 +568,9 @@ class Metadata:
                                 match = re.match(r"https?://huggingface.co/([^/]+/[^/]+)$", dataset_id)
                                 if match:
                                     dataset_id_component = match.group(1)
-                                    dataset_name_component, org_component, basename, finetune, version, size_label = Metadata.get_model_id_components(dataset_id_component, total_params)
+                                    dataset_name_component, org_component, basename, finetune, version, size_label = (
+                                        Metadata.get_model_id_components(dataset_id_component, total_params)
+                                    )
 
                                     # Populate dataset dictionary with extracted components
                                     if dataset_name_component is not None:
@@ -529,7 +582,9 @@ class Metadata:
 
                         else:
                             # Likely a Hugging Face ID
-                            dataset_name_component, org_component, basename, finetune, version, size_label = Metadata.get_model_id_components(dataset_id, total_params)
+                            dataset_name_component, org_component, basename, finetune, version, size_label = (
+                                Metadata.get_model_id_components(dataset_id, total_params)
+                            )
 
                             # Populate dataset dictionary with extracted components
                             if dataset_name_component is not None:
@@ -545,7 +600,7 @@ class Metadata:
                         dataset = dataset_id
 
                     else:
-                        logger.error(f"dataset entry '{str(dataset_id)}' not in a known format")
+                        logger.error(f"dataset entry '{dataset_id!s}' not in a known format")
 
                     metadata.datasets.append(dataset)
 
@@ -563,13 +618,14 @@ class Metadata:
         ####################################
 
         if hf_params is not None:
-
             hf_name_or_path = hf_params.get("_name_or_path")
-            if hf_name_or_path is not None and hf_name_or_path.count('/') <= 1:
+            if hf_name_or_path is not None and hf_name_or_path.count("/") <= 1:
                 # Use _name_or_path only if its actually a model name and not some computer path
                 # e.g. 'meta-llama/Llama-2-7b-hf'
                 model_id = hf_name_or_path
-                model_full_name_component, org_component, basename, finetune, version, size_label = Metadata.get_model_id_components(model_id, total_params)
+                model_full_name_component, org_component, basename, finetune, version, size_label = (
+                    Metadata.get_model_id_components(model_id, total_params)
+                )
                 if metadata.name is None and model_full_name_component is not None:
                     metadata.name = Metadata.id_to_title(model_full_name_component)
                 if metadata.organization is None and org_component is not None:
@@ -587,7 +643,9 @@ class Metadata:
         ############################################
         if model_path is not None:
             model_id = model_path.name
-            model_full_name_component, org_component, basename, finetune, version, size_label = Metadata.get_model_id_components(model_id, total_params)
+            model_full_name_component, org_component, basename, finetune, version, size_label = (
+                Metadata.get_model_id_components(model_id, total_params)
+            )
             if metadata.name is None and model_full_name_component is not None:
                 metadata.name = Metadata.id_to_title(model_full_name_component)
             if metadata.organization is None and org_component is not None:

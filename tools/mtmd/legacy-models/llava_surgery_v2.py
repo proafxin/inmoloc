@@ -20,7 +20,7 @@ def load_model(file_path):
     if is_safetensor_file(file_path):
         tensors = {}
         with cast("ContextManager[Any]", safe_open(file_path, framework="pt", device="cpu")) as f:
-            for key in f.keys():  # noqa: SIM118 - safe_open handles are not iterable
+            for key in f.keys():  # ruff: ignore[in-dict-keys] - safe_open handles are not iterable
                 tensors[key] = f.get_tensor(key).clone()
                 # output shape
                 print(f"{key} : {tensors[key].shape}")

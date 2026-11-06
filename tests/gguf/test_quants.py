@@ -7,15 +7,15 @@
 from __future__ import annotations
 
 import argparse
-from math import prod
-from pathlib import Path
 import ctypes
 import logging
+from math import prod
+from pathlib import Path
+
 import numpy as np
 
 import gguf
 from gguf.constants import GGMLQuantizationType
-
 
 logger = logging.getLogger("test-quants")
 
@@ -58,22 +58,46 @@ class GGMLQuants:
         self.libggml.ggml_quantize_requires_imatrix.argtypes = (ctypes.c_int,)
 
         for t in (
-            "q4_0", "q4_1", "q5_0", "q5_1", "q8_0",
-            "q2_K", "q3_K", "q4_K", "q5_K", "q6_K",
-            "tq1_0", "tq2_0",
+            "q4_0",
+            "q4_1",
+            "q5_0",
+            "q5_1",
+            "q8_0",
+            "q2_K",
+            "q3_K",
+            "q4_K",
+            "q5_K",
+            "q6_K",
+            "tq1_0",
+            "tq2_0",
             "mxfp4",
             "nvfp4",
-            "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs", "iq3_s", "iq1_s", "iq1_m",
-            "iq4_nl", "iq4_xs",
+            "iq2_xxs",
+            "iq2_xs",
+            "iq2_s",
+            "iq3_xxs",
+            "iq3_s",
+            "iq1_s",
+            "iq1_m",
+            "iq4_nl",
+            "iq4_xs",
         ):
             dequant_func: ctypes._NamedFuncPointer = getattr(self.libggml, "dequantize_row_" + t)
             dequant_func.restype = None
             dequant_func.argtypes = (ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_int64)
 
         self.libggml.ggml_fp16_to_fp32_row.restype = None
-        self.libggml.ggml_fp16_to_fp32_row.argtypes = (ctypes.POINTER(ctypes.c_uint16), ctypes.POINTER(ctypes.c_float), ctypes.c_int64)
+        self.libggml.ggml_fp16_to_fp32_row.argtypes = (
+            ctypes.POINTER(ctypes.c_uint16),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_int64,
+        )
         self.libggml.ggml_bf16_to_fp32_row.restype = None
-        self.libggml.ggml_bf16_to_fp32_row.argtypes = (ctypes.POINTER(ctypes.c_uint16), ctypes.POINTER(ctypes.c_float), ctypes.c_int64)
+        self.libggml.ggml_bf16_to_fp32_row.argtypes = (
+            ctypes.POINTER(ctypes.c_uint16),
+            ctypes.POINTER(ctypes.c_float),
+            ctypes.c_int64,
+        )
 
         self.libggml.ggml_init.argtypes = (ggml_init_params,)
 
@@ -85,9 +109,13 @@ class GGMLQuants:
             # no-op
             result = tensor.view(np.float32)
         elif qtype == GGMLQuantizationType.F16:
-            self.libggml.ggml_fp16_to_fp32_row(tensor.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)), result.ctypes.data_as(c_float_p), result.size)
+            self.libggml.ggml_fp16_to_fp32_row(
+                tensor.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)), result.ctypes.data_as(c_float_p), result.size
+            )
         elif qtype == GGMLQuantizationType.BF16:
-            self.libggml.ggml_bf16_to_fp32_row(tensor.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)), result.ctypes.data_as(c_float_p), result.size)
+            self.libggml.ggml_bf16_to_fp32_row(
+                tensor.ctypes.data_as(ctypes.POINTER(ctypes.c_uint16)), result.ctypes.data_as(c_float_p), result.size
+            )
         else:
             lw_qname = qtype.name.lower()
             if lw_qname[-1] == "k":
@@ -103,7 +131,15 @@ class GGMLQuants:
             qw = np.sum((data * data).reshape((-1, data.shape[-1])), axis=0).ctypes.data_as(c_float_p)
         else:
             qw = ctypes.cast(0, c_float_p)
-        result_size = self.libggml.ggml_quantize_chunk(qtype.value, data.ctypes.data_as(c_float_p), result.ctypes.data_as(ctypes.c_void_p), 0, prod(data.shape[:-1]), data.shape[-1], qw)
+        result_size = self.libggml.ggml_quantize_chunk(
+            qtype.value,
+            data.ctypes.data_as(c_float_p),
+            result.ctypes.data_as(ctypes.c_void_p),
+            0,
+            prod(data.shape[:-1]),
+            data.shape[-1],
+            qw,
+        )
         assert result.size == result_size
         return result
 
@@ -112,28 +148,29 @@ def compare_tensors(t1: np.ndarray, t2: np.ndarray, qtype: GGMLQuantizationType)
     same = np.array_equal(t1, t2)
     if same:
         return True
+    block_size, type_size = gguf.GGML_QUANT_SIZES[qtype]
+    if t1.dtype == np.float32:
+        t1 = t1.reshape((-1, block_size))
+        t2 = t2.reshape((-1, block_size))
     else:
-        block_size, type_size = gguf.GGML_QUANT_SIZES[qtype]
-        if t1.dtype == np.float32:
-            t1 = t1.reshape((-1, block_size))
-            t2 = t2.reshape((-1, block_size))
-        else:
-            t1 = t1.reshape((-1, type_size))
-            t2 = t2.reshape((-1, type_size))
-        x = t1.view(np.uint8) ^ t2.view(np.uint8)
-        diff_bits = np.count_nonzero(np.unpackbits(x, axis=-1), axis=-1)
-        num_bad_blocks = np.count_nonzero(diff_bits, axis=0)
-        if num_bad_blocks == 0 and t1.shape == t2.shape:
-            logger.debug("Bits are equal, but arrays don't match, likely contains NANs")
-            return True
-        logger.debug(f"{num_bad_blocks} bad blocks ({100 * num_bad_blocks / x.shape[0]:.6f}%)")
-        bad_block_id = np.argmax(diff_bits, axis=0)
-        logger.debug(f"Worst block id: {bad_block_id}")
-        logger.debug(f"Sample bad block ({diff_bits[bad_block_id]} differing bits):\n{t1[bad_block_id]}\nReference:\n{t2[bad_block_id]}")
+        t1 = t1.reshape((-1, type_size))
+        t2 = t2.reshape((-1, type_size))
+    x = t1.view(np.uint8) ^ t2.view(np.uint8)
+    diff_bits = np.count_nonzero(np.unpackbits(x, axis=-1), axis=-1)
+    num_bad_blocks = np.count_nonzero(diff_bits, axis=0)
+    if num_bad_blocks == 0 and t1.shape == t2.shape:
+        logger.debug("Bits are equal, but arrays don't match, likely contains NANs")
+        return True
+    logger.debug(f"{num_bad_blocks} bad blocks ({100 * num_bad_blocks / x.shape[0]:.6f}%)")
+    bad_block_id = np.argmax(diff_bits, axis=0)
+    logger.debug("Worst block id: %s", bad_block_id)
+    logger.debug(
+        f"Sample bad block ({diff_bits[bad_block_id]} differing bits):\n{t1[bad_block_id]}\nReference:\n{t2[bad_block_id]}"
+    )
 
-        sum_diff_bits = np.sum(diff_bits)
-        logger.debug(f"{sum_diff_bits} bits differ ({100 * sum_diff_bits / (x.size * 8):.6f}%)")
-        return False
+    sum_diff_bits = np.sum(diff_bits)
+    logger.debug(f"{sum_diff_bits} bits differ ({100 * sum_diff_bits / (x.size * 8):.6f}%)")
+    return False
 
 
 def do_test(libggml_path: Path, quick: bool = False, user_type: GGMLQuantizationType | None = None):
@@ -144,13 +181,13 @@ def do_test(libggml_path: Path, quick: bool = False, user_type: GGMLQuantization
     r = np.random.randn(8, 1024, 1024).astype(np.float32, copy=False)
     # test zero blocks
     r[0, 0, :] = 0
-    ## Maybe test infinities? (can make NANs, not really useful in practice)
+    # Maybe test infinities? (can make NANs, not really useful in practice)
     # r[0, 1, 0] = np.inf
     # r[0, 2, 0] = -np.inf
     # r[0, 3, 0] = np.inf
     # r[0, 3, 1] = -np.inf
 
-    for qtype in ((GGMLQuantizationType.F16, *gguf.quants._type_traits.keys()) if user_type is None else (user_type,)):
+    for qtype in (GGMLQuantizationType.F16, *gguf.quants._type_traits.keys()) if user_type is None else (user_type,):
         has_dequantize = False
         has_quantize = False
 
@@ -231,7 +268,12 @@ def do_test(libggml_path: Path, quick: bool = False, user_type: GGMLQuantization
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test Python (de)quantization against the reference C implementation")
-    parser.add_argument("--libggml", type=Path, default=Path(__file__).parent.parent.parent / "build" / "bin" / "libggml.so", help="The path to libggml.so")
+    parser.add_argument(
+        "--libggml",
+        type=Path,
+        default=Path(__file__).parent.parent.parent / "build" / "bin" / "libggml.so",
+        help="The path to libggml.so",
+    )
     parser.add_argument("--quick", action="store_true", help="Don't quantize with C when it's not strictly necessary")
     parser.add_argument("--type", type=str, help="The quant type to test (all by default)")
 

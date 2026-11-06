@@ -457,15 +457,20 @@ def main() -> None:
         or args.hex_profile is not None
         or args.hex_optrace is not None
     )
-    if verbose_trigger and basename in {
-        "local-inference-cli",
-        "local-inference-completion",
-        "local-inference-bench",
-        "local-inference-server",
-        "local-inference-mtmd-cli",
-    }:
-        if "-v" not in cmd_args and "--verbose" not in cmd_args:
-            cmd_args.append("-v")
+    if (
+        verbose_trigger
+        and basename
+        in {
+            "local-inference-cli",
+            "local-inference-completion",
+            "local-inference-bench",
+            "local-inference-server",
+            "local-inference-mtmd-cli",
+        }
+        and "-v" not in cmd_args
+        and "--verbose" not in cmd_args
+    ):
+        cmd_args.append("-v")
 
     # Inject defaults for local-inference-cli, local-inference-completion, and local-inference-server if not overridden by the user
     if basename in {"local-inference-cli", "local-inference-completion", "local-inference-server"}:
@@ -483,14 +488,18 @@ def main() -> None:
         if "--ubatch-size" not in cmd_args and "-ub" not in cmd_args:
             cmd_args += ["--ubatch-size", "1024"]
 
-    if basename in {
-        "local-inference-cli",
-        "local-inference-completion",
-        "local-inference-server",
-        "local-inference-bench",
-    }:
-        if "-t" not in cmd_args and "--threads" not in cmd_args:
-            cmd_args += ["-t", "6"]
+    if (
+        basename
+        in {
+            "local-inference-cli",
+            "local-inference-completion",
+            "local-inference-server",
+            "local-inference-bench",
+        }
+        and "-t" not in cmd_args
+        and "--threads" not in cmd_args
+    ):
+        cmd_args += ["-t", "6"]
 
     # Resolve target directory on device
     target_dir = args.target_dir
