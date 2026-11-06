@@ -76,7 +76,7 @@ services:
       - --max-output-tokens
       - "1024"
       - --vram-budget
-      - ${OCR_BUDGET:-2.5G}
+      - ${OCR_BUDGET:-2.2G}
       - --cache-ram
       - "0"
       - --cache-type-k
@@ -144,9 +144,6 @@ services:
     volumes: *models
     deploy: *gpu
 
-  # llama.cpp services for benchmarking against the inmoloc equivalents above.
-  # Text: python3 scripts/bench-server-concurrency.py --url http://localhost:8120 --levels 1 2 4 8 16 32 64 --prompt-tokens 64
-  # OCR:  python3 bench_ocr.py --url http://localhost:8111 --label llamacpp --container paddleocr-llamacpp
   qwen-llamacpp:
     image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
     container_name: qwen-llamacpp
@@ -172,7 +169,7 @@ services:
       - --n-predict
       - "512"
       - --cache-ram
-      - "2048"
+      - "0"
       - --metrics
       - --cache-type-k
       - q8_0
@@ -215,11 +212,13 @@ services:
       - --port
       - "8111"
       - -c
-      - "${OCR_CTX:-184320}"
+      - "${OCR_CTX:-24576}"
       - --parallel
-      - "${OCR_PARALLEL:-45}"
+      - "${OCR_PARALLEL:-6}"
       - --cache-ram
-      - "4096"
+      - "0"
+      - --n-predict
+      - "1024"
       - --metrics
       - --cache-type-k
       - bf16

@@ -1391,7 +1391,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         params.use_jinja = false;   // disable jinja by default
         params.sampling.temp = 0.2; // lower temp by default for better quality
     } else if (ex == LLAMA_EXAMPLE_SERVER) {
-        params.n_parallel = -1;     // auto by default
+        params.use_jinja = true;   // enable jinja by default for server
     } else if (ex == LLAMA_EXAMPLE_TOKENIZE) {
         params.parse_special = true; // parse special tokens by default, like the old tokenize tool
     } else if (ex == LLAMA_EXAMPLE_TTS) {

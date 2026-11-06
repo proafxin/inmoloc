@@ -51,7 +51,7 @@ static common_speculative_output_limits server_output_limits(const common_params
     }
 
     auto result = common_speculative_get_output_limits(
-            params.n_batch, params.n_parallel, common_speculative_n_max(&params.speculative));
+            params.n_batch, params.n_batch, common_speculative_n_max(&params.speculative));
 
     result.total   = std::max<int32_t>(1, result.total);
     result.per_seq = std::max<int32_t>(1, result.per_seq);
@@ -1182,14 +1182,8 @@ private:
     uint64_t n_launch_next    = 0;
     int32_t  kv_budget_prompt = -1; // KV cells left for prompt tokens in the current batch, -1 = unlimited
 
-    // the elastic memory (llama_memory_box_*): pages hold the KV cells and the recurrent states of the requests; the
-    // KV cell counts below are then pages of cells, a request is admitted with its state, its input and the most it may
-    // generate (policy A), so a running request never waits for memory and nothing is preempted
-    bool box = false;
-
-    // the blocks that were free at the last look: the waiting tasks only need a look when more are free, see
-    // mem_offer_waiting()
-    int64_t box_free_seen = -1;
+    // the free blocks that were free at the last look: waiting tasks only need a look when more are free
+    int64_t free_blocks_seen = -1;
 
     // the tokens a finished request generated, a running mean over the recent ones, see kv_gen_expected()
     double   gen_mean   = 0.0;
@@ -1563,25 +1557,23 @@ private:
 
         {
             llama_memory_box_info info;
-            box = llama_memory_box_get_info(llama_get_memory(ctx_tgt), &info);
-            if (box) {
-                // every request is admitted with its most output, so the most has to be given
-                if (params_base.max_output_tokens <= 0 && !params_base.embedding) {
-                    SRV_ERR("%s", "the elastic memory needs --max-output-tokens, the most tokens a request generates\n");
-                    return false;
-                }
-                SRV_INF("elastic memory: %u blocks of %u tokens, a state takes %u blocks, output at most %d tokens\n",
-                        info.n_blocks, info.block_tokens, info.state_blocks, params_base.max_output_tokens);
+            llama_memory_box_get_info(llama_get_memory(ctx_tgt), &info);
+            // every request is admitted with its most output, so the most has to be given
+            if (params_base.max_output_tokens <= 0 && !params_base.embedding) {
+                SRV_ERR("%s", "elastic memory needs --max-output-tokens, the most tokens a request generates\n");
+                return false;
             }
+            SRV_INF("elastic memory: %u blocks of %u tokens, a state takes %u blocks, output at most %d tokens\n",
+                    info.n_blocks, info.block_tokens, info.state_blocks, params_base.max_output_tokens);
         }
 
         // setup slots
-        SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d\n", params_base.n_parallel, n_ctx_slot());
+        SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d\n", 1, n_ctx_slot());
 
         // try speculative decoding
         if (ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
             try {
-                spec.reset(common_speculative_init(params_base.speculative, params_base.n_parallel));
+                spec.reset(common_speculative_init(params_base.speculative, params_base.n_batch));
             } catch (const std::exception & e) {
                 SRV_ERR("failed to initialize speculative decoding context: %s\n", e.what());
                 if (params_base.speculative.has_synth()) {
@@ -1608,7 +1600,7 @@ private:
         }
 
         // the elastic memory creates the state of a request when it is needed
-        for (int i = 0; i < (box ? 1 : params_base.n_parallel); i++) {
+        for (int i = 0; i < 1; i++) {
             slot_add();
         }
 
@@ -1639,12 +1631,12 @@ private:
             }
         }
 
-        // the update_slots() logic will always submit a maximum of n_batch or n_parallel tokens
+        // the update_slots() logic will always submit a maximum of n_batch tokens
         // note that n_batch can be > n_ctx (e.g. for non-causal attention models such as BERT where the KV cache is not used)
         {
             const int32_t n_batch = llama_n_batch(ctx_tgt);
             const int32_t n_embd  = llama_model_n_embd_inp(model_tgt);
-            batch.init(std::max(n_batch, params_base.n_parallel), n_embd);
+            batch.init(n_batch, n_embd);
         }
 
         if (params_base.cache_ram_mib != 0) {
@@ -1855,10 +1847,10 @@ private:
         return slot;
     }
 
-    // with the elastic memory a new request gets its own state, so that no prompt in memory is given up for it; a request
+    // with elastic memory a new request gets its own state, so that no prompt in memory is given up for it; a request
     // holds at least a block, so that memory runs out first
     bool slot_can_add() const {
-        return box && (int) slots.size() < params_base.n_parallel;
+        return true;
     }
 
     server_slot * get_slot_by_id(int id_slot) {
@@ -2230,51 +2222,19 @@ private:
 
     // offer the tasks that wait for memory again once the KV cells and the recurrent-state cells they take are free:
     // in the order they wait, every one that fits, see kv_schedule() for the same with preempted slots
-    // with no slot at work, all of them are offered: the first one is admitted whatever its size
+    // with no slot at work, all of them are offered
     void mem_offer_waiting(bool all) {
-        // the elastic memory knows what fits: the free blocks are compared with the cost of the waiting tasks, in the order
-        // they wait, and only a task that fits goes on to a slot; with no slot at work all of them are offered
-        if (box) {
-            const auto info = box_info();
+        const auto info = box_info();
 
-            const int64_t n_free = all ? INT64_MAX : (int64_t) info.n_free - (int64_t) info.n_reserved + box_blocks_evictable(info);
+        const int64_t n_free = all ? INT64_MAX : (int64_t) info.n_free - (int64_t) info.n_reserved + box_blocks_evictable(info);
 
-            if (all || n_free > box_free_seen) {
-                // what they take is known at the next look, which may find room for more
-                box_free_seen = queue_tasks.pop_deferred_fit(n_free) > 0 ? -1 : n_free;
-            } else {
-                box_free_seen = n_free;
-            }
-            return;
+        if (all || n_free > free_blocks_seen) {
+            // what they take is known at the next look, which may find room for more
+            free_blocks_seen = queue_tasks.pop_deferred_fit(n_free) > 0 ? -1 : n_free;
+        } else {
+            free_blocks_seen = n_free;
         }
-
-        // the elastic memory holds the states in its pages, see box
-        const bool is_rs = (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) && !box;
-
-        const auto waiting = queue_tasks.get_deferred_mem_tasks();
-
-        int32_t  n_kv_offered = 0;
-        uint32_t n_rs_offered = 0;
-
-        const int32_t  n_kv_avail = kv_cells_avail();
-        const uint32_t n_rs_avail = is_rs ? n_rs_cells_avail() : 0;
-
-        std::vector<int> offer;
-        for (const auto & w : waiting) {
-            if (!all) {
-                if (n_kv_avail - n_kv_offered < w.n_kv_wait_at) {
-                    continue;
-                }
-                if (is_rs && n_rs_avail < n_rs_offered + w.n_rs_need) {
-                    continue;
-                }
-            }
-            n_kv_offered += std::max(0, w.n_kv_need);
-            n_rs_offered += w.n_rs_need;
-            offer.push_back(w.id);
-        }
-
-        queue_tasks.pop_deferred_tasks(offer);
+        return;
     }
 
     //
@@ -2287,12 +2247,8 @@ private:
     //
 
     int32_t kv_cells_total() const {
-        if (box) {
-            const auto info = box_info();
-            return (int32_t) (info.n_blocks*info.block_tokens);
-        }
-
-        return (int32_t) llama_n_ctx(ctx_tgt);
+        const auto info = box_info();
+        return (int32_t) (info.n_blocks*info.block_tokens);
     }
 
     int32_t kv_cells_held() const {
@@ -2319,16 +2275,6 @@ private:
         int32_t n = kv_cells_held();
 
         // the elastic memory holds the pages of the prompts from their admission on
-        if (box) {
-            return n;
-        }
-
-        for (const auto & slot : slots) {
-            const bool in_prompt = slot.state == SLOT_STATE_STARTED || slot.state == SLOT_STATE_PROCESSING_PROMPT;
-            if (in_prompt) {
-                n += std::max(0, slot.n_input_tokens() - slot.prompt.n_tokens());
-            }
-        }
         return n;
     }
 
@@ -2490,15 +2436,6 @@ private:
         return best_lcp;
     }
 
-    bool any_slot_preempted() const {
-        for (const auto & slot : slots) {
-            if (slot.state == SLOT_STATE_PREEMPTED) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     // KV cells a slot needs to make progress in the next decode
     int32_t kv_cells_step(const server_slot & slot) const {
         switch (slot.state) {
@@ -2524,22 +2461,9 @@ private:
                 }
             case SLOT_STATE_STARTED:
                 return 1;
-            default:
-                return 0;
+        default:
+            return 0;
         }
-    }
-
-    // only single-sequence text generation can be recomputed from its tokens
-    bool kv_can_preempt(const server_slot & slot) const {
-        if (!slot.task || !slot.task->need_sampling() || slot.task->is_parent() || slot.task->is_child()) {
-            return false;
-        }
-        if (!slot.inp_embd.empty() || slot.spec_is_replay) {
-            return false;
-        }
-        return slot.state == SLOT_STATE_STARTED ||
-               slot.state == SLOT_STATE_PROCESSING_PROMPT ||
-               slot.state == SLOT_STATE_GENERATING;
     }
 
     //
@@ -2644,268 +2568,12 @@ private:
         }
     }
 
-    void kv_preempt(server_slot & slot) {
-        GGML_ASSERT(kv_can_preempt(slot));
-
-        // the pending encode points at chunks of the prompt being replaced below
-        slot.encode_wait();
-
-        if (slot.state == SLOT_STATE_GENERATING) {
-            GGML_ASSERT(!slot.resuming);
-
-            // read through server_tokens itself: get_tokens() refuses a multimodal server even for a text-only prompt
-            const server_tokens & tokens = slot.prompt.tokens;
-
-            bool has_media = false;
-            for (size_t i = 0; i < tokens.size() && !has_media; ++i) {
-                has_media = tokens[i] == LLAMA_TOKEN_NULL;
-            }
-
-            if (has_media) {
-                // the slot prompt keeps only placeholders for media, take the media from the task prompt
-                // there is no context shift with media, so the task prompt is a prefix of the slot prompt
-                GGML_ASSERT(tokens.size() >= slot.task->tokens.size());
-
-                slot.resume_tokens = slot.task->tokens.clone();
-                for (size_t i = slot.task->tokens.size(); i < tokens.size(); ++i) {
-                    slot.resume_tokens.push_back(tokens[i]);
-                }
-            } else {
-                slot.resume_tokens = slot.prompt.tokens.clone();
-            }
-
-            slot.resume_tokens.push_back(slot.sampled);
-            slot.resuming = true;
-        }
-        // a slot preempted while processing its prompt (or its resume tokens) simply starts that over
-
-        metrics.n_preemptions++;
-
-        SLT_WRN(slot, "preempted to free %d KV cells, n_gen = %d, resume from %d tokens\n",
-                slot.prompt.n_tokens(), (int) slot.stats.n_gen, slot.n_input_tokens());
-
-        if (slot.can_speculate()) {
-            slot.spec_draft.clear();
-            slot.spec_draft_q.clear();
-            slot.spec_i_batch.clear();
-            slot.spec_ckpt.clear();
-        }
-
-        // the state goes to the prompt cache in host memory, so that the resume restores it instead of recomputing
-        // only a state that matches the prompt can be restored: the memory must hold exactly the tokens of the prompt
-        if (prompt_cache && slot.task->params.cache_prompt && slot.prompt.n_tokens() > 0) {
-            const llama_pos pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
-            const size_t n_tokens = slot.prompt.n_tokens();
-            const bool   exact    = pos_max >= 0 &&
-                slot.prompt.tokens.size_up_to_pos(pos_max + 1) == n_tokens && // the memory holds the last token
-                slot.prompt.tokens.size_up_to_pos(pos_max)     <  n_tokens;   // and no position after it
-            if (exact && slot.prompt_save(*prompt_cache)) {
-                prompt_cache->update();
-                SLT_INF(slot, "saved %d tokens of state to the prompt cache for the resume\n", slot.prompt.n_tokens());
-            }
-        }
-
-        slot.i_batch = -1;
-        slot.prompt_clear();
-
-        // a slot that never left SLOT_STATE_STARTED has not signaled the client yet
-        slot.preempted = slot.preempted || slot.state != SLOT_STATE_STARTED;
-        slot.state     = SLOT_STATE_PREEMPTED;
-    }
-
     // run before building the batch; sets kv_budget_prompt, the KV cells left for prompt tokens
     void kv_schedule() {
         kv_budget_prompt = -1;
 
-        // the elastic memory admits a request with all it takes, so the running ones never need more than they hold and
-        // reserve: nothing is preempted and the prompts hold their pages already
-        if (box) {
-            mem_offer_waiting(false);
-            return;
-        }
-
-        const int32_t n_total = kv_cells_total();
-
-        const auto by_launch = [](const server_slot * a, const server_slot * b) {
-            return a->n_launch < b->n_launch;
-        };
-
-        std::vector<server_slot *> running;
-        std::vector<server_slot *> preempted;
-
-        for (auto & slot : slots) {
-            if (slot.state == SLOT_STATE_PREEMPTED) {
-                preempted.push_back(&slot);
-            } else if (slot.is_processing() && slot.state != SLOT_STATE_WAIT_OTHER) {
-                running.push_back(&slot);
-            }
-        }
-
-        std::sort(running.begin(),   running.end(),   by_launch);
-        std::sort(preempted.begin(), preempted.end(), by_launch);
-
-        // every request that waits for memory starts as soon as the pool holds it, in the order they arrived (the
-        // preempted slots, then the deferred tasks), skipping those that do not fit yet: a preempted slot when its whole
-        // recompute and what it is expected to generate fit next to the running slots and the room they generate into
-        // (see kv_cells_growth()), a deferred task when its prompt fits (see
-        // defer_task_mem()); the preempted slots resume now, the deferred tasks are offered again after the reservation
-        // below, and the memory they take is counted from here on
-        const bool is_rs = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
-
-        // the recompute plus the first generation step after it, or the rest of what the slot is expected to generate
-        const int32_t n_step_resume = 1 + (spec ? common_speculative_n_max(spec.get()) : 0);
-
-        struct waiting {
-            server_slot * slot; // a preempted slot, else a deferred task
-            int32_t       n_kv;
-            server_queue::mem_wait task;
-        };
-
-        std::vector<waiting> waiting_all;
-        for (auto * slot : preempted) {
-            const int32_t n_gen_left = kv_gen_expected(slot->n_predict_max) - (int32_t) slot->stats.n_gen;
-            waiting_all.push_back({ slot, slot->n_input_tokens() + std::max(n_step_resume, n_gen_left), {} });
-        }
-        for (const auto & task : queue_tasks.get_deferred_mem_tasks()) {
-            waiting_all.push_back({ nullptr, task.n_kv_need, task });
-        }
-
-        int32_t  n_kv_offered = 0;
-        uint32_t n_rs_offered = 0;
-
-        // the free memory, which changes only when a preempted slot resumes below
-        int32_t  n_kv_avail = kv_cells_avail();
-        uint32_t n_rs_avail = is_rs ? n_rs_cells_avail() : 0;
-
-        std::vector<int> offer;
-
-        for (const auto & w : waiting_all) {
-            if (w.slot == nullptr) {
-                if (n_kv_avail - n_kv_offered < w.task.n_kv_wait_at) {
-                    continue;
-                }
-                if (is_rs && n_rs_avail < n_rs_offered + w.task.n_rs_need) {
-                    continue;
-                }
-                n_kv_offered += std::max(0, w.task.n_kv_need);
-                n_rs_offered += w.task.n_rs_need;
-                offer.push_back(w.task.id);
-                continue;
-            }
-
-            server_slot * slot = w.slot;
-
-            const int32_t need = w.n_kv + n_kv_offered;
-
-            // nothing is evicted for a slot that does not fit even then
-            if (kv_cells_committed() + kv_cells_growth() + need > n_total + kv_cells_evictable(nullptr, nullptr)) {
-                continue;
-            }
-            if (is_rs && n_rs_avail < n_rs_offered + 1) {
-                continue;
-            }
-
-            while (kv_cells_committed() + kv_cells_growth() + need > n_total && try_clear_idle_slot_rs(nullptr, "KV cells")) {
-            }
-
-            if (kv_cells_committed() + kv_cells_growth() + need > n_total) {
-                continue;
-            }
-
-            if (is_rs) {
-                while (n_rs_cells_held() + n_rs_offered >= llama_n_rs_cells(ctx_tgt) && try_clear_idle_slot_rs(nullptr)) {
-                }
-
-                if (n_rs_cells_held() + n_rs_offered >= llama_n_rs_cells(ctx_tgt)) {
-                    continue;
-                }
-            }
-
-            // the state saved at the preemption, if the prompt cache still has it; the prompt then computes the rest
-            if (prompt_cache && slot->task->params.cache_prompt && !slot->prompt_load(*prompt_cache, slot->input_tokens())) {
-                slot->prompt_clear();
-            }
-
-            const int32_t n_restored  = slot->prompt.tokens.get_common_prefix(slot->input_tokens());
-            const int32_t n_recompute = slot->n_input_tokens() - n_restored;
-
-            SLT_INF(*slot, "resuming, restored %d tokens from the prompt cache, recompute %d tokens\n", n_restored, n_recompute);
-
-            metrics.n_resumes++;
-            metrics.n_recomputed_tokens += n_recompute;
-            metrics.n_restored_tokens   += n_restored;
-
-            slot->state = SLOT_STATE_STARTED;
-
-            running.push_back(slot);
-            std::sort(running.begin(), running.end(), by_launch);
-
-            n_kv_avail = kv_cells_avail();
-            n_rs_avail = is_rs ? n_rs_cells_avail() : 0;
-        }
-
-        // reserve the next step of every running slot; when the cache cannot hold them all, preempt the newest slots first,
-        // so the older ones keep going; the last running slot is never preempted, so it always advances
-        int32_t reserved = 0;
-        for (const auto * slot : running) {
-            if (slot->state != SLOT_STATE_PREEMPTED) {
-                reserved += kv_cells_step(*slot);
-            }
-        }
-
-        while (kv_cells_held() + reserved > n_total) {
-            if (try_clear_idle_slot_rs(nullptr, "KV cells")) {
-                continue;
-            }
-
-            server_slot * victim = nullptr;
-            int32_t       n_active = 0;
-            for (auto * slot : running) {
-                if (slot->state == SLOT_STATE_PREEMPTED) {
-                    continue;
-                }
-                n_active++;
-                // running is in launch order: the newest slot that can be preempted
-                if (kv_can_preempt(*slot)) {
-                    victim = slot;
-                }
-            }
-
-            if (victim == nullptr || n_active <= 1) {
-                // nothing left to preempt, the decode falls back to retrying with smaller batches
-                break;
-            }
-
-            reserved -= kv_cells_step(*victim);
-
-            kv_preempt(*victim);
-        }
-
-        // prompt tokens may use what is left after the generation steps
-        int32_t n_step_gen = 0;
-        for (const auto * slot : running) {
-            if (slot->state == SLOT_STATE_GENERATING) {
-                n_step_gen += kv_cells_step(*slot);
-            }
-        }
-
-        kv_budget_prompt = std::max(0, n_total - kv_cells_held() - n_step_gen);
-
-        // prompts wait for room instead of preempting, but idle slots give up theirs
-        int32_t n_prompt_left = 0;
-        for (const auto * slot : running) {
-            if (slot->state == SLOT_STATE_STARTED || slot->state == SLOT_STATE_PROCESSING_PROMPT) {
-                n_prompt_left += std::max(0, slot->n_input_tokens() - slot->prompt.n_tokens());
-            }
-        }
-
-        const int32_t n_prompt_want = std::min(n_prompt_left, (int32_t) llama_n_batch(ctx_tgt));
-
-        while (kv_budget_prompt < n_prompt_want && try_clear_idle_slot_rs(nullptr, "KV cells for prompts")) {
-            kv_budget_prompt = std::max(0, n_total - kv_cells_held() - n_step_gen);
-        }
-
-        queue_tasks.pop_deferred_tasks(offer);
+        // elastic memory: running slots never need more than they hold and reserve, nothing is preempted
+        mem_offer_waiting(false);
     }
 
     std::vector<common_adapter_lora_info> construct_lora_list(const std::map<int, float> & config) const {
@@ -3862,7 +3530,7 @@ private:
     // now (counting what evicting idle slots frees), and n_rs_need recurrent-state cells
     void defer_task_mem(server_task && task, server_defer_reason reason, int32_t n_kv_need, int32_t n_kv_missing, uint32_t n_rs_need) {
         task.n_kv_need    = n_kv_need;
-        task.n_kv_wait_at = !box ? kv_cells_avail() + std::max(0, n_kv_missing) : 0;
+        task.n_kv_wait_at = 0;
         task.n_rs_need    = n_rs_need;
         defer_task(std::move(task), reason);
     }
@@ -3935,13 +3603,13 @@ private:
                     // held, also while preempted slots wait for room; a task that cannot fit even alone is admitted
                     // when nothing else runs, so that it fails with the usual context size error
                     // wait for a free recurrent-state cell here, because a decode that cannot get one errors every active slot
-                    // the elastic memory: a request takes its state, its input and the most it may generate (the children of
+                    // elastic memory: a request takes its state, its input and the most it may generate (the children of
                     // a parent task a state and an output each, they share its input); a request that does not fit even
                     // in the empty memory, or is longer than the context window of the model, is rejected at arrival
                     const int32_t n_children = task.is_parent() ? (int32_t) task.child_tasks.size() : 0;
                     int32_t n_box_out = 0;
                     int64_t n_box_cost = 0;
-                    if (box) {
+                    {
                         const auto    info    = box_info();
                         const int32_t n_input = task.n_tokens();
 
@@ -3974,10 +3642,10 @@ private:
                         n_box_cost = std::max<int64_t>(1, n_most - n_reuse/bt);
                     }
 
-                    const bool     is_rs      = (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) && !box;
+                    const bool     is_rs      = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
                     const uint32_t n_rs_cells = is_rs ? llama_n_rs_cells(ctx_tgt) : 0;
                     const uint32_t n_rs_new   = !is_rs ? 0 : (slot->prompt.n_tokens() > 0 ? 0 : 1)
-                                                               + (task.is_parent() ? (uint32_t) task.child_tasks.size() : 0);
+                                                           + (task.is_parent() ? (uint32_t) task.child_tasks.size() : 0);
 
                     if (is_rs && n_rs_new > n_rs_cells) {
                         SRV_ERR("task needs %u recurrent-state cells but only %u exist, id_task = %d\n", n_rs_new, n_rs_cells, id_task);
@@ -3992,8 +3660,8 @@ private:
                     const int32_t n_gen  = kv_gen_expected(task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict);
                     const int32_t n_need = std::max(0, task.n_tokens() - n_reuse) + n_gen - (slot->prompt.n_tokens() - n_own);
 
-                    // the elastic memory is not predicted: see the admission below
-                    const bool kv_predict = !box;
+                    // elastic memory is not predicted
+                    const bool kv_predict = true;
 
                     // the running slots keep the room they are expected to generate into, see kv_cells_growth()
                     const int32_t n_growth = kv_cells_growth();
@@ -4052,9 +3720,10 @@ private:
                         }
                     }
 
-                    // the elastic memory admits a request with all it takes, or not at all: idle slots give way to it, since a
-                    // request that runs is worth more than a cached prompt, and it waits when the running ones hold the memory
-                    if (box) {
+                    // elastic memory: admit a request with all it takes, or not at all: idle slots give way to it,
+                    // since a request that runs is worth more than a cached prompt, and it waits when the running ones
+                    // hold the memory
+                    {
                         llama_memory_t mem = llama_get_memory(ctx_tgt);
 
                         const auto admit = [&]() {
@@ -4094,19 +3763,15 @@ private:
                     if (task.is_parent()) {
                         if (!launch_slots_with_parent_task(*slot, child_slots, std::move(task))) {
                             SRV_ERR("failed to launch slot with parent task, id_task = %d\n", id_task);
-                            if (box) {
-                                for (server_slot * s : child_slots) {
-                                    box_admission_undo(*s);
-                                }
-                                box_admission_undo(*slot);
+                            for (server_slot * s : child_slots) {
+                                box_admission_undo(*s);
                             }
+                            box_admission_undo(*slot);
                             break; // drop the task
                         }
                     } else if (!launch_slot_with_task(*slot, std::move(task))) {
                         SRV_ERR("failed to launch slot with task, id_task = %d\n", id_task);
-                        if (box) {
-                            box_admission_undo(*slot);
-                        }
+                        box_admission_undo(*slot);
                         break; // drop the task
                     }
 
@@ -5953,14 +5618,7 @@ private:
 
     // context size of a single slot, capped by the training context of the model
     int n_ctx_slot() const {
-        // the elastic memory: input and output of a request within the context window of the model
-        if (box) {
-            return llama_model_n_ctx_train(model_tgt);
-        }
-
-        const int res = llama_n_ctx_seq(ctx_tgt);
-
-        return std::min(res, llama_model_n_ctx_train(model_tgt));
+        return llama_model_n_ctx_train(model_tgt);
     }
 
     server_response_reader get_response_reader() {
@@ -6550,7 +6208,7 @@ static json get_res_props(const server_context_meta & meta, const common_params 
 
     json props = {
         { "default_generation_settings", default_generation_settings_for_props },
-        { "total_slots",                 params.n_parallel },
+        { "total_slots",                 (int) slots.size() },
         { "model_alias",                 meta.model_name },
         { "model_ftype",                 meta.model_ftype },
         { "model_path",                  meta.model_path },
