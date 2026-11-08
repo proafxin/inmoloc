@@ -153,3 +153,4 @@ bench_out/*
 # core dumps
 core
 core.[0-9]*
+.env
