@@ -1,5 +1,3 @@
-x-models: &models
-  - ${MODELS_DIR:-/home/masterkenway/models}:/models:ro
 
 x-gpu: &gpu
   resources:
@@ -8,6 +6,9 @@ x-gpu: &gpu
         - driver: nvidia
           count: all
           capabilities: [gpu]
+
+x-models: &models
+  - /home/masterkenway/models:/models:ro
 
 services:
   qwen:
@@ -62,9 +63,9 @@ services:
     ipc: host
     command:
       - --model
-      - /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-Q8_0.gguf
+      - /models/PaddleOCR-VL-1.6-GGUF.gguf
       - --mmproj
-      - /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-GGUF-mmproj.gguf
+      - /models/PaddleOCR-VL-1.6-GGUF-mmproj.gguf
       - --chat-template-file
       - /models/PaddleOCR-VL-1.6/chat_template.jinja
       - -ngl
@@ -200,9 +201,9 @@ services:
     ipc: host
     command:
       - --model
-      - /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-Q8_0.gguf
+      - /models/PaddleOCR-VL-1.6-GGUF.gguf
       - --mmproj
-      - /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-GGUF-mmproj.gguf
+      - /models/PaddleOCR-VL-1.6-GGUF-mmproj.gguf
       - --chat-template-file
       - /models/PaddleOCR-VL-1.6/chat_template.jinja
       - -ngl

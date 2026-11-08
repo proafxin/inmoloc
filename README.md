@@ -74,25 +74,93 @@ Setup: same RTX 5090 Laptop at different settings, `Kvark-Sparkle-1.0-27B-Q4_K_M
 
 ### OCR vision benchmark: PaddleOCR-VL-1.6 at 300 DPI
 
+#### Debian 13 (native)
+
 Setup: same RTX 5090 Laptop, `PaddleOCR-VL-1.6-Q8_0` model + mmproj, 257 pages rendered at 300 DPI (322 KiB median PNG), `max_tokens 1024`, one image per request.
 
 inmoloc: `--vram-budget 2.5G --max-output-tokens 1024`; llama.cpp: `-c 24576 --parallel 6 --cache-ram 0 --n-predict 1024`.
 
-| Level | inmoloc wall s | inmoloc tok/s | inmoloc GPU MiB | llama.cpp wall s | llama.cpp tok/s | llama.cpp GPU MiB |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | 0.8 | 392 | 2262 | 0.9 | 367 | 2248 |
-| 2 | 4.4 | 244 | 2262 | 2.1 | 514 | 2248 |
-| 4 | 2.3 | 470 | 2262 | 2.9 | 373 | 2248 |
-| 8 | 5.5 | 664 | 2262 | 6.7 | 560 | 2248 |
-| 16 | 11.0 | 866 | 2262 | 12.5 | 772 | 2248 |
-| 32 | 20.2 | 809 | 2262 | 23.9 | 684 | 2248 |
-| 64 | 40.4 | 834 | 2262 | 47.0 | 692 | 2248 |
-| 128 | 86.8 | 701 | 2262 | 93.2 | 640 | 2248 |
+Throughput (tok/s, higher is better):
+
+| Requests | inmoloc | llama.cpp | inmoloc / llama.cpp |
+| ---: | ---: | ---: | ---: |
+| 1 | 392 | 367 | 1.07x |
+| 2 | 244 | 514 | 0.47x |
+| 4 | 470 | 373 | 1.26x |
+| 8 | 664 | 560 | 1.19x |
+| 16 | 866 | 772 | 1.12x |
+| 32 | 809 | 684 | 1.18x |
+| 64 | 834 | 692 | 1.21x |
+| 128 | 701 | 640 | 1.10x |
+
+Runtime (wall s, lower is better):
+
+| Requests | inmoloc | llama.cpp | inmoloc / llama.cpp |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.8 | 0.9 | 0.89x |
+| 2 | 4.4 | 2.1 | 2.10x |
+| 4 | 2.3 | 2.9 | 0.79x |
+| 8 | 5.5 | 6.7 | 0.82x |
+| 16 | 11.0 | 12.5 | 0.88x |
+| 32 | 20.2 | 23.9 | 0.85x |
+| 64 | 40.4 | 47.0 | 0.86x |
+| 128 | 86.8 | 93.2 | 0.93x |
+
+GPU VRAM: inmoloc ~2262 MiB, llama.cpp ~2248 MiB across all levels (inmoloc's vision encoder no longer pinned to GPU).
 
 - Peak tok/s: inmoloc ~866 at level 16 vs llama.cpp ~772 at level 16 (~12% higher)
 - At level 128: inmoloc 701 tok/s / 86.8 s vs llama.cpp 640 tok/s / 93.2 s (~10% faster)
-- VRAM: essentially identical (~2260 MiB both), inmoloc's vision encoder no longer pinned to GPU
 - inmoloc's level-2 outlier (4.4 s vs llama.cpp 2.1 s) is warmup on the first concurrent batch; throughput rises once the encoder is warm
+
+#### Windows 11 WSL2 (Debian) + Docker NVIDIA runtime
+
+Setup: Windows 11 WSL2 Debian, Docker with NVIDIA runtime, `PaddleOCR-VL-1.6-Q8_0` model + mmproj, pages rendered at 300 DPI with `bench_ocr.py` (`--pdf-dir /home/masterkenway/input`, `--pages 257 --seed 7 --dpi 300 --levels 1 2 4 8 16 32 64 128 --per-slot 1 --min-requests 1`, `--prompt "OCR:"`, `--max_tokens 1024`), 211 pages rendered (281 KiB median PNG), one image per request.
+
+llama.cpp (`paddleocr-llamacpp`, port 8111): container config to match the baseline (`-c 24576 --parallel 6 --cache-ram 0 --n-predict 1024`). inmoloc numbers pending.
+
+Throughput (tok/s, higher is better):
+
+| Requests | inmoloc | llama.cpp | inmoloc / llama.cpp |
+| ---: | ---: | ---: | ---: |
+| 1 | TBD | 333 | TBD |
+| 2 | TBD | 151 | TBD |
+| 4 | TBD | 356 | TBD |
+| 8 | TBD | 697 | TBD |
+| 16 | TBD | 625 | TBD |
+| 32 | TBD | 573 | TBD |
+| 64 | TBD | 589 | TBD |
+| 128 | TBD | 572 | TBD |
+
+Runtime (wall s, lower is better):
+
+| Requests | inmoloc | llama.cpp | inmoloc / llama.cpp |
+| ---: | ---: | ---: | ---: |
+| 1 | TBD | 1.7 | TBD |
+| 2 | TBD | 2.3 | TBD |
+| 4 | TBD | 8.9 | TBD |
+| 8 | TBD | 8.4 | TBD |
+| 16 | TBD | 14.0 | TBD |
+| 32 | TBD | 28.4 | TBD |
+| 64 | TBD | 54.6 | TBD |
+| 128 | TBD | 71.7 | TBD |
+
+GPU VRAM: pending (`bench_ocr.py` reports container-attributed GPU memory via `nvidia-smi --query-compute-apps=pid,used_memory` matched to `docker top` PIDs; in WSL2 this can return `[N/A]`/no match).
+
+Host RAM (MiB):
+
+| Requests | inmoloc | llama.cpp |
+| ---: | ---: | ---: |
+| 1 | TBD | 764 |
+| 2 | TBD | 934 |
+| 4 | TBD | 1205 |
+| 8 | TBD | 1597 |
+| 16 | TBD | 2004 |
+| 32 | TBD | 2621 |
+| 64 | TBD | 4622 |
+| 128 | TBD | 5927 |
+
+- Base llama.cpp run from `bench_out/paddleocr-llamacpp_summary.json` (2026-11-08). Level 128 ran 82/128 requests because the input set produced 211 distinct pages for the requested 257-page workload; treat level 128 and cross-setup comparisons with that caveat.
+- Host RAM is from `docker stats`. WSL2/Docker NVIDIA runtime changes overhead vs native Linux; compare inmoloc vs llama.cpp within this same setup.
 
 ## Usage
 
