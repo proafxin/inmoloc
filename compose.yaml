@@ -1,5 +1,7 @@
+# MODEL_ROOTDIR is the host directory containing all model files/folders.
+# It is mounted read-only into containers as /models, so container paths stay stable.
 x-models: &models
-  - ${MODELS_DIR:-/home/masterkenway/models}:/models:ro
+  - ${MODEL_ROOTDIR:-C:/Users/Masum/Documents/models}:/models:ro
 
 x-gpu: &gpu
   resources:
