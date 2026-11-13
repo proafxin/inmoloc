@@ -3642,17 +3642,6 @@ private:
                         n_box_cost = std::max<int64_t>(1, n_most - n_reuse/bt);
                     }
 
-                    const bool     is_rs      = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
-                    const uint32_t n_rs_cells = is_rs ? llama_n_rs_cells(ctx_tgt) : 0;
-                    const uint32_t n_rs_new   = !is_rs ? 0 : (slot->prompt.n_tokens() > 0 ? 0 : 1)
-                                                           + (task.is_parent() ? (uint32_t) task.child_tasks.size() : 0);
-
-                    if (is_rs && n_rs_new > n_rs_cells) {
-                        SRV_ERR("task needs %u recurrent-state cells but only %u exist, id_task = %d\n", n_rs_new, n_rs_cells, id_task);
-                        send_error(task, "Request needs more parallel sequences than the server processes at once.", ERROR_TYPE_INVALID_REQUEST);
-                        break;
-                    }
-
                     const int32_t n_total = kv_cells_total();
 
                     // the prompt and what the task is expected to generate; the cells of the slot past what it provides are
@@ -3675,12 +3664,11 @@ private:
                     {
                         const int32_t n_kv_missing = !kv_predict || !any_running ? 0 :
                             kv_cells_committed() + n_growth + n_need - n_total - kv_cells_evictable(slot, donor);
-                        const bool rs_missing = is_rs && n_rs_cells_held() + n_rs_new > n_rs_cells + n_rs_cells_evictable(slot, donor);
 
-                        if (rs_missing || n_kv_missing > 0) {
-                            SRV_DBG("not enough free memory (committed = %d, prompt = %d, reused = %d, total = %d, rs cell missing = %d), defer task, id_task = %d\n",
-                                    kv_cells_committed(), task.n_tokens(), n_reuse, n_total, (int) rs_missing, id_task);
-                            defer_task_mem(std::move(task), rs_missing ? SERVER_DEFER_RECURRENT_CELL : SERVER_DEFER_KV_CELLS, n_need, n_kv_missing, n_rs_new);
+                        if (n_kv_missing > 0) {
+                            SRV_DBG("not enough free memory (committed = %d, prompt = %d, reused = %d, total = %d), defer task, id_task = %d\n",
+                                    kv_cells_committed(), task.n_tokens(), n_reuse, n_total, id_task);
+                            defer_task_mem(std::move(task), SERVER_DEFER_KV_CELLS, n_need, n_kv_missing, 0);
                             break;
                         }
                     }
@@ -3698,10 +3686,6 @@ private:
                     }
 
                     // the task fits once idle slots give up their memory
-                    if (is_rs) {
-                        while (n_rs_cells_held() + n_rs_new > n_rs_cells && try_clear_idle_slot_rs(slot, "a recurrent-state cell", donor)) {
-                        }
-                    }
                     if (kv_predict) {
                         while (kv_cells_committed() + n_growth + n_need > n_total && try_clear_idle_slot_rs(slot, "KV cells", donor)) {
                         }
@@ -3710,12 +3694,11 @@ private:
                     // a cell held by several idle slots is freed only with the last one
                     {
                         const int32_t n_kv_missing = !kv_predict || !any_running ? 0 : kv_cells_committed() + n_growth + n_need - n_total;
-                        const bool rs_missing = is_rs && n_rs_cells_held() + n_rs_new > n_rs_cells;
 
-                        if (rs_missing || n_kv_missing > 0) {
+                        if (n_kv_missing > 0) {
                             SRV_DBG("not enough free memory after evicting idle slots (committed = %d, prompt = %d, reused = %d, total = %d), defer task, id_task = %d\n",
                                     kv_cells_committed(), task.n_tokens(), n_reuse, n_total, id_task);
-                            defer_task_mem(std::move(task), rs_missing ? SERVER_DEFER_RECURRENT_CELL : SERVER_DEFER_KV_CELLS, n_need, n_kv_missing, n_rs_new);
+                            defer_task_mem(std::move(task), SERVER_DEFER_KV_CELLS, n_need, n_kv_missing, 0);
                             break;
                         }
                     }
