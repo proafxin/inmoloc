@@ -6208,7 +6208,7 @@ static json get_res_props(const server_context_meta & meta, const common_params 
 
     json props = {
         { "default_generation_settings", default_generation_settings_for_props },
-        { "total_slots",                 (int) slots.size() },
+        { "total_slots",                 1 },
         { "model_alias",                 meta.model_name },
         { "model_ftype",                 meta.model_ftype },
         { "model_path",                  meta.model_path },
