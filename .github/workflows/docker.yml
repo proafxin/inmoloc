@@ -39,13 +39,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Free disk space
+      - name: Check if version changed in pyproject.toml
+        id: version_changed
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          before="${{ github.event.before }}"
+          after="${{ github.event.after }}"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          before_version="$(git show "$before:pyproject.toml" 2>/dev/null | sed -nE 's/^version = "([^"]+)"/\1/p' | head -1)"
+          after_version="$(git show "$after:pyproject.toml" 2>/dev/null | sed -nE 's/^version = "([^"]+)"/\1/p' | head -1)"
+          if [ "$before_version" = "$after_version" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Version unchanged ($before_version -> $after_version), skipping"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Version changed ($before_version -> $after_version)"
+          fi
+
+      - if: steps.version_changed.outputs.changed == 'true'
+        name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
           df -h /
 
-      - name: Read version from pyproject.toml
+      - if: steps.version_changed.outputs.changed == 'true'
+        name: Read version from pyproject.toml
         id: version
         run: |
           version="$(sed -nE 's/^version = "([^"]+)"/\1/p' pyproject.toml | head -1)"
@@ -55,15 +80,18 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - if: steps.version_changed.outputs.changed == 'true'
+        uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      - if: steps.version_changed.outputs.changed == 'true'
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check if image already pushed
+      - if: steps.version_changed.outputs.changed == 'true'
+        name: Check if image already pushed
         id: check
         run: |
           version="${{ steps.version.outputs.version }}"
@@ -76,8 +104,8 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Tags
-        if: steps.check.outputs.skip != 'true'
+      - if: steps.version_changed.outputs.changed == 'true' && steps.check.outputs.skip != 'true'
+        name: Tags
         id: tags
         run: |
           version="${{ steps.version.outputs.version }}"
@@ -90,8 +118,8 @@ jobs:
           echo "dev=$dev" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/build-push-action@v6
-        if: steps.check.outputs.skip != 'true'
+      - if: steps.version_changed.outputs.changed == 'true' && steps.check.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
