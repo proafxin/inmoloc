@@ -23,7 +23,9 @@ endif()
 message(STATUS "libllama version: ${LLAMA_VERSION}")
 
 ### inmoloc version: the version of the project and its tools, LLAMA_VERSION above is the version of the libllama API
-set(INMOLOC_VERSION_BASE "1.0.1")
+# pyproject.toml is the canonical version source; CMake reads it here so the C++ binaries report the same version
+file(STRINGS "${CMAKE_SOURCE_DIR}/pyproject.toml" _inmoloc_pyproject_version LINE REGEX "^version = \"([^\"]+)\"")
+string(REGEX REPLACE "^version = \"([^\"]+)\"" "\\1" INMOLOC_VERSION_BASE "${_inmoloc_pyproject_version}")
 
 if (LLAMA_BUILD_IS_DEV)
     set(INMOLOC_VERSION "${INMOLOC_VERSION_BASE}-dev")

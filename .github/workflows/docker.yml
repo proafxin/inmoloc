@@ -1,9 +1,9 @@
 name: Docker
 
-# publishes ghcr.io/proafxin/inmoloc on a version tag (v0.1.0 -> :0.1.0 and :latest), or by hand
+# publishes ghcr.io/proafxin/inmoloc CUDA and CPU images when the version in pyproject.toml changes
 on:
   push:
-    tags: ["v*"]
+    paths: ["pyproject.toml"]
   workflow_dispatch:
 
 concurrency:
@@ -21,7 +21,6 @@ jobs:
   image:
     name: ${{ matrix.name }} image
     runs-on: ubuntu-24.04
-    # six CUDA architectures take a few hours on a hosted runner
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -38,38 +37,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # the version and commit the binaries report come from the git history
           fetch-depth: 0
 
-      # the CUDA development image and the build need more disk than a runner has free
       - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
           df -h /
 
+      - name: Read version from pyproject.toml
+        id: version
+        run: |
+          version="$(sed -nE 's/^version = "([^"]+)"/\1/p' pyproject.toml | head -1)"
+          if [ -z "$version" ]; then
+            echo "::error::no version found in pyproject.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Tags
         id: tags
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            version="${GITHUB_REF#refs/tags/v}"
-            # the binaries report the version set in CMakeLists.txt: a tag must match it
-            cmake_version="$(sed -nE 's/^set\(INMOLOC_VERSION_BASE "([^"]+)"\)/\1/p' CMakeLists.txt)"
-            if [ "$version" != "$cmake_version" ]; then
-              echo "::error::tag v$version does not match INMOLOC_VERSION_BASE $cmake_version in CMakeLists.txt"
-              exit 1
-            fi
-            if [ -n "${{ matrix.suffix }}" ]; then latest="cpu"; else latest="latest"; fi
-            tags="$IMAGE:${version}${{ matrix.suffix }},$IMAGE:${latest}"
-            dev=OFF
-          else
-            version="$(git rev-parse --short HEAD)"
-            tags="$IMAGE:sha-${version}${{ matrix.suffix }}"
-            dev=ON
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "dev=$dev" >> "$GITHUB_OUTPUT"
+          version="${{ steps.version.outputs.version }}"
+          if [ -n "${{ matrix.suffix }}" ]; then latest="cpu"; else latest="latest"; fi
+          tags="$IMAGE:${version}${matrix.suffix},$IMAGE:${latest}"
+          tags="$tags,$IMAGE:sha-${{ github.sha }}${matrix.suffix}"
+          dev=ON
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "dev=$dev" >> "$GITHUB_OUTPUT"
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
@@ -89,7 +84,7 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
-            APP_VERSION=${{ steps.tags.outputs.version }}
+            APP_VERSION=${{ steps.version.outputs.version }}
             APP_REVISION=${{ github.sha }}
             BUILD_DATE=${{ steps.tags.outputs.date }}
             BUILD_IS_DEV=${{ steps.tags.outputs.dev }}
