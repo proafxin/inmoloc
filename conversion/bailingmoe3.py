@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import re
-
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("BailingMoeV3ForCausalLM")
@@ -21,7 +22,7 @@ class BailingMoeV3Model(TextModel):
     _experts: list[dict[str, Tensor]] | None = None
     _main_layers: int | None = None
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         nextn_layers = self.hparams.get("num_nextn_predict_layers", 0) or 0
         if self.no_mtp:
@@ -33,15 +34,17 @@ class BailingMoeV3Model(TextModel):
         type(self)._main_layers = self.hparams["num_hidden_layers"]
         return super().index_tensors(remote_hf_model_id=remote_hf_model_id)
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_gpt2()
 
     def is_full_attention(self, bid: int) -> bool:
         n_layer = self.hparams["num_hidden_layers"]
         layer_group_size = self.hparams["layer_group_size"]
-        return bid >= n_layer or (bid + 1) % layer_group_size == 0 or bid >= n_layer // layer_group_size * layer_group_size
+        return (
+            bid >= n_layer or (bid + 1) % layer_group_size == 0 or bid >= n_layer // layer_group_size * layer_group_size
+        )
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         if not self.hparams.get("no_kda_lora", False):
             raise ValueError("BailingMoeV3 KDA LoRA projections are not supported")
         if not self.hparams.get("kda_safe_gate", False):
@@ -83,7 +86,7 @@ class BailingMoeV3Model(TextModel):
             values = self.hparams.get(key)
             if values is None:
                 return None
-            values = [0.0 if value is None else float(value) for value in values[:self.block_count]]
+            values = [0.0 if value is None else float(value) for value in values[: self.block_count]]
             return values + [0.0] * (self.block_count - len(values))
 
         if (values := clamp_limits("expert_swiglu_limit_list")) is not None:
@@ -94,7 +97,7 @@ class BailingMoeV3Model(TextModel):
         if not self.no_mtp and (nextn_layers := self.hparams.get("num_nextn_predict_layers", 0)):
             self.gguf_writer.add_nextn_predict_layers(nextn_layers)
 
-    def prepare_metadata(self, vocab_only: bool):
+    def prepare_metadata(self, vocab_only: bool) -> None:
         from_dir = self.fname_out.is_dir()
         super().prepare_metadata(vocab_only=vocab_only)
 
@@ -103,8 +106,14 @@ class BailingMoeV3Model(TextModel):
 
         output_type: str = self.ftype.name.partition("_")[2]
         fname_default: str = gguf.naming_convention(
-            self.metadata.name, self.metadata.basename, self.metadata.finetune,
-            self.metadata.version, size_label=None, output_type=output_type, model_type=None)
+            self.metadata.name,
+            self.metadata.basename,
+            self.metadata.finetune,
+            self.metadata.version,
+            size_label=None,
+            output_type=output_type,
+            model_type=None,
+        )
         self.fname_out = self.fname_out.parent / f"mtp-{fname_default}.gguf"
 
     @classmethod
@@ -121,15 +130,22 @@ class BailingMoeV3Model(TextModel):
 
         if is_mtp and cls.no_mtp:
             return None
-        if cls.mtp_only and not is_mtp and name not in (
-            "model.word_embeddings.weight", "model.norm.weight", "lm_head.weight",
+        if (
+            cls.mtp_only
+            and not is_mtp
+            and name
+            not in {
+                "model.word_embeddings.weight",
+                "model.norm.weight",
+                "lm_head.weight",
+            }
         ):
             return None
 
         return super().filter_tensors((name, gen))
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        if name.endswith((".q_conv1d.weight", ".k_conv1d.weight", ".v_conv1d.weight")) and data_torch.ndim in (2, 3):
+        if name.endswith((".q_conv1d.weight", ".k_conv1d.weight", ".v_conv1d.weight")) and data_torch.ndim in {2, 3}:
             d_inner = data_torch.shape[0]
             d_conv = data_torch.shape[-1]
             data_torch = data_torch.reshape(1, d_inner, 1, d_conv)
@@ -143,7 +159,8 @@ class BailingMoeV3Model(TextModel):
         if name.endswith(".attention.f_proj.weight"):
             assert bid is not None
             if self.is_full_attention(bid):
-                raise ValueError(f"unexpected f_proj on full-attention layer {bid}")
+                msg = f"unexpected f_proj on full-attention layer {bid}"
+                raise ValueError(msg)
             name = self.format_tensor_name(gguf.MODEL_TENSOR.SSM_F_A, bid)
 
         if name.endswith(".attention.g_proj.weight"):
@@ -185,9 +202,10 @@ class BailingMoeV3Model(TextModel):
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
         if self._experts is not None:
             experts = [name for layer in self._experts for name in layer]
             if experts:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)

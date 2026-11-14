@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import json
 import sys
-
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, SentencePieceTokenTypes, TextModel, gguf, logger
+import pathlib
 
-from .llama import LlamaModel
+from conversion.base import ModelBase, SentencePieceTokenTypes, TextModel, gguf, logger
+from conversion.llama import LlamaModel
 
 
 @ModelBase.register("ArcticForCausalLM")
@@ -20,30 +22,29 @@ from .llama import LlamaModel
 class ArcticModel(TextModel):
     model_arch = gguf.MODEL_ARCH.ARCTIC
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         # The reason for using a custom implementation here is that the
         # snowflake-arctic-instruct model redefined tokens 31998 and 31999 from
         # tokenizer.model and used them as BOS and EOS instead of adding new tokens.
         from sentencepiece import SentencePieceProcessor
 
-        tokenizer_path = self.dir_model / 'tokenizer.model'
+        tokenizer_path = self.dir_model / "tokenizer.model"
 
         if not tokenizer_path.is_file():
-            logger.error(f'Error: Missing {tokenizer_path}')
+            logger.error(f"Error: Missing {tokenizer_path}")
             sys.exit(1)
 
         # Read the whole vocabulary from the tokenizer.model file
         tokenizer = SentencePieceProcessor()
         tokenizer.LoadFromFile(str(tokenizer_path))
 
-        vocab_size = self.hparams.get('vocab_size', tokenizer.vocab_size())
+        vocab_size = self.hparams.get("vocab_size", tokenizer.vocab_size())
 
-        tokens: list[bytes] = [f"[PAD{i}]".encode("utf-8") for i in range(vocab_size)]
+        tokens: list[bytes] = [f"[PAD{i}]".encode() for i in range(vocab_size)]
         scores: list[float] = [-10000.0] * vocab_size
         toktypes: list[int] = [SentencePieceTokenTypes.UNUSED] * vocab_size
 
         for token_id in range(tokenizer.vocab_size()):
-
             piece = tokenizer.IdToPiece(token_id)
             text = piece.encode("utf-8")
             score = tokenizer.GetScore(token_id)
@@ -64,9 +65,9 @@ class ArcticModel(TextModel):
 
         # Use the added_tokens_decoder field from tokeniser_config.json as the source
         # of information about added/redefined tokens and modify them accordingly.
-        tokenizer_config_file = self.dir_model / 'tokenizer_config.json'
+        tokenizer_config_file = self.dir_model / "tokenizer_config.json"
         if tokenizer_config_file.is_file():
-            with open(tokenizer_config_file, "r", encoding="utf-8") as f:
+            with pathlib.Path(tokenizer_config_file).open("r", encoding="utf-8") as f:
                 tokenizer_config_json = json.load(f)
 
                 if "added_tokens_decoder" in tokenizer_config_json:
@@ -74,7 +75,7 @@ class ArcticModel(TextModel):
                     for token_id, token_json in added_tokens_decoder.items():
                         token_id = int(token_id)
                         if token_id >= vocab_size:
-                            logger.debug(f'ignore token {token_id}: id is out of range, max={vocab_size - 1}')
+                            logger.debug(f"ignore token {token_id}: id is out of range, max={vocab_size - 1}")
                             continue
 
                         token_content = token_json["content"]
@@ -83,14 +84,16 @@ class ArcticModel(TextModel):
 
                         # Map unk_token to UNKNOWN, other special tokens to CONTROL
                         # Set the score to 0.0 as in the original tokenizer.model
-                        if ("special" in token_json) and token_json["special"]:
+                        if token_json.get("special"):
                             if token_content == tokenizer_config_json["unk_token"]:
                                 token_type = SentencePieceTokenTypes.UNKNOWN
                             else:
                                 token_type = SentencePieceTokenTypes.CONTROL
                             token_score = 0.0
 
-                        logger.info(f"Setting added token {token_id} to '{token_content}' (type: {token_type}, score: {token_score:.2f})")
+                        logger.info(
+                            f"Setting added token {token_id} to '{token_content}' (type: {token_type}, score: {token_score:.2f})"
+                        )
                         tokens[token_id] = token_content.encode("utf-8")
                         toktypes[token_id] = token_type
                         scores[token_id] = token_score
@@ -104,7 +107,7 @@ class ArcticModel(TextModel):
         special_vocab = gguf.SpecialVocab(self.dir_model, n_vocab=len(tokens))
         special_vocab.add_to_gguf(self.gguf_writer)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         hparams = self.hparams
         self.gguf_writer.add_vocab_size(hparams["vocab_size"])
@@ -153,11 +156,12 @@ class ArcticModel(TextModel):
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
 
         if self._experts is not None:
             # flatten `list[dict[str, Tensor]]` into `list[str]`
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)

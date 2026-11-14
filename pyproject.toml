@@ -1,67 +1,171 @@
 [project]
-name = "llama-cpp-scripts"
-description = "Scripts that ship with llama.cpp"
-keywords = ["ggml", "gguf", "llama.cpp"]
-version = "0.0.0"
-dynamic = ["classifiers"]
+name = "inmoloc"
+version = "1.1.0"
+description = "Python tools of inmoloc: the GGUF library and the model converters"
+keywords = ["ggml", "gguf", "llama.cpp", "inmoloc"]
 readme = "README.md"
-authors = [{name = "GGML", email = "ggml@ggml.ai"}]
-requires-python = '>=3.10,<3.15'
-dependencies = [
-    'numpy (>=2.2.6,<3.0.0)',
-    'sentencepiece (>=0.1.98,<0.3.0)',
-    'transformers (==4.57.6)',
-    'protobuf (>=4.21.0,<5.0.0)',
-    'torch (>=2.6.0,<3.0.0)',
-    'gguf @ ./gguf-py',
+license = "MIT"
+authors = [
+    {name = "Masum Billal", email = "billalmasum93@gmail.com"},
+    {name = "GGML", email = "ggml@ggml.ai"},
 ]
+requires-python = ">=3.10,<4"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
+dependencies = [
+    "numpy",
+    "pyyaml",
+    "requests",
+    "tqdm",
+]
 
-[project.urls]
-homepage = "https://ggml.ai"
-repository = "https://github.com/ggml-org/llama.cpp"
+[project.optional-dependencies]
+# the model converters, the multimodal projector converters and the model-conversion scripts
+convert = [
+    "accelerate",
+    "huggingface-hub",
+    "pillow",
+    "protobuf",
+    "sentence-transformers",
+    "sentencepiece",
+    "torch",
+    "torchvision; platform_machine != 's390x'",
+    "transformers",
+]
+# gguf-editor-gui and the jinja template tester
+gui = [
+    "jinja2",
+    "PySide6; python_version < '4'",
+]
 
 [project.scripts]
-llama-convert-hf-to-gguf = "convert_hf_to_gguf:main"
-llama-convert-lora-to-gguf = "convert_lora_to_gguf:main"
-llama-convert-llama-ggml-to-gguf = "convert_llama_ggml_to_gguf:main"
-llama-ggml-vk-generate-shaders = "ggml_vk_generate_shaders:main"
+gguf-convert-endian = "gguf.scripts.gguf_convert_endian:main"
+gguf-dump = "gguf.scripts.gguf_dump:main"
+gguf-editor-gui = "gguf.scripts.gguf_editor_gui:main"
+gguf-hash = "gguf.scripts.gguf_hash:main"
+gguf-new-metadata = "gguf.scripts.gguf_new_metadata:main"
+gguf-set-metadata = "gguf.scripts.gguf_set_metadata:main"
 
-[tool.poetry]
-packages = [
-    { include = "*.py", from = "." },
-    { include = "conversion", from = "." },
+[project.urls]
+repository = "https://github.com/proafxin/inmoloc"
+
+[dependency-groups]
+# development: tests of the Python code, type checks, hooks, and the tokenizer and grammar example tools
+dev = [
+    "cffi",
+    "coverage",
+    "docstring_parser",
+    "mypy",
+    "pre-commit",
+    "pydantic",
+    "pytest",
+    "pytest-xdist",
+]
+# the server tests and the multimodal tests
+test = [
+    "aiohttp",
+    "filelock",
+    "jiwer",
+    "openai",
+    "prometheus-client",
+    "pytest",
+    "pytest-xdist",
+    "rapidfuzz",
+    "sacrebleu",
+    "wget",
+]
+# the server, tool and llama-bench benchmarks
+bench = [
+    "GitPython",
+    "datasets>=5.2.0",
+    "matplotlib",
+    "openai>=3.51.0",
+    "pandas",
+    "prometheus-client",
+    "seaborn",
+    "tabulate",
+    "typer>=0.29.1",
 ]
 
-[tool.poetry.dependencies]
-torch = [
-    { version = "==2.11.0", source = "pypi", markers = "sys_platform == 'darwin'" },
-    { version = "==2.11.0+cpu", source = "pytorch", markers = "sys_platform == 'linux'" },
-    { version = "==2.11.0", source = "pypi", markers = "sys_platform == 'win32'" },
+[tool.ruff]
+line-length = 120
+exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    "*.egg-info",
+    ".pytest_cache",
+    "node_modules",
+    "ggml",
+    "models",
+    "tools/ui",
+    "vendor",
 ]
 
-[tool.poetry.group.dev.dependencies]
-pytest = "~=8.3.3"
+[tool.ruff.lint]
+select = ["ALL"]
+preview = true
 
-# Force wheel + cpu
-# For discussion and context see https://github.com/python-poetry/poetry#6409
-[[tool.poetry.source]]
-name = "pytorch"
-url = "https://download.pytorch.org/whl/cpu"
-priority = "explicit"
+ignore = [
+    "D", # pydocstyle
+    "CPY", # copyright
+    "RUF029", # async doesn't use await
+    "ARG001", # Unused function argument
+    "FBT", # boolean type
+    "ANN401", # Dynamic typed
+    "SLF001", # private property
+    "PLR0913", # too many arguments
+    "PLR0917", # too many positional arguments
+    "TRY300", # try except else
+    "ERA001", # commented code
+    "COM812", # no trailing comma
+    "TD002", # author in TODO
+    "ANN202", # private return type
+    "PLR6301", # could be method or static
+    "TRY003", # long message outside exception
+    "EM101", # exception literal
+    "INP001", # implicit namespace package
+]
 
-[tool.uv.sources]
-torch = { index = "pytorch" }
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
 
-[[tool.uv.index]]
-name = "pytorch"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.per-file-ignores]
+"*tests/*.py" = [
+    "S101", # asserts allowed in tests
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+allow_untyped_calls = true
+allow_untyped_defs = true
+allow_incomplete_defs = true
+disable_error_code = ["import-untyped"]
+warn_return_any = false
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
+module-name = ["gguf", "conversion"]
+
+# torch is taken CPU-only on Linux: conversion needs no CUDA
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

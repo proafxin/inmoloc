@@ -2,18 +2,18 @@ from __future__ import annotations
 
 import json
 import re
-
 from pathlib import Path
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, TextModel, gguf, logger
-
-from .qwen import QwenModel
+from conversion.base import MmprojModel, ModelBase, TextModel, gguf, logger
+from conversion.qwen import QwenModel
 
 
 @ModelBase.register("HunYuanMoEV1ForCausalLM")
@@ -21,8 +21,9 @@ from .qwen import QwenModel
 class HunYuanMoEModel(TextModel):
     model_arch = gguf.MODEL_ARCH.HUNYUAN_MOE
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
 
         # 1. Get the pre-tokenizer identifier hash
@@ -37,14 +38,14 @@ class HunYuanMoEModel(TextModel):
             if len(token) == 1:
                 continue
             merged = QwenModel.bpe(mergeable_ranks, token, max_rank=rank)
-            if len(merged) == 2: # todo this is an assert in Qwen, why?
-                merges.append(' '.join(map(QwenModel.token_bytes_to_string, merged)))
+            if len(merged) == 2:  # TODO this is an assert in Qwen, why?
+                merges.append(" ".join(map(QwenModel.token_bytes_to_string, merged)))
 
         # 3. Generate the tokens and toktypes lists
         vocab_size = self.hparams["vocab_size"]
         assert tokenizer.vocab_size == vocab_size  # ty: ignore[unresolved-attribute]
         special_tokens = tokenizer.special_tokens  # ty: ignore[unresolved-attribute]
-        reverse_vocab = {id_ : encoded_tok for encoded_tok, id_ in {**vocab, **special_tokens}.items()}
+        reverse_vocab = {id_: encoded_tok for encoded_tok, id_ in {**vocab, **special_tokens}.items()}
         tokens: list[str] = []
         toktypes: list[int] = []
         for i in range(vocab_size):
@@ -70,9 +71,9 @@ class HunYuanMoEModel(TextModel):
         special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=False)
         special_vocab.add_to_gguf(self.gguf_writer)
         # FIX for BOS token: Overwrite incorrect id read from config.json
-        self.gguf_writer.add_bos_token_id(127959) # <|bos|>
+        self.gguf_writer.add_bos_token_id(127959)  # <|bos|>
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         hparams = self.hparams
 
@@ -96,26 +97,29 @@ class HunYuanMoEModel(TextModel):
             # 1000 corresponds to a usable context length of 256k (https://github.com/Tencent-Hunyuan/Hunyuan-A13B/blob/main/report/Hunyuan_A13B_Technical_Report.pdf)
             alpha = self.rope_parameters.get("alpha", 1000)
             base = self.rope_parameters.get("rope_theta", 10000.0)
-            dim = (hparams["hidden_size"] // hparams["num_attention_heads"]) # 128
-            scaled_base = base * (alpha ** (dim / (dim - 2))) # 10000 * (1000 ** (128 / 126)) = 11158839.9251
+            dim = hparams["hidden_size"] // hparams["num_attention_heads"]  # 128
+            scaled_base = base * (alpha ** (dim / (dim - 2)))  # 10000 * (1000 ** (128 / 126)) = 11158839.9251
             self.gguf_writer.add_rope_freq_base(scaled_base)
             self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.NONE)
             self.gguf_writer.add_rope_scaling_factor(1)
             # There is no consistent way to calculate ctx from alpha, and the config is incorrectly set to 32k
-            self.gguf_writer.add_rope_scaling_orig_ctx_len(256 * 1024) # 256k context length
-            self.gguf_writer.add_context_length(256 * 1024) # 256k context length
+            self.gguf_writer.add_rope_scaling_orig_ctx_len(256 * 1024)  # 256k context length
+            self.gguf_writer.add_context_length(256 * 1024)  # 256k context length
 
             # if any of our assumptions about the values are wrong, something has changed and this may need to be updated
-            assert alpha == 1000 and base == 10000.0 and dim == 128 and self.hparams["max_position_embeddings"] in [32 * 1024, 256 * 1024] , \
-                "HunYuan dynamic RoPE scaling assumptions changed, please update the logic or context length manually"
+            assert (
+                alpha == 1000
+                and base == 10000.0
+                and dim == 128
+                and self.hparams["max_position_embeddings"] in {32 * 1024, 256 * 1024}
+            ), "HunYuan dynamic RoPE scaling assumptions changed, please update the logic or context length manually"
 
     _experts: list[dict[str, Tensor]] | None = None
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        if name == "lm_head.weight":
-            if self.hparams.get("tie_word_embeddings", False):
-                logger.info("Skipping tied output layer 'lm_head.weight'")
-                return
+        if name == "lm_head.weight" and self.hparams.get("tie_word_embeddings", False):
+            logger.info("Skipping tied output layer 'lm_head.weight'")
+            return
 
         if name.find("mlp.experts") != -1:
             n_experts = self.find_hparam(["num_local_experts", "num_experts"])
@@ -146,12 +150,13 @@ class HunYuanMoEModel(TextModel):
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
         if self._experts is not None:
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)
 
 
 @ModelBase.register("HunYuanDenseV1ForCausalLM")
@@ -168,7 +173,7 @@ class HunYuanModel(TextModel):
         This is the first entry in eos_token_id when it's a list."""
         gen_cfg_path = self.dir_model / "generation_config.json"
         if gen_cfg_path.is_file():
-            with open(gen_cfg_path, encoding="utf-8") as f:
+            with Path(gen_cfg_path).open(encoding="utf-8") as f:
                 gen_cfg = json.load(f)
             eos = gen_cfg.get("eos_token_id")
             if isinstance(eos, list) and len(eos) >= 2:
@@ -184,7 +189,7 @@ class HunYuanModel(TextModel):
         if eot_id is not None:
             self.gguf_writer.add_eot_token_id(eot_id)
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         if (self.dir_model / "tokenizer.json").is_file():
             tokens, toktypes, tokpre = self.get_vocab_base()
             self.gguf_writer.add_tokenizer_model("gpt2")
@@ -196,12 +201,13 @@ class HunYuanModel(TextModel):
             # guard SpecialVocab so it doesn't try to emit an invalid pad id.
             token_types = None
             if (self.hparams.get("pad_token_id") or 0) < 0:
-                token_types = ('bos', 'eos', 'unk', 'sep', 'cls', 'mask')
+                token_types = ("bos", "eos", "unk", "sep", "cls", "mask")
             special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True, special_token_types=token_types)
             special_vocab.add_to_gguf(self.gguf_writer)
             self._fix_special_tokens()
         else:
             from transformers import AutoTokenizer
+
             tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
 
             # 1. Get the pre-tokenizer identifier hash
@@ -217,13 +223,13 @@ class HunYuanModel(TextModel):
                     continue
                 merged = QwenModel.bpe(mergeable_ranks, token, max_rank=rank)
                 if len(merged) == 2:
-                    merges.append(' '.join(map(QwenModel.token_bytes_to_string, merged)))
+                    merges.append(" ".join(map(QwenModel.token_bytes_to_string, merged)))
 
             # 3. Generate the tokens and toktypes lists
             vocab_size = self.hparams["vocab_size"]
             assert tokenizer.vocab_size == vocab_size  # ty: ignore[unresolved-attribute]
             special_tokens = tokenizer.special_tokens  # ty: ignore[unresolved-attribute]
-            reverse_vocab = {id_ : encoded_tok for encoded_tok, id_ in {**vocab, **special_tokens}.items()}
+            reverse_vocab = {id_: encoded_tok for encoded_tok, id_ in {**vocab, **special_tokens}.items()}
             tokens: list[str] = []
             toktypes: list[int] = []
             for i in range(vocab_size):
@@ -249,11 +255,11 @@ class HunYuanModel(TextModel):
             special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=False)
             special_vocab.add_to_gguf(self.gguf_writer)
             # FIX for BOS token: Overwrite incorrect id read from config.json
-            if self.hparams['hidden_size'] == 4096:
-                self.gguf_writer.add_bos_token_id(127958) # only for 7b dense, fix <|bos|> token
+            if self.hparams["hidden_size"] == 4096:
+                self.gguf_writer.add_bos_token_id(127958)  # only for 7b dense, fix <|bos|> token
             self._fix_special_tokens()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         # Some HunYuanVL variants set num_experts=1 (not real MoE);
         # prevent the parent class from emitting expert_count metadata in that case.
         saved_num_experts = self.hparams.pop("num_experts", None)
@@ -263,7 +269,7 @@ class HunYuanModel(TextModel):
         hparams = self.hparams
 
         # Rope
-        if self.rope_parameters.get("rope_type") in ("dynamic", "xdrope"):
+        if self.rope_parameters.get("rope_type") in {"dynamic", "xdrope"}:
             # HunYuan uses NTK Aware Alpha based scaling. Original implementation: https://www.reddit.com/r/LocalLLaMA/comments/14lz7j5/ntkaware_scaled_rope_allows_llama_models_to_have/
             # 1000 corresponds to a usable context length of 256k (https://github.com/Tencent-Hunyuan/Hunyuan-A13B/blob/main/report/Hunyuan_A13B_Technical_Report.pdf)
             alpha = self.rope_parameters.get("alpha", 50)
@@ -275,18 +281,18 @@ class HunYuanModel(TextModel):
             self.gguf_writer.add_rope_scaling_factor(1)
             if self.rope_parameters.get("rope_type") == "dynamic":
                 # There is no consistent way to calculate ctx from alpha, and the config is incorrectly set to 32k
-                self.gguf_writer.add_rope_scaling_orig_ctx_len(256 * 1024) # 256k context length
-                self.gguf_writer.add_context_length(256 * 1024) # 256k context length
+                self.gguf_writer.add_rope_scaling_orig_ctx_len(256 * 1024)  # 256k context length
+                self.gguf_writer.add_context_length(256 * 1024)  # 256k context length
 
                 # if any of our assumptions about the values are wrong, something has changed and this may need to be updated
-                assert base == 10000.0 and self.hparams["max_position_embeddings"] in [32 * 1024, 256 * 1024] , \
+                assert base == 10000.0 and self.hparams["max_position_embeddings"] in {32 * 1024, 256 * 1024}, (
                     "HunYuan dynamic RoPE scaling assumptions changed, please update the logic or context length manually"
+                )
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        if name == "lm_head.weight":
-            if self.hparams.get("tie_word_embeddings", False):
-                logger.info("Skipping tied output layer 'lm_head.weight'")
-                return
+        if name == "lm_head.weight" and self.hparams.get("tie_word_embeddings", False):
+            logger.info("Skipping tied output layer 'lm_head.weight'")
+            return
 
         yield from super().modify_tensors(data_torch, name, bid)
 
@@ -294,14 +300,14 @@ class HunYuanModel(TextModel):
 @ModelBase.register("HunYuanVLForConditionalGeneration")
 @ModelBase.example("tencent/HunyuanOCR")
 class HunyuanVLVisionModel(MmprojModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         assert self.hparams_vision is not None
         # HunyuanVL uses max_image_size instead of image_size
         if "image_size" not in self.hparams_vision:
             self.hparams_vision["image_size"] = self.hparams_vision.get("max_image_size", 2048)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         assert self.hparams_vision is not None
         vcfg = self.hparams_vision
@@ -314,7 +320,7 @@ class HunyuanVLVisionModel(MmprojModel):
 
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
+        name, _gen = item
 
         if not name.startswith("vit."):
             return None
@@ -331,7 +337,11 @@ class HunyuanVLVisionModel(MmprojModel):
         # force conv weights to F32 or F16 to avoid BF16 IM2COL issues on Metal
         # HunyuanVL emit the ViT -> LLM projection as mm.0/mm.2.
         if ("mm.0." in new_name or "mm.2." in new_name) and new_name.endswith(".weight"):
-            return gguf.GGMLQuantizationType.F16 if self.ftype == gguf.LlamaFileType.MOSTLY_F16 else gguf.GGMLQuantizationType.F32
+            return (
+                gguf.GGMLQuantizationType.F16
+                if self.ftype == gguf.LlamaFileType.MOSTLY_F16
+                else gguf.GGMLQuantizationType.F32
+            )
         return super().tensor_force_quant(name, new_name, bid, n_dims)
 
 
@@ -340,7 +350,7 @@ class HunyuanVLVisionModel(MmprojModel):
 class HunyuanVLTextModel(HunYuanModel):
     model_arch = gguf.MODEL_ARCH.HUNYUAN_VL
 
-    def __init__(self, dir_model: Path, *args, **kwargs):
+    def __init__(self, dir_model: Path, *args, **kwargs) -> None:
         super().__init__(dir_model, *args, **kwargs)
         # transformers 5.13.0 encodes HunyuanVL XD-RoPE as dynamic + mrope_section.
         # Normalize it to avoid the HunYuan dynamic-RoPE context assertion.
@@ -349,7 +359,7 @@ class HunyuanVLTextModel(HunYuanModel):
             self.rope_parameters["type"] = "xdrope"
             self.rope_parameters["xdrope_section"] = list(self.rope_parameters["mrope_section"])
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         # XD-RoPE metadata for the HunyuanVL;
@@ -379,7 +389,7 @@ class HYV3Model(TextModel):
     # Step35Model).
     _n_main_layers: int | None = None
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # NextN/MTP layers are appended past num_hidden_layers; extend the
         # tensor map so the MTP block's tensors resolve to blk.<n>.* names.
@@ -392,10 +402,10 @@ class HYV3Model(TextModel):
         type(self)._n_main_layers = self.hparams["num_hidden_layers"]
         return super().index_tensors(remote_hf_model_id=remote_hf_model_id)
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_gpt2()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_expert_feed_forward_length(self.hparams["moe_intermediate_size"])
         self.gguf_writer.add_expert_shared_feed_forward_length(
@@ -425,8 +435,15 @@ class HYV3Model(TextModel):
             return None
         # --mtp: keep ONLY MTP-block tensors plus the shared embeddings/norm/
         # lm_head (so the resulting GGUF carries just the draft head).
-        if cls.mtp_only and not is_mtp and name not in (
-            "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight",
+        if (
+            cls.mtp_only
+            and not is_mtp
+            and name
+            not in {
+                "model.embed_tokens.weight",
+                "model.norm.weight",
+                "lm_head.weight",
+            }
         ):
             return None
 
@@ -464,9 +481,10 @@ class HYV3Model(TextModel):
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
         if self._experts is not None:
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if experts:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)

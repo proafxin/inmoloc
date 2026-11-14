@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
+from conversion.base import ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register("SmallThinkerForCausalLM")
@@ -15,7 +17,7 @@ from .base import ModelBase, TextModel, gguf, logger
 class SmallThinkerModel(TextModel):
     model_arch = gguf.MODEL_ARCH.SMALLTHINKER
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         if (n_experts := self.hparams.get("moe_num_primary_experts")) is not None:
             self.gguf_writer.add_expert_count(n_experts)
@@ -25,7 +27,7 @@ class SmallThinkerModel(TextModel):
             self.gguf_writer.add_expert_feed_forward_length(moe_intermediate_size)
             self.gguf_writer.add_feed_forward_length(moe_intermediate_size)
             logger.info(f"gguf: expert feed forward length = {moe_intermediate_size}")
-        if (self.hparams.get('moe_primary_router_apply_softmax')):
+        if self.hparams.get("moe_primary_router_apply_softmax"):
             self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SOFTMAX)
         else:
             self.gguf_writer.add_expert_gating_func(gguf.ExpertGatingFuncType.SIGMOID)
@@ -44,7 +46,9 @@ class SmallThinkerModel(TextModel):
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # process the experts separately
         if name.find("experts") != -1:
-            n_experts = self.hparams.get("moe_num_primary_experts") or self.find_hparam(["num_local_experts", "num_experts"])
+            n_experts = self.hparams.get("moe_num_primary_experts") or self.find_hparam(
+                ["num_local_experts", "num_experts"]
+            )
             assert bid is not None
 
             if self._experts is None:
@@ -73,11 +77,12 @@ class SmallThinkerModel(TextModel):
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
 
         if self._experts is not None:
             # flatten `list[dict[str, Tensor]]` into `list[str]`
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)

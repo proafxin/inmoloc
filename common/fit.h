@@ -5,6 +5,8 @@
 
 #include <vector>
 
+struct common_params_sampling;
+
 enum common_params_fit_status {
     COMMON_PARAMS_FIT_STATUS_SUCCESS = 0, // found allocations that are projected to fit
     COMMON_PARAMS_FIT_STATUS_FAILURE = 1, // could not find allocations that are projected to fit
@@ -45,8 +47,8 @@ common_params_fit_status common_fit_params(
 //   - budget 0 means the free memory of the devices, and a larger budget than that is lowered to it; a model on the
 //     host alone is left as is
 //   - budget_used is memory the caller takes from the same budget, e.g. a vision encoder
-//   - size_ctx: the cache is sized too, so that n_seq_max typical requests of n_ctx_typical tokens fit (0 = the longest
-//     request the budget holds, i.e. the largest cache of one sequence up to the training context); the memory left
+//   - size_ctx: the cache is sized too, so that n_seq_max requests fit, each as long as the longest request the budget
+//     holds, i.e. the largest cache of one sequence up to the training context; the memory left
 //     after the cap on sequences grows the cache, up to n_seq_max training contexts; cparams->n_ctx on entry, if not 0,
 //     is the most the cache holds
 //   - returns false when not even one sequence fits, leaving cparams unchanged
@@ -59,9 +61,23 @@ bool common_budget_params(
  const common_fit_extra_model * extra,
                          size_t   budget,
                          size_t   budget_used,
-                       uint32_t   n_ctx_typical,
                            bool   size_ctx,
                  ggml_log_level   log_level,
+                       size_t *   predicted = nullptr,
+                       size_t *   free_before = nullptr,
+ // the samplers of the sequences when they run in the context, whose graphs are part of what is measured
+ const common_params_sampling * sampling = nullptr);
+
+// the elastic memory of a real context created with box_deferred: all of the budget that is left once the weights, the
+// compute buffers of the context, what the process holds and the context of an MTP draft are in; no dry run is needed
+bool common_budget_box(
+                  llama_model * model,
+                llama_context * ctx,
+                llama_context * ctx_dft,
+                           bool   dft_backend_sampling,
+                         size_t   budget,
+                         size_t   budget_used,
+                       size_t *   box_bytes,
                        size_t *   predicted = nullptr,
                        size_t *   free_before = nullptr);
 

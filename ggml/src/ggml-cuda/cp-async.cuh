@@ -45,6 +45,36 @@ static __device__ __forceinline__ void cp_async_cg_16(const unsigned int dst, co
 #endif // CP_ASYNC_AVAILABLE
 }
 
+// The same copy, or 16 zero bytes when zero is set: then src is not read.
+template <int preload>
+static __device__ __forceinline__ void cp_async_cg_16_zfill(const unsigned int dst, const void * src, const bool zero) {
+    static_assert(preload == 0 || preload == 64 || preload == 128 || preload == 256, "bad preload");
+#ifdef CP_ASYNC_AVAILABLE
+    const unsigned int src_size = zero ? 0 : 16;
+#if CUDART_VERSION >= 11040
+    if (preload == 256) {
+        asm volatile("cp.async.cg.shared.global.L2::256B [%0], [%1], 16, %2;"
+            : : "r"(dst), "l"(src), "r"(src_size));
+    } else if (preload == 128) {
+        asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], 16, %2;"
+            : : "r"(dst), "l"(src), "r"(src_size));
+    } else if (preload == 64) {
+        asm volatile("cp.async.cg.shared.global.L2::64B [%0], [%1], 16, %2;"
+            : : "r"(dst), "l"(src), "r"(src_size));
+    } else
+#endif // CUDART_VERSION >= 11040
+    {
+        asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;"
+            : : "r"(dst), "l"(src), "r"(src_size));
+    }
+#else
+    GGML_UNUSED(dst);
+    GGML_UNUSED(src);
+    GGML_UNUSED(zero);
+    NO_DEVICE_CODE;
+#endif // CP_ASYNC_AVAILABLE
+}
+
 // Makes each thread wait until its asynchronous data copies are done.
 // This does NOT provide any additional synchronization.
 // In particular, when copying data with multiple warps a call to __syncthreads will be needed.

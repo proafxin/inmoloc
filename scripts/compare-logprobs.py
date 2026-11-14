@@ -30,7 +30,7 @@ def get_remote_corpus(url: str, length: int) -> list[str]:
     response.raise_for_status()
     corpus = response.text
     words = [w.strip() for w in corpus.strip().split(" ")]
-    words = [w for w in words if "<" not in w] # make sure nothing looks like special tokens
+    words = [w for w in words if "<" not in w]  # make sure nothing looks like special tokens
     words = [w for w in words if len(w) > 0]  # filter out empty strings
     while len(words) < length:
         words += words
@@ -82,9 +82,7 @@ def dump_logits(
                 f.write(f"{data}\n")
                 n_done += 1
                 i_cur += 1
-                logger.info(
-                    f"\n\n{data}\n\n[Step: {n_done}/{n_total} | Word: {i_cur}/{i_total}]"
-                )
+                logger.info(f"\n\n{data}\n\n[Step: {n_done}/{n_total} | Word: {i_cur}/{i_total}]")
     logger.info(f"Logits dumped to {output_path}")
 
 
@@ -102,14 +100,7 @@ def get_token_logprobs(data: dict):
 
 
 def clean_text(text: str) -> str:
-    return (
-        "'"
-        + text.replace("\n", "\\n")
-        .replace("\t", "\\t")
-        .replace("\r", "\\r")
-        .replace("|", "\\|")
-        + "'"
-    )
+    return "'" + text.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r").replace("|", "\\|") + "'"
 
 
 def compare_logits(input1: Path, input2: Path, output_path: Path):
@@ -128,9 +119,7 @@ def compare_logits(input1: Path, input2: Path, output_path: Path):
         tab_entries = []
         tab_max_widths = [len(h) for h in tab_header]
 
-        assert len(lines1) == len(
-            lines2
-        ), "Input files must have the same number of lines."
+        assert len(lines1) == len(lines2), "Input files must have the same number of lines."
 
         fout.write("# Logits Comparison Report\n\n")
         for i, (line1, line2) in enumerate(zip(lines1, lines2)):
@@ -143,9 +132,7 @@ def compare_logits(input1: Path, input2: Path, output_path: Path):
             idx1 = data1.get("__index", -1)
             idx2 = data2.get("__index", -1)
             if idx1 != idx2:
-                logger.warning(
-                    f"Warning: Mismatched indices at line {i}: {idx1} vs {idx2}"
-                )
+                logger.warning(f"Warning: Mismatched indices at line {i}: {idx1} vs {idx2}")
 
             token1, logprob1 = get_token_logprobs(data1)
             token2, logprob2 = get_token_logprobs(data2)
@@ -199,21 +186,13 @@ def parse_pattern(pattern: str) -> list[tuple[bool, int]]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=DESCRIPTION, formatter_class=argparse.RawTextHelpFormatter
-    )
-    subparsers = parser.add_subparsers(
-        dest="verb", required=True, help="action to perform"
-    )
+    parser = argparse.ArgumentParser(description=DESCRIPTION, formatter_class=argparse.RawTextHelpFormatter)
+    subparsers = parser.add_subparsers(dest="verb", required=True, help="action to perform")
 
     # dump subcommand
     parser_dump = subparsers.add_parser("dump", help="dump logits from an endpoint")
-    parser_dump.add_argument(
-        "output", type=Path, help="output path for dumped logits (.log)"
-    )
-    parser_dump.add_argument(
-        "endpoint", type=str, help="OAI-compat /completions endpoint"
-    )
+    parser_dump.add_argument("output", type=Path, help="output path for dumped logits (.log)")
+    parser_dump.add_argument("endpoint", type=str, help="OAI-compat /completions endpoint")
     parser_dump.add_argument(
         "--api-key",
         type=str,
@@ -234,14 +213,10 @@ def parse_args() -> argparse.Namespace:
     )
 
     # compare subcommand
-    parser_compare = subparsers.add_parser(
-        "compare", help="compare two dumped logits files"
-    )
+    parser_compare = subparsers.add_parser("compare", help="compare two dumped logits files")
     parser_compare.add_argument("input1", type=Path, help="first input file (.log)")
     parser_compare.add_argument("input2", type=Path, help="second input file (.log)")
-    parser_compare.add_argument(
-        "output", type=Path, help="output path for comparison report (.md)"
-    )
+    parser_compare.add_argument("output", type=Path, help="output path for comparison report (.md)")
 
     try:
         return parser.parse_args()

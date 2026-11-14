@@ -3,18 +3,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import sys
 from typing import Any
 
-from speed_bench import fmt_value, print_rows
+from speed_bench import print_rows
 
 
 def load_summary(path: str) -> list[dict[str, Any]]:
-    with open(path, "r", encoding="utf-8") as f:
+    with pathlib.Path(path).open("r", encoding="utf-8") as f:
         data = json.load(f)
     summary = data.get("summary")
     if not isinstance(summary, list):
-        raise ValueError(f"{path} does not contain a summary list")
+        msg = f"{path} does not contain a summary list"
+        raise ValueError(msg)
     return summary
 
 
@@ -64,7 +66,9 @@ def print_comparison(rows: list[dict[str, Any]]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Compare two SPEED-Bench runs (baseline vs speculative).")
     parser.add_argument("--baseline", required=True, help="Baseline results JSON produced by speed_bench.py --output")
-    parser.add_argument("--speculative", required=True, help="Speculative decoding results JSON produced by speed_bench.py --output")
+    parser.add_argument(
+        "--speculative", required=True, help="Speculative decoding results JSON produced by speed_bench.py --output"
+    )
     args = parser.parse_args(argv)
 
     try:

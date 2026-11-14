@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, TextModel, gguf
-
-from .gemma import ConformerAudioModel
+from conversion.base import MmprojModel, ModelBase, TextModel, gguf
+from conversion.gemma import ConformerAudioModel
 
 
 @ModelBase.register("Lfm2ForCausalLM", "LFM2ForCausalLM")
@@ -32,7 +33,7 @@ class LFM2Model(TextModel):
 
         self.gguf_writer.add_feed_forward_length(ff_dim)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         # set num_key_value_heads only for attention layers
         self.hparams["num_key_value_heads"] = [
             self.hparams["num_key_value_heads"] if layer_type != "conv" else 0
@@ -53,13 +54,13 @@ class LFM2Model(TextModel):
             # skip multimodal tensors
             return None
 
-        name = name.replace("lfm.", "model.")      # audio
+        name = name.replace("lfm.", "model.")  # audio
 
         return super().filter_tensors((name, gen))
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # conv op requires 2d tensor
-        if 'conv.conv' in name:
+        if "conv.conv" in name:
             data_torch = data_torch.squeeze(1)
 
         yield from super().modify_tensors(data_torch, name, bid)
@@ -71,7 +72,7 @@ class LFM2ColBertModel(LFM2Model):
     model_arch = gguf.MODEL_ARCH.LFM2
     dense_tensor_name = "dense_2"
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         if self.hf_arch == "Lfm2BidirectionalModel":
             self.gguf_writer.add_causal_attention(False)
@@ -86,6 +87,7 @@ class LFM2ColBertModel(LFM2Model):
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
         # optional dense tensor is stored in a separate safetensors file
         from safetensors.torch import load_file
+
         tensors_file = self.dir_model / "1_Dense" / "model.safetensors"
         if not tensors_file.is_file():
             return
@@ -99,7 +101,7 @@ class LFM2ColBertModel(LFM2Model):
 class LFM2MoeModel(TextModel):
     model_arch = gguf.MODEL_ARCH.LFM2MOE
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         # set num_key_value_heads only for attention layers
         self.hparams["num_key_value_heads"] = [
             self.hparams["num_key_value_heads"] if layer_type == "full_attention" else 0
@@ -129,11 +131,11 @@ class LFM2MoeModel(TextModel):
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # conv op requires 2d tensor
-        if 'conv.conv' in name:
+        if "conv.conv" in name:
             data_torch = data_torch.squeeze(1)
 
         # merge expert weights
-        if 'experts' in name:
+        if "experts" in name:
             n_experts = self.find_hparam(["num_local_experts", "num_experts"])
             assert bid is not None
 
@@ -163,7 +165,7 @@ class LFM2MoeModel(TextModel):
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
         assert not self._experts_cache
 
@@ -171,13 +173,13 @@ class LFM2MoeModel(TextModel):
 @ModelBase.register("Lfm2VlForConditionalGeneration")
 @ModelBase.example("LiquidAI/LFM2-VL-450M")
 class LFM2VLModel(MmprojModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         assert self.hparams_vision is not None
         # TODO(tarek): for dynamic resolution image_size is not specified, setting here for compatibility
         self.hparams_vision["image_size"] = 256
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.LFM2)
         self.gguf_writer.add_vision_attention_layernorm_eps(self.find_vparam(["layer_norm_eps"]))
@@ -213,7 +215,7 @@ class LFM2AudioModel(ConformerAudioModel):
     def get_audio_config(self) -> dict[str, Any] | None:
         return self.global_config.get("encoder")
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         assert self.hparams_audio is not None
         self.hparams_audio["hidden_size"] = self.hparams_audio["d_model"]
         self.hparams_audio["intermediate_size"] = self.hparams_audio["d_model"]
@@ -225,7 +227,7 @@ class LFM2AudioModel(ConformerAudioModel):
 
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
+        name, _gen = item
 
         # skip language model tensors
         if name.startswith("lfm."):
@@ -247,10 +249,10 @@ class LFM2AudioModel(ConformerAudioModel):
 class LFM25AudioTokenizer(LFM2Model):
     model_arch = gguf.MODEL_ARCH.LFM2
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_none()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_sliding_window(self.hparams["sliding_window"])
         self.gguf_writer.add_embedding_length_out(self.hparams["output_size"])

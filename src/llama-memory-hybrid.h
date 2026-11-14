@@ -1,11 +1,13 @@
 #pragma once
 
 #include "llama-batch.h"
+#include "llama-box.h"
 #include "llama-graph.h"
 #include "llama-kv-cache.h"
 #include "llama-memory.h"
 #include "llama-memory-recurrent.h"
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -23,7 +25,6 @@ public:
                             /* attn */
                 ggml_type   type_k,
                 ggml_type   type_v,
-                     bool   v_trans,
                  uint32_t   kv_size,
                  uint32_t   n_pad,
                  uint32_t   n_swa,
@@ -37,12 +38,19 @@ public:
                  uint32_t   n_rs_seq,
                      bool   rs_replay,
                      bool   offload,
-                     bool   unified,
                             /* layer filters */
     const layer_filter_cb & filter_attn = nullptr,
-    const layer_filter_cb & filter_recr = nullptr);
+    const layer_filter_cb & filter_recr = nullptr,
+        // the KV cells and the states are in one elastic memory, see llama_box: kv_size is the cells of the box when no
+        // bytes are given, and rs_size its states
+        // the bytes of the box, 0 for kv_size cells and rs_size states, and the layer of an MTP draft kept in its blocks
+                   size_t   box_bytes = 0,
+                     bool   box_deferred = false,
+                     const llama_box_draft & box_draft = {},
+        // extra attention layers for the box with dimensions that differ from the main hparams (e.g. indexer cache)
+        std::vector<llama_box::attn_layer> box_extra_attn = {});
 
-    ~llama_memory_hybrid() = default;
+    ~llama_memory_hybrid();
 
     //
     // llama_memory_i
@@ -84,11 +92,38 @@ public:
     llama_kv_cache * get_mem_attn() const;
     llama_memory_recurrent * get_mem_recr() const;
 
+    //
+    // elastic memory, see llama_box
+    //
+
+    // nullptr when the caches have their own buffers
+    const llama_box * get_box() const;
+
+    // for a draft context that keeps its tokens in the blocks of the box
+    std::shared_ptr<llama_box> get_box_shared() const override { return box; }
+
+    // admission of a request: its state and its prompt pages, and the pages it may generate into, see llama_box::reserve()
+    bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override;
+    void box_reserve_drop(llama_seq_id seq_id) override;
+    void box_finalized() override { mem_attn->box_finalized(); }
+
+protected:
+    llama_box * get_box_mut() const { return box.get(); }
+
+    // gives the seqs of the ubatches their states and the blocks their new tokens take
+    bool box_prepare(const std::vector<llama_ubatch> & ubatches);
+
 private:
     const llama_hparams & hparams;
 
+    // declared before the caches, which view it
+    std::shared_ptr<llama_box> box;
+
     const std::unique_ptr<llama_kv_cache> mem_attn;
     const std::unique_ptr<llama_memory_recurrent> mem_recr;
+
+    // the blocks of removed seqs go back to the box
+    void box_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
 };
 
 class llama_memory_hybrid_context : public llama_memory_context_i {

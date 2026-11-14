@@ -18,7 +18,7 @@ Before starting, read `AGENTS.md` and `CONTRIBUTING.md` if not already in contex
 
 Identify what actually changed and which area checklists below apply. Run `git diff --stat` (or `gh pr view <n> --json files` for PR mode) and bucket the touched paths:
 
-- `conversion/`, `gguf-py/`, `src/models/`, `src/llama-arch.*` -> **New model / architecture**
+- `conversion/`, `gguf/`, `src/models/`, `src/llama-arch.*` -> **New model / architecture**
 - `ggml/` (any backend, op, or `ggml.h`) -> **ggml / backend**
 - `include/llama.h` and other public headers -> **Public API**
 - `tools/server/` -> **Server**

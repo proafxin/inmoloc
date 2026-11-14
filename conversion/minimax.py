@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from typing import Iterable, Sequence, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, MmprojModel, gguf, logger
+import pathlib
+
+from conversion.base import MmprojModel, ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register("MiniMaxText01ForCausalLM")
@@ -18,8 +22,10 @@ class MiniMaxText01Model(TextModel):
 
     def _get_suppress_tokens(self) -> Sequence[int] | None:
         import json
+
         from transformers import AutoTokenizer
-        from .base import LazyTorchTensor
+
+        from conversion.base import LazyTorchTensor
 
         # check added tokens embeddings in embeddings tensor for zero-valued embeddings
         # they get in the way of the token sampling process and must be suppressed
@@ -27,7 +33,7 @@ class MiniMaxText01Model(TextModel):
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
         tokenizer_vocab_size = tokenizer.vocab_size  # ty: ignore[unresolved-attribute]
 
-        with open(self.dir_model / "model.safetensors.index.json", "r", encoding="utf-8") as f:
+        with pathlib.Path(self.dir_model / "model.safetensors.index.json").open("r", encoding="utf-8") as f:
             weight_map = json.load(f)["weight_map"]
 
         embeddings_tensor_name = "model.embed_tokens.weight"
@@ -36,14 +42,14 @@ class MiniMaxText01Model(TextModel):
             embeddings_data = model_shard[embeddings_tensor_name]
 
         embeddings_weights_dtype = LazyTorchTensor._dtype_str_map[embeddings_data.dtype]
-        embeddings_weights = torch.from_numpy(embeddings_data.mmap_bytes()).view(embeddings_weights_dtype).reshape(embeddings_data.shape)
+        embeddings_weights = (
+            torch.from_numpy(embeddings_data.mmap_bytes()).view(embeddings_weights_dtype).reshape(embeddings_data.shape)
+        )
         embeddings_vocab_size = embeddings_weights.shape[0]
 
         embeddings_added_tokens = embeddings_weights[tokenizer_vocab_size:embeddings_vocab_size]
         embeddings_zero_rows = torch.all(embeddings_added_tokens == 0, dim=1)
-        tokens_zero_embeddings_ids = (torch.nonzero(embeddings_zero_rows, as_tuple=False).flatten() + tokenizer_vocab_size).tolist()
-
-        return tokens_zero_embeddings_ids
+        return (torch.nonzero(embeddings_zero_rows, as_tuple=False).flatten() + tokenizer_vocab_size).tolist()
 
     def set_vocab(self) -> None:
         from pathlib import Path
@@ -52,14 +58,14 @@ class MiniMaxText01Model(TextModel):
 
         for tmpl_file in [
             self.dir_model / "chat_template.jinja",
-            Path(__file__).parent.parent / "models" / "templates" / "MiniMax-M1.jinja"
+            Path(__file__).parent.parent / "models" / "templates" / "MiniMax-M1.jinja",
         ]:
             if tmpl_file.is_file():
                 self.gguf_writer.add_chat_template(tmpl_file.read_text(encoding="utf-8"))
                 logger.info(f"Chat template overridden with {tmpl_file}.")
                 break
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         suppress_tokens = self._get_suppress_tokens()
@@ -125,7 +131,7 @@ class MiniMaxM2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.MINIMAXM2
     _experts_cache: dict[int, dict[str, Tensor]] = {}
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         self.gguf_writer.add_expert_feed_forward_length(self.find_hparam(["intermediate_size"]))
@@ -174,7 +180,7 @@ class MiniMaxM3Model(MiniMaxM2Model):
             return gguf.GGMLQuantizationType.F32
         return super().tensor_force_quant(name, new_name, bid, n_dims)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         self.gguf_writer.add_expert_shared_count(self.find_hparam(["n_shared_experts"]))
@@ -200,7 +206,7 @@ class MiniMaxM3Model(MiniMaxM2Model):
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
         # Gemma-style (1 + w) RMSNorm: bake the +1 in so llama.cpp can use plain RMSNorm
         if name.endswith("norm.weight"):
-            data_torch = data_torch + 1.0
+            data_torch += 1.0
 
         yield from super().modify_tensors(data_torch, name, bid)
 
@@ -216,7 +222,7 @@ class MiniMaxM3VisionModel(MmprojModel):
             return None
         return super().filter_tensors((name, gen))
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         assert self.hparams_vision is not None
 
@@ -224,9 +230,7 @@ class MiniMaxM3VisionModel(MmprojModel):
         self.gguf_writer.add_vision_use_gelu(True)
 
         # the ViT carries its own LayerNorm eps (text tower uses a different one)
-        self.gguf_writer.add_vision_attention_layernorm_eps(
-            self.hparams_vision.get("layer_norm_eps", 1e-5)
-        )
+        self.gguf_writer.add_vision_attention_layernorm_eps(self.hparams_vision.get("layer_norm_eps", 1e-5))
 
         comp = self.hparams_vision.get("img_token_compression_config", {})
         merge_size = comp.get("spatial_merge_size", 2)
@@ -238,7 +242,8 @@ class MiniMaxM3VisionModel(MmprojModel):
         # Conv3d patch embed -> Conv2d slices
         if name == "vision_tower.vision_model.embeddings.patch_embedding.weight":
             if data_torch.ndim != 5:
-                raise ValueError(f"unexpected patch_embedding rank {data_torch.ndim} for {name}")
+                msg = f"unexpected patch_embedding rank {data_torch.ndim} for {name}"
+                raise ValueError(msg)
             kt = data_torch.shape[2]
             base = gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_ENC_EMBD_PATCH]
             for t in range(kt):
@@ -252,7 +257,7 @@ class MiniMaxM3VisionModel(MmprojModel):
                 tensor = self._permute_vit_qk(tensor, new_name)
             yield new_name, tensor
 
-    def _permute_vit_qk(self, t: "Tensor", new_name: str) -> "Tensor":
+    def _permute_vit_qk(self, t: Tensor, new_name: str) -> Tensor:
         assert self.hparams_vision is not None
         n_head = self.hparams_vision["num_attention_heads"]
         d_head = t.shape[0] // n_head
@@ -260,7 +265,7 @@ class MiniMaxM3VisionModel(MmprojModel):
         ah = axis_dim // 2
         half = 3 * ah
         perm = []
-        perm += list(range(0, ah))
+        perm += list(range(ah))
         perm += list(range(half, half + ah))
         perm += list(range(ah, 2 * ah))
         perm += list(range(half + ah, half + 2 * ah))

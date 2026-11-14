@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, MmprojModel, SentencePieceTokenTypes, TextModel, gguf, logger
+from conversion.base import MmprojModel, ModelBase, SentencePieceTokenTypes, TextModel, gguf, logger
 
 # Pocket TTS is a CALM: the backbone conditions a flow-matching decoder that generates one
 # continuous 32-d latent per frame. There is no codebook in this model.
@@ -28,10 +30,10 @@ from .base import ModelBase, MmprojModel, SentencePieceTokenTypes, TextModel, gg
 #   mimi decoder                --> MTMD_GEN_PROCESS_TYPE_GEN_WAV
 
 # indices into mimi.encoder.model / mimi.decoder.model for stage i, see SEANetEncoder/SEANetDecoder
-_ENC_RES_IDX   = lambda i: 1 + 3 * i  # noqa: E731
-_ENC_SCALE_IDX = lambda i: 3 + 3 * i  # noqa: E731
-_DEC_SCALE_IDX = lambda i: 2 + 3 * i  # noqa: E731
-_DEC_RES_IDX   = lambda i: 3 + 3 * i  # noqa: E731
+_ENC_RES_IDX = lambda i: 1 + 3 * i  # ruff: ignore[lambda-assignment]
+_ENC_SCALE_IDX = lambda i: 3 + 3 * i  # ruff: ignore[lambda-assignment]
+_DEC_SCALE_IDX = lambda i: 2 + 3 * i  # ruff: ignore[lambda-assignment]
+_DEC_RES_IDX = lambda i: 3 + 3 * i  # ruff: ignore[lambda-assignment]
 
 _N_SEANET_STAGES = 3
 _SAMPLE_RATE = 24000
@@ -42,7 +44,7 @@ def _tensor_shapes(dir_model: Path) -> dict[str, tuple[int, ...]]:
     if len(part_names) != 1:
         return {}
     with gguf.utility.SafetensorsLocal(dir_model / part_names[0]) as part:
-        return {name: tuple(part[name].shape) for name in part.keys()}
+        return {name: tuple(part[name].shape) for name in part}
 
 
 @ModelBase.register_hparams_loader(lambda dir_model: "flow_lm.bos_emb" in _tensor_shapes(dir_model))
@@ -51,7 +53,11 @@ def _load_hparams(dir_model: Path) -> dict[str, Any]:
     shapes = _tensor_shapes(dir_model)
     n_vocab, n_embd = shapes["flow_lm.conditioner.embed.weight"]
     n_layer = sum(1 for name in shapes if re.fullmatch(r"flow_lm\.transformer\.layers\.\d+\.norm1\.weight", name))
-    n_layer_a = sum(1 for name in shapes if re.fullmatch(r"mimi\.encoder_transformer\.transformer\.layers\.\d+\.norm1\.weight", name))
+    n_layer_a = sum(
+        1
+        for name in shapes
+        if re.fullmatch(r"mimi\.encoder_transformer\.transformer\.layers\.\d+\.norm1\.weight", name)
+    )
     n_embd_a = shapes["mimi.encoder_transformer.transformer.layers.0.norm1.weight"][0]
     return {
         "architectures": ["PocketTTSModel"],
@@ -82,20 +88,20 @@ class PocketTTSModel(TextModel):
     model_arch = gguf.MODEL_ARCH.POCKETTTS
 
     _LAYER_TENSOR_MAP = {
-        "norm1":               gguf.MODEL_TENSOR.ATTN_NORM,
-        "norm2":               gguf.MODEL_TENSOR.FFN_NORM,
-        "self_attn.out_proj":  gguf.MODEL_TENSOR.ATTN_OUT,
-        "linear1":             gguf.MODEL_TENSOR.FFN_UP,
-        "linear2":             gguf.MODEL_TENSOR.FFN_DOWN,
+        "norm1": gguf.MODEL_TENSOR.ATTN_NORM,
+        "norm2": gguf.MODEL_TENSOR.FFN_NORM,
+        "self_attn.out_proj": gguf.MODEL_TENSOR.ATTN_OUT,
+        "linear1": gguf.MODEL_TENSOR.FFN_UP,
+        "linear2": gguf.MODEL_TENSOR.FFN_DOWN,
     }
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         # this is a unigram sentencepiece model, llama.cpp's SPM tokenizer cannot do
         # unigram segmentation, so use the UGM tokenizer instead
         from sentencepiece import sentencepiece_model_pb2 as model
 
         proto = model.ModelProto()  # pyright: ignore[reportAttributeAccessIssue] # ty: ignore[unresolved-attribute]
-        proto.ParseFromString(open(self.dir_model / "tokenizer.model", "rb").read())
+        proto.ParseFromString(Path(self.dir_model / "tokenizer.model").open("rb").read())
         assert proto.trainer_spec.model_type == 1, "expected a unigram tokenizer"
 
         tokens, scores, toktypes = self._create_vocab_sentencepiece()
@@ -181,20 +187,24 @@ class PocketTTSMmprojModel(MmprojModel):
     has_vision_encoder = False
 
     _MIMI_TFM_MAP = {
-        "norm1":              (gguf.MODEL_TENSOR.A_ENC_INPUT_NORM,  gguf.MODEL_TENSOR.A_GEN_WAV_TFM_ATTN_NORM),
-        "norm2":              (gguf.MODEL_TENSOR.A_ENC_OUTPUT_NORM, gguf.MODEL_TENSOR.A_GEN_WAV_TFM_FFN_NORM),
-        "self_attn.out_proj": (gguf.MODEL_TENSOR.A_ENC_OUTPUT,      gguf.MODEL_TENSOR.A_GEN_WAV_TFM_ATTN_OUT),
-        "linear1":            (gguf.MODEL_TENSOR.A_ENC_FFN_UP,      gguf.MODEL_TENSOR.A_GEN_WAV_TFM_FFN_UP),
-        "linear2":            (gguf.MODEL_TENSOR.A_ENC_FFN_DOWN,    gguf.MODEL_TENSOR.A_GEN_WAV_TFM_FFN_DOWN),
+        "norm1": (gguf.MODEL_TENSOR.A_ENC_INPUT_NORM, gguf.MODEL_TENSOR.A_GEN_WAV_TFM_ATTN_NORM),
+        "norm2": (gguf.MODEL_TENSOR.A_ENC_OUTPUT_NORM, gguf.MODEL_TENSOR.A_GEN_WAV_TFM_FFN_NORM),
+        "self_attn.out_proj": (gguf.MODEL_TENSOR.A_ENC_OUTPUT, gguf.MODEL_TENSOR.A_GEN_WAV_TFM_ATTN_OUT),
+        "linear1": (gguf.MODEL_TENSOR.A_ENC_FFN_UP, gguf.MODEL_TENSOR.A_GEN_WAV_TFM_FFN_UP),
+        "linear2": (gguf.MODEL_TENSOR.A_ENC_FFN_DOWN, gguf.MODEL_TENSOR.A_GEN_WAV_TFM_FFN_DOWN),
         "layer_scale_1.scale": (gguf.MODEL_TENSOR.A_ENC_ATTN_SCALE, gguf.MODEL_TENSOR.A_GEN_WAV_TFM_ATTN_SCALE),
         "layer_scale_2.scale": (gguf.MODEL_TENSOR.A_ENC_FFN_SCALE_LS, gguf.MODEL_TENSOR.A_GEN_WAV_TFM_FFN_SCALE),
     }
     _MIMI_TFM_QKV = (
         (gguf.MODEL_TENSOR.A_ENC_ATTN_Q, gguf.MODEL_TENSOR.A_ENC_ATTN_K, gguf.MODEL_TENSOR.A_ENC_ATTN_V),
-        (gguf.MODEL_TENSOR.A_GEN_WAV_TFM_ATTN_Q, gguf.MODEL_TENSOR.A_GEN_WAV_TFM_ATTN_K, gguf.MODEL_TENSOR.A_GEN_WAV_TFM_ATTN_V),
+        (
+            gguf.MODEL_TENSOR.A_GEN_WAV_TFM_ATTN_Q,
+            gguf.MODEL_TENSOR.A_GEN_WAV_TFM_ATTN_K,
+            gguf.MODEL_TENSOR.A_GEN_WAV_TFM_ATTN_V,
+        ),
     )
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         self.gguf_writer.add_file_type(self.ftype)
         assert self.hparams_audio is not None
 
@@ -227,7 +237,7 @@ class PocketTTSMmprojModel(MmprojModel):
     def tensor_force_quant(self, name, new_name, bid, n_dims):
         del name, bid, n_dims
         # conv1d/conv1d_dw kernels must be F16, ggml_conv_1d(_dw) has no BF16 path
-        if ".seanet." in new_name or new_name in ("a.downsample.conv.weight", "a.gen.wav.upsample.weight"):
+        if ".seanet." in new_name or new_name in {"a.downsample.conv.weight", "a.gen.wav.upsample.weight"}:
             return gguf.GGMLQuantizationType.F16
         return False
 
@@ -235,9 +245,9 @@ class PocketTTSMmprojModel(MmprojModel):
         del bid  # the block index of the mimi transformers is parsed here, not by the base class
         T = gguf.MODEL_TENSOR
 
-        if name in ("flow_lm.bos_emb", "flow_lm.bos_before_voice", "flow_lm.conditioner.embed.weight"):
+        if name in {"flow_lm.bos_emb", "flow_lm.bos_before_voice", "flow_lm.conditioner.embed.weight"}:
             return  # folded into the backbone embedding table
-        if name.startswith("flow_lm.transformer.") or name.startswith("flow_lm.out_norm."):
+        if name.startswith(("flow_lm.transformer.", "flow_lm.out_norm.")):
             return  # backbone
 
         if name == "flow_lm.speaker_proj_weight":
@@ -275,7 +285,7 @@ class PocketTTSMmprojModel(MmprojModel):
             yield from self._mimi_tfm_tensor(name, data_torch)
             return
 
-        if name.startswith("mimi.encoder.model.") or name.startswith("mimi.decoder.model."):
+        if name.startswith(("mimi.encoder.model.", "mimi.decoder.model.")):
             yield from self._seanet_tensor(name, data_torch)
             return
 
@@ -287,9 +297,9 @@ class PocketTTSMmprojModel(MmprojModel):
         suffix = "." + key.rsplit(".", 1)[1]
 
         simple = {
-            "input_proj":                 T.A_GEN_FLOW_INPUT_PROJ,
-            "cond_embed":                 T.A_GEN_FLOW_COND_EMBD,
-            "final_layer.linear":         T.A_GEN_FLOW_FINAL_PROJ,
+            "input_proj": T.A_GEN_FLOW_INPUT_PROJ,
+            "cond_embed": T.A_GEN_FLOW_COND_EMBD,
+            "final_layer.linear": T.A_GEN_FLOW_FINAL_PROJ,
             "final_layer.adaLN_modulation.1": T.A_GEN_FLOW_FINAL_ADA,
         }
         tensor = simple.get(key.rsplit(".", 1)[0])
@@ -301,10 +311,10 @@ class PocketTTSMmprojModel(MmprojModel):
             bid = int(key.split(".")[1])
             rest = key.split(f"time_embed.{bid}.", 1)[1]
             time_map = {
-                "freqs":       (T.A_GEN_FLOW_TIME_FREQS, ""),
-                "mlp.0":       (T.A_GEN_FLOW_TIME_UP,    suffix),
-                "mlp.2":       (T.A_GEN_FLOW_TIME_DOWN,  suffix),
-                "mlp.3.alpha": (T.A_GEN_FLOW_TIME_NORM,  ""),
+                "freqs": (T.A_GEN_FLOW_TIME_FREQS, ""),
+                "mlp.0": (T.A_GEN_FLOW_TIME_UP, suffix),
+                "mlp.2": (T.A_GEN_FLOW_TIME_DOWN, suffix),
+                "mlp.3.alpha": (T.A_GEN_FLOW_TIME_NORM, ""),
             }
             entry = time_map.get(rest) or time_map.get(rest.rsplit(".", 1)[0])
             if entry is not None:
@@ -315,10 +325,10 @@ class PocketTTSMmprojModel(MmprojModel):
             bid = int(key.split(".")[1])
             rest = key.split(f"res_blocks.{bid}.", 1)[1].rsplit(".", 1)[0]
             blk_map = {
-                "in_ln":                T.A_GEN_FLOW_BLK_NORM,
-                "mlp.0":                T.A_GEN_FLOW_BLK_UP,
-                "mlp.2":                T.A_GEN_FLOW_BLK_DOWN,
-                "adaLN_modulation.1":   T.A_GEN_FLOW_BLK_ADA,
+                "in_ln": T.A_GEN_FLOW_BLK_NORM,
+                "mlp.0": T.A_GEN_FLOW_BLK_UP,
+                "mlp.2": T.A_GEN_FLOW_BLK_DOWN,
+                "adaLN_modulation.1": T.A_GEN_FLOW_BLK_ADA,
             }
             tensor = blk_map.get(rest)
             if tensor is not None:
@@ -327,13 +337,13 @@ class PocketTTSMmprojModel(MmprojModel):
 
     def _mimi_tfm_tensor(self, name: str, data_torch: Tensor) -> Iterable[tuple[str, Tensor]]:
         is_decoder = name.startswith("mimi.decoder_transformer.")
-        bid = int(name.split("_transformer.transformer.layers.", 1)[1].split(".")[0])
+        bid = int(name.split("_transformer.transformer.layers.", 1)[1].split(".", maxsplit=1)[0])
         key_with_suffix = name.split(f".layers.{bid}.", 1)[1]
 
         if key_with_suffix == "self_attn.in_proj.weight":
             q, k, v = data_torch.chunk(3, dim=0)
             names = self._MIMI_TFM_QKV[1 if is_decoder else 0]
-            for tensor, part in zip(names, (q, k, v)):
+            for tensor, part in zip(names, (q, k, v), strict=False):
                 yield (self.format_tensor_name(tensor, bid), part)
             return
 
@@ -348,15 +358,25 @@ class PocketTTSMmprojModel(MmprojModel):
     def _seanet_tensor(self, name: str, data_torch: Tensor) -> Iterable[tuple[str, Tensor]]:
         T = gguf.MODEL_TENSOR
         is_decoder = name.startswith("mimi.decoder.")
-        idx = int(name.split(".model.", 1)[1].split(".")[0])
+        idx = int(name.split(".model.", 1)[1].split(".", maxsplit=1)[0])
         suffix = "." + name.rsplit(".", 1)[1]
 
         conv_in, conv_out, res1, res2, scale = (
-            (T.A_GEN_WAV_SEANET_CONV_IN, T.A_GEN_WAV_SEANET_CONV_OUT, T.A_GEN_WAV_SEANET_RES_CONV1,
-             T.A_GEN_WAV_SEANET_RES_CONV2, T.A_GEN_WAV_SEANET_SCALE_CONV)
-            if is_decoder else
-            (T.A_ENC_SEANET_CONV_IN, T.A_ENC_SEANET_CONV_OUT, T.A_ENC_SEANET_RES_CONV1,
-             T.A_ENC_SEANET_RES_CONV2, T.A_ENC_SEANET_SCALE_CONV)
+            (
+                T.A_GEN_WAV_SEANET_CONV_IN,
+                T.A_GEN_WAV_SEANET_CONV_OUT,
+                T.A_GEN_WAV_SEANET_RES_CONV1,
+                T.A_GEN_WAV_SEANET_RES_CONV2,
+                T.A_GEN_WAV_SEANET_SCALE_CONV,
+            )
+            if is_decoder
+            else (
+                T.A_ENC_SEANET_CONV_IN,
+                T.A_ENC_SEANET_CONV_OUT,
+                T.A_ENC_SEANET_RES_CONV1,
+                T.A_ENC_SEANET_RES_CONV2,
+                T.A_ENC_SEANET_SCALE_CONV,
+            )
         )
 
         if idx == 0:
@@ -374,7 +394,7 @@ class PocketTTSMmprojModel(MmprojModel):
                 return
             if idx == res_idx:
                 # block.1 is the dilated conv, block.3 the pointwise one (0 and 2 are ELU)
-                inner = int(name.split(".block.", 1)[1].split(".")[0])
+                inner = int(name.split(".block.", 1)[1].split(".", maxsplit=1)[0])
                 tensor = res1 if inner == 1 else res2
                 yield (self.format_tensor_name(tensor, stage, suffix=suffix), data_torch)
                 return

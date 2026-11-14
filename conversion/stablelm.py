@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("StableLmForCausalLM", "StableLMEpochForCausalLM", "LlavaStableLMEpochForCausalLM")
@@ -15,14 +17,14 @@ from .base import ModelBase, TextModel, gguf
 class StableLMModel(TextModel):
     model_arch = gguf.MODEL_ARCH.STABLELM
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         if (self.dir_model / "tokenizer.json").is_file():
             self._set_vocab_gpt2()
         else:
             # StableLM 2 1.6B used to have a vocab in a similar format to Qwen's vocab
             self._set_vocab_qwen()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         hparams = self.hparams
 
         self.gguf_writer.add_context_length(hparams["max_position_embeddings"])
@@ -30,10 +32,12 @@ class StableLMModel(TextModel):
         self.gguf_writer.add_block_count(self.block_count)
         self.gguf_writer.add_feed_forward_length(hparams["intermediate_size"])
         rotary_factor = self.rope_parameters["partial_rotary_factor"]
-        self.gguf_writer.add_rope_dimension_count(int(rotary_factor * (hparams["hidden_size"] // hparams["num_attention_heads"])))
+        self.gguf_writer.add_rope_dimension_count(
+            int(rotary_factor * (hparams["hidden_size"] // hparams["num_attention_heads"]))
+        )
         self.gguf_writer.add_head_count(hparams["num_attention_heads"])
         self.gguf_writer.add_head_count_kv(hparams["num_key_value_heads"])
-        self.gguf_writer.add_parallel_residual(hparams["use_parallel_residual"] if "use_parallel_residual" in hparams else True)
+        self.gguf_writer.add_parallel_residual(hparams.get("use_parallel_residual", True))
         self.gguf_writer.add_layer_norm_eps(self.find_hparam(["layer_norm_eps", "norm_eps"]))
         self.gguf_writer.add_file_type(self.ftype)
 
@@ -85,15 +89,14 @@ class StableLMModel(TextModel):
 
         yield from super().modify_tensors(data_torch, merged_name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
 
         if self._q_norms is not None or self._k_norms is not None:
             # flatten two `list[dict[str, Tensor]]` into a single `list[str]`
-            norms = (
-                [k for d in self._q_norms for k in d.keys()] if self._q_norms is not None else []
-            ) + (
-                [k for d in self._k_norms for k in d.keys()] if self._k_norms is not None else []
+            norms = ([k for d in self._q_norms for k in d] if self._q_norms is not None else []) + (
+                [k for d in self._k_norms for k in d] if self._k_norms is not None else []
             )
             if len(norms) > 0:
-                raise ValueError(f"Unprocessed norms: {norms}")
+                msg = f"Unprocessed norms: {norms}"
+                raise ValueError(msg)

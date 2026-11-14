@@ -26,7 +26,7 @@ checkpoint formats are supported (for example [`AngelSlim/Qwen3-4B_eagle3`](http
 for `Qwen/Qwen3-4B`):
 
 ```bash
-python convert_hf_to_gguf.py AngelSlim/Qwen3-4B_eagle3 \
+uv run scripts/convert_hf_to_gguf.py AngelSlim/Qwen3-4B_eagle3 \
     --target-model-dir Qwen/Qwen3-4B --outtype bf16 --outfile Qwen3-4B-eagle3.gguf
 
 local-inference-server -m Qwen3-4B.gguf -md Qwen3-4B-eagle3.gguf --spec-type draft-eagle3
@@ -65,7 +65,7 @@ The draft is a small block-diffusion model trained for a specific target (for ex
 target's tokenizer and token embeddings:
 
 ```bash
-python convert_hf_to_gguf.py z-lab/Qwen3-4B-DFlash \
+uv run scripts/convert_hf_to_gguf.py z-lab/Qwen3-4B-DFlash \
     --target-model-dir Qwen/Qwen3-4B --outtype bf16 --outfile Qwen3-4B-DFlash.gguf
 
 local-inference-server -m Qwen3-4B.gguf -md Qwen3-4B-DFlash.gguf \
@@ -91,7 +91,7 @@ for `Qwen/Qwen3-4B`). Convert it with `--target-model-dir` so it inherits the ta
 and token embeddings:
 
 ```bash
-python convert_hf_to_gguf.py deepseek-ai/dspark_qwen3_4b_block7 \
+uv run scripts/convert_hf_to_gguf.py deepseek-ai/dspark_qwen3_4b_block7 \
     --target-model-dir Qwen/Qwen3-4B --outtype bf16 --outfile Qwen3-4B-DSpark.gguf
 
 local-inference-server -m Qwen3-4B.gguf -md Qwen3-4B-DSpark.gguf \

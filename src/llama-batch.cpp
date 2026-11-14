@@ -8,18 +8,22 @@
 #include <cstring>
 #include <algorithm>
 #include <sstream>
+#include <unordered_map>
+
+// whether two sorted sets of sequences have a sequence in common
+static bool seq_sets_overlap(const std::vector<llama_seq_id> & a, const std::vector<llama_seq_id> & b) {
+    for (auto ia = a.begin(), ib = b.begin(); ia != a.end() && ib != b.end();) {
+        if (*ia == *ib) {
+            return true;
+        }
+        *ia < *ib ? ++ia : ++ib;
+    }
+    return false;
+}
 
 llama_batch_allocr::llama_batch_allocr(uint32_t n_pos_per_embd) : n_pos_per_embd(n_pos_per_embd) {
     const char * LOCAL_INFERENCE_BATCH_DEBUG = getenv("LOCAL_INFERENCE_BATCH_DEBUG");
     debug = LOCAL_INFERENCE_BATCH_DEBUG ? atoi(LOCAL_INFERENCE_BATCH_DEBUG) : 0;
-
-    seq_pos.resize(LLAMA_MAX_SEQ);
-    seq_cpl.resize(LLAMA_MAX_SEQ);
-    for (auto & cur : seq_cpl) {
-        cur.resize(LLAMA_MAX_SEQ);
-    }
-
-    seq_idx.resize(LLAMA_MAX_SEQ, -1);
 }
 
 bool llama_batch_allocr::init(
@@ -37,14 +41,14 @@ bool llama_batch_allocr::init(
 
     GGML_ASSERT(batch.n_tokens > 0);
 
+    if (seq_pos.size() < n_seq_max) {
+        seq_pos.resize(n_seq_max);
+        seq_idx.resize(n_seq_max, -1);
+    }
+
     //
     // validate input batch
     //
-
-    if (n_seq_max > LLAMA_MAX_SEQ) {
-        LLAMA_LOG_ERROR("%s: n_seq_max = %d > %d\n", __func__, n_seq_max, LLAMA_MAX_SEQ);
-        return false;
-    }
 
     if (batch.token) {
         for (int32_t i = 0; i < batch.n_tokens; ++i) {
@@ -91,13 +95,15 @@ bool llama_batch_allocr::init(
         pos.resize(batch.n_tokens);
 
         // initialize the starting position for each sequence based on the positions in the memory
-        llama_pos p0[LLAMA_MAX_SEQ];
-        for (uint32_t s = 0; s < n_seq_max; ++s) {
-            if (!memory) {
-                // if no memory -> start from 0
-                p0[s] = 0;
-            } else {
-                p0[s] = memory->seq_pos_max(s) + 1;
+        std::unordered_map<llama_seq_id, llama_pos> p0;
+        for (int32_t i = 0; i < batch.n_tokens; i++) {
+            for (int32_t s = 0; s < batch.n_seq_id[i]; ++s) {
+                const llama_seq_id seq_id = batch.seq_id[i][s];
+
+                if (p0.find(seq_id) == p0.end()) {
+                    // if no memory -> start from 0
+                    p0[seq_id] = memory ? memory->seq_pos_max(seq_id) + 1 : 0;
+                }
             }
         }
 
@@ -171,10 +177,8 @@ bool llama_batch_allocr::init(
 
             if (s > 0) {
                 // mark that sequence s1 is coupled to s0
-                seq_cpl[s1][s0] = true;
-
                 // note: tracking the other way around is not necessary for now
-                //seq_cpl[s0][s1] = true;
+                seq_cpl.emplace_back(s1, s0);
 
                 has_cpl = true;
             }
@@ -183,26 +187,23 @@ bool llama_batch_allocr::init(
 
     // precompute the sequence sets for each token and determine the unique sequence ids that participate in the batch
     {
-        seq_set_t seq_set_unq;
-
         for (int32_t i = 0; i < batch.n_tokens; ++i) {
-            seq_set_t cur;
-            for (int32_t s = 0; s < batch.n_seq_id[i]; ++s) {
-                const llama_seq_id seq_id = batch.seq_id[i][s];
+            seq_set_t cur(batch.seq_id[i], batch.seq_id[i] + batch.n_seq_id[i]);
 
-                cur        .set(seq_id);
-                seq_set_unq.set(seq_id);
-            }
+            std::sort(cur.begin(), cur.end());
+            cur.erase(std::unique(cur.begin(), cur.end()), cur.end());
+
+            seq_id_unq.insert(seq_id_unq.end(), cur.begin(), cur.end());
 
             seq_set.push_back(cur);
             seq_set_map[cur].push_back(i);
         }
 
-        for (uint32_t s = 0; s < n_seq_max; ++s) {
-            if (seq_set_unq.test(s)) {
-                seq_idx[s] = seq_id_unq.size();
-                seq_id_unq.push_back(s);
-            }
+        std::sort(seq_id_unq.begin(), seq_id_unq.end());
+        seq_id_unq.erase(std::unique(seq_id_unq.begin(), seq_id_unq.end()), seq_id_unq.end());
+
+        for (size_t s = 0; s < seq_id_unq.size(); ++s) {
+            seq_idx[seq_id_unq[s]] = (int32_t) s;
         }
     }
 
@@ -236,8 +237,8 @@ bool llama_batch_allocr::init(
             }
 
             std::stringstream ss;
-            for (int s1 = 0; s1 < (int) seq_cpl[s0].size(); ++s1) {
-                if (seq_cpl[s0][s1]) {
+            for (const auto & [s, s1] : seq_cpl) {
+                if (s == s0) {
                     ss << s1 << " ";
                 }
             }
@@ -254,11 +255,7 @@ bool llama_batch_allocr::init(
 
     if (n_pos_per_embd > 1) {
         // M-RoPE case: allow position to "jump" forward only (non-continuous positions are allowed)
-        for (uint32_t s = 0; s < n_seq_max; ++s) {
-            if (seq_pos[s].empty()) {
-                continue;
-            }
-
+        for (const llama_seq_id s : seq_id_unq) {
             const llama_pos p0 = memory ? memory->seq_pos_max(s) : -1;
 
             if (batch.token) {
@@ -287,11 +284,7 @@ bool llama_batch_allocr::init(
             }
         }
     } else {
-        for (uint32_t s = 0; s < n_seq_max; ++s) {
-            if (seq_pos[s].empty()) {
-                continue;
-            }
-
+        for (const llama_seq_id s : seq_id_unq) {
             const llama_pos p0 = memory ? memory->seq_pos_max(s) : -1;
 
             if (p0 >= 0) {
@@ -321,15 +314,11 @@ bool llama_batch_allocr::init(
     }
 
     if (memory) {
-        for (uint32_t s0 = 0; s0 < n_seq_max; ++s0) {
-            for (uint32_t s1 = 0; s1 < n_seq_max; ++s1) {
-                if (seq_cpl[s0][s1]) {
-                    if (memory->seq_pos_min(s0) != memory->seq_pos_min(s1) ||
-                        memory->seq_pos_max(s0) != memory->seq_pos_max(s1)) {
-                        LLAMA_LOG_ERROR("%s: sequence %d is coupled to %d in the input batch, but have divereged\n", __func__, s0, s1);
-                        return false;
-                    }
-                }
+        for (const auto & [s0, s1] : seq_cpl) {
+            if (memory->seq_pos_min(s0) != memory->seq_pos_min(s1) ||
+                memory->seq_pos_max(s0) != memory->seq_pos_max(s1)) {
+                LLAMA_LOG_ERROR("%s: sequence %d is coupled to %d in the input batch, but have divereged\n", __func__, s0, s1);
+                return false;
             }
         }
     }
@@ -352,15 +341,8 @@ bool llama_batch_allocr::init(
     // seq_id[i][0]: 0 0 1 1 0 1 0
     //
     {
-        seq_set_t cur_seq_set[LLAMA_MAX_SEQ];
-        for (uint32_t s = 0; s < n_seq_max; ++s) {
-            cur_seq_set[s].set();
-        }
-
-        llama_pos cur_seq_pos[LLAMA_MAX_SEQ];
-        for (uint32_t s = 0; s < n_seq_max; ++s) {
-            cur_seq_pos[s] = -1;
-        }
+        // per sequence: the sequences of all its tokens so far, and its last position
+        std::unordered_map<llama_seq_id, std::pair<seq_set_t, llama_pos>> cur_seq;
 
         for (int32_t i = 0; i < batch.n_tokens; ++i) {
             const llama_pos pos = batch.pos[i];
@@ -368,19 +350,27 @@ bool llama_batch_allocr::init(
             for (int32_t s = 0; s < batch.n_seq_id[i]; ++s) {
                 const llama_seq_id seq_id = batch.seq_id[i][s];
 
-                cur_seq_set[seq_id] &= seq_set[i];
+                const auto [it, added] = cur_seq.try_emplace(seq_id, seq_set[i], -1);
 
-                if (cur_seq_set[seq_id].none()) {
+                auto & [cur_set, cur_pos] = it->second;
+
+                if (!added && cur_set != seq_set[i]) {
+                    seq_set_t res;
+                    std::set_intersection(cur_set.begin(), cur_set.end(), seq_set[i].begin(), seq_set[i].end(), std::back_inserter(res));
+                    cur_set = std::move(res);
+                }
+
+                if (cur_set.empty()) {
                     LLAMA_LOG_ERROR("%s: sequence %d belongs to incompatible sequence sets (not allowed)\n", __func__, seq_id);
                     return false;
                 }
 
-                if (pos < cur_seq_pos[seq_id]) {
+                if (pos < cur_pos) {
                     LLAMA_LOG_ERROR("%s: sequence %d positions are decreasing (not allowed)\n", __func__, seq_id);
                     return false;
                 }
 
-                cur_seq_pos[seq_id] = pos;
+                cur_pos = pos;
             }
         }
     }
@@ -406,7 +396,7 @@ llama_ubatch llama_batch_allocr::ubatch_reserve(uint32_t n_seq_tokens, uint32_t 
     udata->n_seq_id  .resize(n_tokens);
     udata->seq_id    .resize(n_tokens);
     udata->seq_id_unq.resize(0);
-    udata->seq_idx   .resize(LLAMA_MAX_SEQ, -1);
+    udata->seq_idx   .resize(n_seqs, -1);
     udata->output    .resize(n_tokens);
 
     for (uint32_t s = 0; s < n_seqs; ++s) {
@@ -456,10 +446,6 @@ std::vector<int32_t> & llama_batch_allocr::get_out_ids() {
     return out_ids;
 }
 
-const std::vector<int32_t> & llama_batch_allocr::get_tok_ids() const {
-    return tok_ids;
-}
-
 llama_pos llama_batch_allocr::seq_pos_min(llama_seq_id seq_id) const {
     return seq_pos[seq_id].empty() ? -1 : *seq_pos[seq_id].begin();
 }
@@ -470,7 +456,6 @@ llama_pos llama_batch_allocr::seq_pos_max(llama_seq_id seq_id) const {
 
 void llama_batch_allocr::split_reset() {
     out_ids.clear();
-    tok_ids.clear();
 
     n_used = 0;
 
@@ -514,7 +499,7 @@ llama_ubatch llama_batch_allocr::split_simple(uint32_t n_ubatch) {
 
 llama_ubatch llama_batch_allocr::split_equal(uint32_t n_ubatch, bool sequential, uint32_t n_keep_tail) {
     if (sequential && has_cpl) {
-        LLAMA_LOG_ERROR("%s: sequential split is not supported when there are coupled sequences in the input batch (you may need to use the -kvu flag)\n", __func__);
+        LLAMA_LOG_ERROR("%s: sequential split is not supported when there are coupled sequences in the input batch\n", __func__);
 
         return {};
     }
@@ -533,7 +518,7 @@ llama_ubatch llama_batch_allocr::split_equal(uint32_t n_ubatch, bool sequential,
 
         for (uint32_t s = 0; s < cur_seq_set.size(); ++s) {
             // no overlap with existing sequence sets:
-            if (!(cur_seq_set[s] & seq_set[i]).none()) {
+            if (seq_sets_overlap(cur_seq_set[s], seq_set[i])) {
                 add = false;
                 break;
             }
@@ -617,16 +602,47 @@ llama_ubatch llama_batch_allocr::split_equal(uint32_t n_ubatch, bool sequential,
             return (uint32_t) (seq_set_map[cur_seq_set[s]].size() - cur_idx[s]);
         };
 
-        // keep the longest prefix of seqs that satisfy the constraint, to preserve sequential seq ids
-        uint32_t n_keep = 0;
-        while (n_keep < n_seqs) {
-            const uint32_t remaining = n_remaining(n_keep);
+        auto keeps = [&](uint32_t s) {
+            const uint32_t remaining = n_remaining(s);
+            return remaining == 0 || remaining >= n_keep_tail;
+        };
 
-            if (remaining != 0 && remaining < n_keep_tail) {
-                break;
+        uint32_t n_keep = 0;
+        if (sequential) {
+            // keep the longest prefix of seqs that satisfy the constraint, to preserve sequential seq ids
+            while (n_keep < n_seqs && keeps(n_keep)) {
+                n_keep++;
+            }
+        } else {
+            // [TAG_RECURRENT_ROLLBACK_SPLITS] keep every seq that satisfies the constraint and defer only the others:
+            // a seq whose step is longer than the rest (e.g. the one seq of a decode step with a shorter draft) then
+            // goes to a ubatch of its own instead of splitting every seq before it off into a ubatch each
+            std::vector<uint32_t> order(n_seqs);
+            for (uint32_t s = 0; s < n_seqs; ++s) {
+                order[s] = s;
+            }
+            std::stable_partition(order.begin(), order.end(), keeps);
+
+            for (const uint32_t s : order) {
+                n_keep += keeps(s) ? 1 : 0;
             }
 
-            n_keep++;
+            if (n_keep < n_seqs) {
+                LLAMA_LOG_DEBUG("%s: %u of %u seqs deferred, their steps are longer than the %zu tokens each of this ubatch\n",
+                        __func__, n_seqs - n_keep, n_seqs, idxs_per_seq[0].size());
+
+                std::vector<seq_set_t> seq_sets(n_seqs);
+                std::vector<int32_t>   idx_cur (n_seqs);
+                std::vector<idx_vec_t> idxs_seq(n_seqs);
+                for (uint32_t s = 0; s < n_seqs; ++s) {
+                    seq_sets[s] = cur_seq_set [order[s]];
+                    idx_cur [s] = cur_idx     [order[s]];
+                    idxs_seq[s] = std::move(idxs_per_seq[order[s]]);
+                }
+                cur_seq_set  = std::move(seq_sets);
+                cur_idx      = std::move(idx_cur);
+                idxs_per_seq = std::move(idxs_seq);
+            }
         }
 
         // all seqs violate the constraint - resolve the first one directly and emit it alone
@@ -713,7 +729,8 @@ llama_ubatch llama_batch_allocr::split_seq(uint32_t n_ubatch) {
 
         do {
             ++cur_idx;
-        } while (cur_idx < get_n_tokens() && (used[cur_idx] || ((cur_seq_set & seq_set[cur_idx]) != seq_set[cur_idx])));
+        } while (cur_idx < get_n_tokens() && (used[cur_idx] ||
+                    !std::includes(cur_seq_set.begin(), cur_seq_set.end(), seq_set[cur_idx].begin(), seq_set[cur_idx].end())));
 
         if (cur_idx == get_n_tokens()) {
             break;
@@ -730,25 +747,23 @@ void llama_batch_allocr::clear() {
 
     batch = {};
 
+    // what the last batch used, not every sequence there can be
+    for (const llama_seq_id s : seq_id_unq) {
+        seq_pos[s].clear();
+        seq_idx[s] = -1;
+    }
+
     pos       .clear();
     n_seq_id  .clear();
     seq_id    .clear();
     seq_id_unq.clear();
     output    .clear();
 
-    for (auto & cur : seq_pos) {
-        cur.clear();
-    }
-
-    for (auto & cur : seq_cpl) {
-        std::fill(cur.begin(), cur.end(), false);
-    }
+    seq_cpl.clear();
 
     seq_set.clear();
 
     seq_set_map.clear();
-
-    std::fill(seq_idx.begin(), seq_idx.end(), -1);
 }
 
 llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, uint32_t n_seqs, bool equal_seqs) {
@@ -767,12 +782,11 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
     udata->n_seq_id  .resize(n_tokens);
     udata->seq_id    .resize(n_tokens);
     udata->seq_id_unq.resize(0);
-    udata->seq_idx   .resize(LLAMA_MAX_SEQ, -1);
+    udata->seq_idx   .resize(n_seq_max, -1);
     udata->output    .resize(n_tokens);
 
+    udata->batch_idxs = idxs;
     udata->seq_id_data.reserve(n_tokens);
-
-    seq_set_t seq_set_unq;
 
     for (size_t i = 0; i < idxs.size(); ++i) {
         if (batch.token) {
@@ -799,14 +813,11 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
             const llama_seq_id seq_id = batch.seq_id[idxs[i]][s];
 
             udata->seq_id_data.push_back(seq_id);
-            seq_set_unq.set(seq_id);
         }
 
         if (udata->output[i]) {
             out_ids.push_back(idxs[i]);
         }
-
-        tok_ids.push_back(idxs[i]);
     }
 
     llama_seq_id * seq_id_ptr = udata->seq_id_data.data();
@@ -815,11 +826,13 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
         seq_id_ptr += udata->n_seq_id[i];
     }
 
-    for (uint32_t s = 0; s < n_seq_max; ++s) {
-        if (seq_set_unq.test(s)) {
-            udata->seq_idx[s] = udata->seq_id_unq.size();
-            udata->seq_id_unq.push_back(s);
-        }
+    udata->seq_id_unq = udata->seq_id_data;
+
+    std::sort(udata->seq_id_unq.begin(), udata->seq_id_unq.end());
+    udata->seq_id_unq.erase(std::unique(udata->seq_id_unq.begin(), udata->seq_id_unq.end()), udata->seq_id_unq.end());
+
+    for (size_t s = 0; s < udata->seq_id_unq.size(); ++s) {
+        udata->seq_idx[udata->seq_id_unq[s]] = (int32_t) s;
     }
 
     llama_ubatch res {
@@ -868,7 +881,7 @@ void llama_batch_allocr::ubatch_print(const llama_ubatch & ubatch, int debug) {
             ss_seq_id_unq << ubatch.seq_id_unq[s] << " ";
         }
 
-        for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
+        for (uint32_t s = 0; s < n_seq_max; ++s) {
             if (ubatch.seq_idx[s] >= 0) {
                 ss_seq_idx << ubatch.seq_idx[s]%10;
             } else {

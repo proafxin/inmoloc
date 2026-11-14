@@ -3,13 +3,14 @@
 # Run llama.cpp tools on Snapdragon devices (natively, via ADB, or SSH).
 #
 
-import sys
-import os
 import argparse
-import subprocess
+import logging
+import os
+import pathlib
 import platform
 import shlex
-import logging
+import subprocess
+import sys
 
 logger = logging.getLogger("run")
 
@@ -53,24 +54,24 @@ MANAGED_ENV_NAMES = (
 def parse_target(target_str):
     if not target_str:
         return None, None
-    if target_str.startswith("adb") or target_str.startswith("android"):
+    if target_str.startswith(("adb", "android")):
         parts = target_str.split(":", 1)
         serial = parts[1] if len(parts) > 1 else None
         return "android", serial
-    elif target_str.startswith("lnx") or target_str.startswith("linux") or target_str.startswith("ubuntu"):
+    if target_str.startswith(("lnx", "linux", "ubuntu")):
         parts = target_str.split(":", 1)
         host = parts[1] if len(parts) > 1 else None
         return "linux", host
-    elif target_str in ("wos", "windows"):
+    if target_str in {"wos", "windows"}:
         return "windows", None
-    else:
-        return None, None
+    return None, None
 
 
 def shlex_join(args_list):
-    if hasattr(shlex, 'join'):
+    if hasattr(shlex, "join"):
         return shlex.join(args_list)
     import pipes
+
     return " ".join(pipes.quote(x) for x in args_list)
 
 
@@ -80,14 +81,14 @@ def split_device_list(devices):
     bracket_depth = 0
 
     for ch in devices:
-        if ch == '[':
+        if ch == "[":
             bracket_depth += 1
             curr.append(ch)
-        elif ch == ']':
+        elif ch == "]":
             if bracket_depth > 0:
                 bracket_depth -= 1
             curr.append(ch)
-        elif ch == ',' and bracket_depth == 0:
+        elif ch == "," and bracket_depth == 0:
             part = "".join(curr).strip()
             if part:
                 parts.append(part)
@@ -117,7 +118,7 @@ def device_arg_from_devices(devices):
     return ",".join(names)
 
 
-def normalize_cmd_device_args(cmd_args):
+def normalize_cmd_device_args(cmd_args) -> None:
     for i, arg in enumerate(cmd_args):
         if arg == "--device" and i + 1 < len(cmd_args):
             cmd_args[i + 1] = device_arg_from_devices(cmd_args[i + 1])
@@ -125,13 +126,13 @@ def normalize_cmd_device_args(cmd_args):
             cmd_args[i] = "--device=" + device_arg_from_devices(arg.split("=", 1)[1])
 
 
-def main():
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     # Split arguments at '--'
-    if '--' in sys.argv:
-        idx = sys.argv.index('--')
+    if "--" in sys.argv:
+        idx = sys.argv.index("--")
         run_args = sys.argv[1:idx]
-        cmd_args = sys.argv[idx + 1:]
+        cmd_args = sys.argv[idx + 1 :]
     else:
         run_args = sys.argv[1:]
         cmd_args = []
@@ -139,46 +140,115 @@ def main():
     parser = argparse.ArgumentParser(
         description="Unified runner for llama.cpp tools on Snapdragon (natively, via ADB, or via SSH)."
     )
-    parser.add_argument("--target", help="Execution target (e.g. android[:serial]/adb[:serial], linux:[user@]host/lnx:[user@]host/ubuntu:[user@]host, windows/wos) (default: local run)")
-    parser.add_argument("--target-dir", help="Target directory on the device (default: /data/local/tmp/llama.cpp for Android, ~/llama.cpp for Linux)")
-    parser.add_argument("--install-dir", help="Install directory name (defaults to pkg-TARGET or pkg-TARGET-dbg prefix based on target)")
+    parser.add_argument(
+        "--target",
+        help="Execution target (e.g. android[:serial]/adb[:serial], linux:[user@]host/lnx:[user@]host/ubuntu:[user@]host, windows/wos) (default: local run)",
+    )
+    parser.add_argument(
+        "--target-dir",
+        help="Target directory on the device (default: /data/local/tmp/llama.cpp for Android, ~/llama.cpp for Linux)",
+    )
+    parser.add_argument(
+        "--install-dir", help="Install directory name (defaults to pkg-TARGET or pkg-TARGET-dbg prefix based on target)"
+    )
     parser.add_argument("--debug", action="store_true", help="Use debug build (defaults to pkg-TARGET-dbg folder)")
-    parser.add_argument("--devices", "--device", "-d", help="Select execution devices (split into NPU and OpenCL GPUs automatically, default: HTP0)")
+    parser.add_argument(
+        "--devices",
+        "--device",
+        "-d",
+        help="Select execution devices (split into NPU and OpenCL GPUs automatically, default: HTP0)",
+    )
     parser.add_argument("--verbose", help="Verbose level (enables both Hexagon and OpenCL kernel cache debugging)")
     parser.add_argument("--profile", help="Profiling flag (enables Hexagon profiling and OpenCL autotuning)")
-    parser.add_argument("--sched-debug", action="store_true", help="Enable GGML/llama.cpp scheduler debug output (GGML_SCHED_DEBUG=2)")
-    parser.add_argument("--mtmd-device", help="Specify the backend device ID for Multi-Threaded Multi-Device setup (MTMD_BACKEND_DEVICE)")
+    parser.add_argument(
+        "--sched-debug", action="store_true", help="Enable GGML/llama.cpp scheduler debug output (GGML_SCHED_DEBUG=2)"
+    )
+    parser.add_argument(
+        "--mtmd-device",
+        help="Specify the backend device ID for Multi-Threaded Multi-Device setup (MTMD_BACKEND_DEVICE)",
+    )
 
     # Hexagon specific parameters
     parser.add_argument("--hex-verbose", help="Enable verbose logging (GGML_HEXAGON_VERBOSE)")
-    parser.add_argument("--hex-profile", help="Enable NPU/Hexagon profiling and performance metrics print (GGML_HEXAGON_PROFILE)")
+    parser.add_argument(
+        "--hex-profile", help="Enable NPU/Hexagon profiling and performance metrics print (GGML_HEXAGON_PROFILE)"
+    )
     parser.add_argument("--hex-nhvx", help="Number of HVX units to use (GGML_HEXAGON_NHVX)")
     parser.add_argument("--hex-nhmx", help="Number of HMX units to use. 0 disables HMX power-up (GGML_HEXAGON_NHMX)")
     parser.add_argument("--hex-hostbuf", help="Enable host buffers (GGML_HEXAGON_HOSTBUF)")
-    parser.add_argument("--hex-opbatch", help="Maximum number of operations to batch into a single HTP execution (GGML_HEXAGON_OPBATCH)")
+    parser.add_argument(
+        "--hex-opbatch", help="Maximum number of operations to batch into a single HTP execution (GGML_HEXAGON_OPBATCH)"
+    )
     parser.add_argument("--hex-opqueue", help="Size of the asynchronous NPU operation queue (GGML_HEXAGON_OPQUEUE)")
-    parser.add_argument("--hex-oppoll", default="1", help="Enable (1) or Disable (0) polling for NPU opbatch completion (GGML_HEXAGON_OPPOLL) (default: 1)")
-    parser.add_argument("--hex-opfilter", help="Regex pattern to filter/select which operators are offloaded to NPU (GGML_HEXAGON_OPFILTER)")
-    parser.add_argument("--hex-opfusion", help="NPU graph node fusion optimization level (0: disabled, 1: enabled) (GGML_HEXAGON_OPFUSION)")
+    parser.add_argument(
+        "--hex-oppoll",
+        default="1",
+        help="Enable (1) or Disable (0) polling for NPU opbatch completion (GGML_HEXAGON_OPPOLL) (default: 1)",
+    )
+    parser.add_argument(
+        "--hex-opfilter",
+        help="Regex pattern to filter/select which operators are offloaded to NPU (GGML_HEXAGON_OPFILTER)",
+    )
+    parser.add_argument(
+        "--hex-opfusion",
+        help="NPU graph node fusion optimization level (0: disabled, 1: enabled) (GGML_HEXAGON_OPFUSION)",
+    )
     parser.add_argument("--hex-vmem", help="Maximum NPU VMEM size limit in MB to allocate (GGML_HEXAGON_VMEM)")
     parser.add_argument("--hex-mbuf", help="Maximum host buffer size limit in MB to allocate (GGML_HEXAGON_MBUF)")
-    parser.add_argument("--hex-mm-select", help="Select MUL_MAT and MUL_MAT_ID kernel (GGML_HEXAGON_MM_SELECT) 3:HMX,2:HVX-tiled,1:HVX-flat,0:disable")
-    parser.add_argument("--hex-fa-select", help="Select Flash Attention kernel (GGML_HEXAGON_FA_SELECT) 2:HMX,1:HVX,0:disable")
+    parser.add_argument(
+        "--hex-mm-select",
+        help="Select MUL_MAT and MUL_MAT_ID kernel (GGML_HEXAGON_MM_SELECT) 3:HMX,2:HVX-tiled,1:HVX-flat,0:disable",
+    )
+    parser.add_argument(
+        "--hex-fa-select", help="Select Flash Attention kernel (GGML_HEXAGON_FA_SELECT) 2:HMX,1:HVX,0:disable"
+    )
     parser.add_argument("--hex-ar-select", help="Select All-Reduce kernel (GGML_HEXAGON_AR_SELECT) 1:enable,0:disable")
-    parser.add_argument("--hex-etm", help="Enable Embedded Trace Macrocell hardware tracing / trace logging (GGML_HEXAGON_ETM)")
-    parser.add_argument("--hex-arch", help="Target Hexagon NPU architecture version override (v73, v75, v79, v81, etc.) (GGML_HEXAGON_ARCH)")
+    parser.add_argument(
+        "--hex-etm", help="Enable Embedded Trace Macrocell hardware tracing / trace logging (GGML_HEXAGON_ETM)"
+    )
+    parser.add_argument(
+        "--hex-arch",
+        help="Target Hexagon NPU architecture version override (v73, v75, v79, v81, etc.) (GGML_HEXAGON_ARCH)",
+    )
     parser.add_argument("--hex-optrace", help="Trace buffer size in number of records (GGML_HEXAGON_OPTRACE)")
 
     # OpenCL specific parameters
-    parser.add_argument("--cl-platform", help="Select OpenCL platform name/regex (e.g. Qualified Qualcomm OpenCL platform) (GGML_OPENCL_PLATFORM)")
+    parser.add_argument(
+        "--cl-platform",
+        help="Select OpenCL platform name/regex (e.g. Qualified Qualcomm OpenCL platform) (GGML_OPENCL_PLATFORM)",
+    )
     parser.add_argument("--cl-device", help="Select OpenCL device name/regex (e.g. Adreno GPU) (GGML_OPENCL_DEVICE)")
-    parser.add_argument("--cl-opfilter", help="Regex pattern to filter/select which operators are offloaded to OpenCL (GGML_OPENCL_OPFILTER)")
-    parser.add_argument("--cl-disable-fusion", action="store_true", help="Disable OpenCL kernel fusion optimizations (GGML_OPENCL_DISABLE_FUSION)")
-    parser.add_argument("--cl-cache-dir", help="Directory path to store compiled OpenCL program binaries (GGML_OPENCL_KERNEL_CACHE_DIR)")
-    parser.add_argument("--cl-cache-debug", help="Enable verbose debugging logs for the kernel caching system (GGML_OPENCL_KERNEL_CACHE_DEBUG)")
-    parser.add_argument("--cl-fa-tune", action="store_true", help="Enable automatic Flash Attention kernel autotuning (GGML_OPENCL_FA_TUNE)")
-    parser.add_argument("--cl-adreno-xmem", action="store_true", help="Enforce matmul using texture/image (xmem) memory paths on Adreno GPUs (GGML_OPENCL_ADRENO_XMEM_GEMM)")
-    parser.add_argument("--cl-adreno-large-buffer", action="store_true", help="Allow allocating larger buffer sizes on Adreno GPUs (GGML_OPENCL_ADRENO_USE_LARGE_BUFFER)")
+    parser.add_argument(
+        "--cl-opfilter",
+        help="Regex pattern to filter/select which operators are offloaded to OpenCL (GGML_OPENCL_OPFILTER)",
+    )
+    parser.add_argument(
+        "--cl-disable-fusion",
+        action="store_true",
+        help="Disable OpenCL kernel fusion optimizations (GGML_OPENCL_DISABLE_FUSION)",
+    )
+    parser.add_argument(
+        "--cl-cache-dir", help="Directory path to store compiled OpenCL program binaries (GGML_OPENCL_KERNEL_CACHE_DIR)"
+    )
+    parser.add_argument(
+        "--cl-cache-debug",
+        help="Enable verbose debugging logs for the kernel caching system (GGML_OPENCL_KERNEL_CACHE_DEBUG)",
+    )
+    parser.add_argument(
+        "--cl-fa-tune",
+        action="store_true",
+        help="Enable automatic Flash Attention kernel autotuning (GGML_OPENCL_FA_TUNE)",
+    )
+    parser.add_argument(
+        "--cl-adreno-xmem",
+        action="store_true",
+        help="Enforce matmul using texture/image (xmem) memory paths on Adreno GPUs (GGML_OPENCL_ADRENO_XMEM_GEMM)",
+    )
+    parser.add_argument(
+        "--cl-adreno-large-buffer",
+        action="store_true",
+        help="Allow allocating larger buffer sizes on Adreno GPUs (GGML_OPENCL_ADRENO_USE_LARGE_BUFFER)",
+    )
 
     args = parser.parse_args(run_args)
 
@@ -193,7 +263,9 @@ def main():
     if args.target:
         target_type, target_val = parse_target(args.target)
         if not target_type:
-            logger.error(f"Error: Invalid target format '{args.target}'. Must be android[:serial]/adb[:serial], linux:[user@]host/lnx:[user@]host/ubuntu:[user@]host, or windows/wos.")
+            logger.error(
+                f"Error: Invalid target format '{args.target}'. Must be android[:serial]/adb[:serial], linux:[user@]host/lnx:[user@]host/ubuntu:[user@]host, or windows/wos."
+            )
             sys.exit(1)
         target_prefix = args.target.split(":", 1)[0]
 
@@ -211,7 +283,7 @@ def main():
             for suffix in suffixes:
                 for prefix in prefixes:
                     test_path = f"./pkg-{prefix}{suffix}/llama.cpp"
-                    if os.path.exists(test_path):
+                    if pathlib.Path(test_path).exists():
                         install_dir = f"pkg-{prefix}{suffix}"
                         found = True
                         break
@@ -236,7 +308,7 @@ def main():
         if arg == "--device" and i + 1 < len(cmd_args):
             device_in_cmd = cmd_args[i + 1]
             break
-        elif arg.startswith("--device="):
+        if arg.startswith("--device="):
             device_in_cmd = arg.split("=", 1)[1]
             break
 
@@ -255,10 +327,9 @@ def main():
         # Any device containing "htp" is Hexagon, rest is OpenCL
         hex_parts = [p for p in parts if "htp" in p.lower()]
         cl_parts = [
-            p for p in parts
-            if "htp" not in p.lower()
-            and p.lower() not in ("none", "cpu")
-            and not p.lower().startswith("gpuopencl")
+            p
+            for p in parts
+            if "htp" not in p.lower() and p.lower() not in {"none", "cpu"} and not p.lower().startswith("gpuopencl")
         ]
         hex_devices = ",".join(hex_parts)
         cl_device = ",".join(cl_parts)
@@ -328,53 +399,51 @@ def main():
 
     # Resolve executable path
     executable = cmd_args[0]
-    known_binaries = ["local-inference-cli", "local-inference-bench", "local-inference-completion", "local-inference-mtmd-cli", "test-backend-ops"]
+    known_binaries = [
+        "local-inference-cli",
+        "local-inference-bench",
+        "local-inference-completion",
+        "local-inference-mtmd-cli",
+        "test-backend-ops",
+    ]
     if executable in known_binaries:
-        if target_type in ("android", "linux"):
+        if target_type in {"android", "linux"}:
             resolved_exec = f"./bin/{executable}"
+        elif platform.system() == "Windows":
+            resolved_exec = os.path.normpath(os.path.join(package_path, "bin", f"{executable}.exe"))
         else:
-            if platform.system() == "Windows":
-                resolved_exec = os.path.normpath(os.path.join(package_path, "bin", f"{executable}.exe"))
-            else:
-                resolved_exec = os.path.normpath(os.path.join(package_path, "bin", executable))
+            resolved_exec = os.path.normpath(os.path.join(package_path, "bin", executable))
         cmd_args[0] = resolved_exec
 
     # Infer device string to pass to the tool
-    basename = os.path.basename(executable)
-    if basename.endswith(".exe"):
-        basename = basename[:-4]
+    basename = pathlib.Path(executable).name
+    basename = basename.removesuffix(".exe")
 
     device_val = None
     if basename == "test-backend-ops":
         for i in range(len(cmd_args)):
-            if cmd_args[i] in ("-p", "--params") and i + 1 < len(cmd_args):
+            if cmd_args[i] in {"-p", "--params"} and i + 1 < len(cmd_args):
                 val = cmd_args[i + 1]
                 new_val = ""
                 for j, char in enumerate(val):
-                    if char in ('[', ']'):
-                        if j > 0 and val[j - 1] == '\\':
+                    if char in {"[", "]"}:
+                        if j > 0 and val[j - 1] == "\\":
                             new_val += char
                         else:
-                            new_val += '\\' + char
+                            new_val += "\\" + char
                     else:
                         new_val += char
                 cmd_args[i + 1] = new_val
 
         has_b = any(arg == "-b" for arg in cmd_args)
         if not has_b:
-            if args.devices:
-                device_val = device_arg_from_devices(args.devices)
-            else:
-                device_val = "HTP0"
+            device_val = device_arg_from_devices(args.devices) if args.devices else "HTP0"
             if device_val:
                 cmd_args += ["-b", device_val]
     else:
         has_device = any(arg.startswith("--device") for arg in cmd_args)
         if not has_device:
-            if args.devices:
-                device_val = device_arg_from_devices(args.devices)
-            else:
-                device_val = "HTP0"
+            device_val = device_arg_from_devices(args.devices) if args.devices else "HTP0"
 
             if device_val:
                 cmd_args += ["--device", device_val]
@@ -388,28 +457,49 @@ def main():
         or args.hex_profile is not None
         or args.hex_optrace is not None
     )
-    if verbose_trigger and basename in ("local-inference-cli", "local-inference-completion", "local-inference-bench", "local-inference-server", "local-inference-mtmd-cli"):
-        if "-v" not in cmd_args and "--verbose" not in cmd_args:
-            cmd_args.append("-v")
+    if (
+        verbose_trigger
+        and basename
+        in {
+            "local-inference-cli",
+            "local-inference-completion",
+            "local-inference-bench",
+            "local-inference-server",
+            "local-inference-mtmd-cli",
+        }
+        and "-v" not in cmd_args
+        and "--verbose" not in cmd_args
+    ):
+        cmd_args.append("-v")
 
     # Inject defaults for local-inference-cli, local-inference-completion, and local-inference-server if not overridden by the user
-    if basename in ("local-inference-cli", "local-inference-completion", "local-inference-server"):
+    if basename in {"local-inference-cli", "local-inference-completion", "local-inference-server"}:
         if "-ngl" not in cmd_args and "--n-gpu-layers" not in cmd_args:
             cmd_args += ["-ngl", "99"]
         if "-fa" not in cmd_args and "--flash-attn" not in cmd_args:
             cmd_args += ["-fa", "on"]
 
     # Use ubatch-size 1024 for hexagon backend (HTP devices)
-    if hex_devices and basename in ("local-inference-cli", "local-inference-completion", "local-inference-server", "local-inference-bench"):
-        if "--ubatch-size" not in cmd_args and "-ub" not in cmd_args:
-            cmd_args += ["--ubatch-size", "1024"]
-    elif basename in ("local-inference-cli", "local-inference-completion", "local-inference-server"):
+    if (
+        hex_devices
+        and basename
+        in {"local-inference-cli", "local-inference-completion", "local-inference-server", "local-inference-bench"}
+    ) or basename in {"local-inference-cli", "local-inference-completion", "local-inference-server"}:
         if "--ubatch-size" not in cmd_args and "-ub" not in cmd_args:
             cmd_args += ["--ubatch-size", "1024"]
 
-    if basename in ("local-inference-cli", "local-inference-completion", "local-inference-server", "local-inference-bench"):
-        if "-t" not in cmd_args and "--threads" not in cmd_args:
-            cmd_args += ["-t", "6"]
+    if (
+        basename
+        in {
+            "local-inference-cli",
+            "local-inference-completion",
+            "local-inference-server",
+            "local-inference-bench",
+        }
+        and "-t" not in cmd_args
+        and "--threads" not in cmd_args
+    ):
+        cmd_args += ["-t", "6"]
 
     # Resolve target directory on device
     target_dir = args.target_dir
@@ -419,20 +509,17 @@ def main():
     if target_type == "android":
         # Run via ADB
         adb_base = ["adb"]
-        if target_val: # serial
+        if target_val:  # serial
             adb_base += ["-s", target_val]
 
-        env_parts = [
-            "LD_LIBRARY_PATH=./lib",
-            "ADSP_LIBRARY_PATH=./lib"
-        ]
+        env_parts = ["LD_LIBRARY_PATH=./lib", "ADSP_LIBRARY_PATH=./lib"]
         for k, v in env_vars.items():
             env_parts.append(f"{k}={v}")
         env_str = " ".join(env_parts)
 
         cmd_str = shlex_join(cmd_args)
         adb_shell_cmd = f"cd {target_dir} && ulimit -c unlimited && {env_str} {cmd_str}"
-        full_cmd = adb_base + ["shell", adb_shell_cmd]
+        full_cmd = [*adb_base, "shell", adb_shell_cmd]
 
         logger.info(f"+ {' '.join(full_cmd)}")
         res = subprocess.run(full_cmd)
@@ -441,14 +528,13 @@ def main():
     elif target_type == "linux":
         ssh_host = target_val
         if not ssh_host:
-            logger.error("Error: SSH host not specified in target (e.g. use linux:user@host, lnx:user@host, or ubuntu:user@host). Cannot execute.")
+            logger.error(
+                "Error: SSH host not specified in target (e.g. use linux:user@host, lnx:user@host, or ubuntu:user@host). Cannot execute."
+            )
             sys.exit(1)
 
         # Linux remote run via SSH
-        env_parts = [
-            "LD_LIBRARY_PATH=./lib",
-            "ADSP_LIBRARY_PATH=./lib"
-        ]
+        env_parts = ["LD_LIBRARY_PATH=./lib", "ADSP_LIBRARY_PATH=./lib"]
         for k, v in env_vars.items():
             env_parts.append(f"{k}={v}")
         env_str = " ".join(env_parts)

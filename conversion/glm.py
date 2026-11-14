@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import re
-
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
-
-from .deepseek import DeepseekV2Model
+from conversion.base import ModelBase, TextModel, gguf, logger
+from conversion.deepseek import DeepseekV2Model
 
 
 @ModelBase.register("Glm4ForCausalLM", "Glm4vForConditionalGeneration")
@@ -21,15 +21,16 @@ class Glm4Model(TextModel):
     use_mrope = False
     partial_rotary_factor = 0.5
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.partial_rotary_factor = self.rope_parameters.get("partial_rotary_factor", 0.5)
         if "mrope_section" in self.rope_parameters:
             self.use_mrope = True
             logger.info("Q/K weight will need to be permuted for M-RoPE")
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
         special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
         tokens, toktypes, tokpre = self.get_vocab_base()
@@ -44,23 +45,25 @@ class Glm4Model(TextModel):
         special_vocab._set_special_token("bos", tokenizer.get_added_vocab()["<|endoftext|>"])  # ty: ignore[unresolved-attribute]
         special_vocab.add_to_gguf(self.gguf_writer)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         if (rope_dim := self.hparams.get("head_dim")) is None:
             rope_dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
         self.gguf_writer.add_rope_dimension_count(int(rope_dim * self.partial_rotary_factor))
 
     @staticmethod
-    def normal_to_neox(weights: Tensor, n_head: int, n_head_kv: int, head_dim: int, partial_rotary_factor: float) -> Tensor:
+    def normal_to_neox(
+        weights: Tensor, n_head: int, n_head_kv: int, head_dim: int, partial_rotary_factor: float
+    ) -> Tensor:
         orig_shape = weights.shape
         if len(orig_shape) == 1:
             weights = weights.unsqueeze(1)  # [out_dim, 1]
         if len(weights.shape) != 2:
             raise ValueError("Only 1D and 2D tensors are supported.")
         n_effective_heads = weights.shape[0] // head_dim
-        if n_head_kv is not None and n_effective_heads != n_head:
-            if n_effective_heads != n_head_kv:
-                raise AssertionError(f"Mismatch in effective heads: computed {n_effective_heads}, expected {n_head} or {n_head_kv}")
+        if n_head_kv is not None and n_effective_heads not in {n_head, n_head_kv}:
+            msg = f"Mismatch in effective heads: computed {n_effective_heads}, expected {n_head} or {n_head_kv}"
+            raise AssertionError(msg)
         rotary_dim = int(head_dim * partial_rotary_factor)
         if rotary_dim % 2 != 0:
             raise ValueError("rotary_dim must be even.")
@@ -82,7 +85,9 @@ class Glm4Model(TextModel):
             if name.endswith(("q_proj.weight", "q_proj.bias")):
                 data_torch = Glm4Model.normal_to_neox(data_torch, n_head, n_head, head_dim, self.partial_rotary_factor)
             if name.endswith(("k_proj.weight", "k_proj.bias")):
-                data_torch = Glm4Model.normal_to_neox(data_torch, n_head, n_kv_head, head_dim, self.partial_rotary_factor)
+                data_torch = Glm4Model.normal_to_neox(
+                    data_torch, n_head, n_kv_head, head_dim, self.partial_rotary_factor
+                )
         yield from super().modify_tensors(data_torch, name, bid)
 
 
@@ -95,13 +100,13 @@ class GlmOCRModel(Glm4Model):
 
     # Note: GLM-OCR is the same as GLM4, but with an extra NextN/MTP prediction layer
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # GLM-OCR has num_hidden_layers + 1 actual layers (including NextN layer)
         self.block_count = self.hparams["num_hidden_layers"] + self.hparams.get("num_nextn_predict_layers", 0)
         self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         # NextN/MTP prediction layers
         if (num_nextn_predict_layers := self.hparams.get("num_nextn_predict_layers")) is not None:
@@ -115,7 +120,7 @@ class Glm4MoeModel(TextModel):
     supports_mtp_export = True
     _n_main_layers: int | None = None
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         if not self.no_mtp:
             self.block_count += self.hparams.get("num_nextn_predict_layers", 0)
@@ -138,8 +143,15 @@ class Glm4MoeModel(TextModel):
 
         if is_mtp and cls.no_mtp:
             return None
-        if cls.mtp_only and not is_mtp and name not in (
-            "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight",
+        if (
+            cls.mtp_only
+            and not is_mtp
+            and name
+            not in {
+                "model.embed_tokens.weight",
+                "model.norm.weight",
+                "lm_head.weight",
+            }
         ):
             return None
 
@@ -148,12 +160,10 @@ class Glm4MoeModel(TextModel):
     def set_vocab(self):
         return self._set_vocab_glm()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         if (rope_dim := self.hparams.get("head_dim")) is None:
-            rope_dim = (
-                self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
-            )
+            rope_dim = self.hparams["hidden_size"] // self.hparams["num_attention_heads"]
         self.gguf_writer.add_rope_dimension_count(
             int(rope_dim * self.rope_parameters.get("partial_rotary_factor", 0.5))
         )
@@ -182,7 +192,7 @@ class Glm4MoeModel(TextModel):
         if not self.no_mtp and (num_nextn_predict_layers := self.hparams.get("num_nextn_predict_layers")) is not None:
             self.gguf_writer.add_nextn_predict_layers(num_nextn_predict_layers)
 
-    def prepare_metadata(self, vocab_only: bool):
+    def prepare_metadata(self, vocab_only: bool) -> None:
         from_dir = self.fname_out.is_dir()
         super().prepare_metadata(vocab_only=vocab_only)
 
@@ -191,8 +201,14 @@ class Glm4MoeModel(TextModel):
 
         output_type: str = self.ftype.name.partition("_")[2]
         fname_default: str = gguf.naming_convention(
-            self.metadata.name, self.metadata.basename, self.metadata.finetune,
-            self.metadata.version, size_label=None, output_type=output_type, model_type=None)
+            self.metadata.name,
+            self.metadata.basename,
+            self.metadata.finetune,
+            self.metadata.version,
+            size_label=None,
+            output_type=output_type,
+            model_type=None,
+        )
         self.fname_out = self.fname_out.parent / f"mtp-{fname_default}.gguf"
 
     _experts: list[dict[str, Tensor]] | None = None
@@ -235,13 +251,14 @@ class Glm4MoeModel(TextModel):
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
         if self._experts is not None:
             # flatten `list[dict[str, Tensor]]` into `list[str]`
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)
 
 
 @ModelBase.register("Glm4MoeLiteForCausalLM")
@@ -255,7 +272,7 @@ class Glm4MoeLiteModel(DeepseekV2Model):
     def set_vocab(self):
         return self._set_vocab_glm()
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         num_hidden_layers = self.hparams["num_hidden_layers"]
@@ -269,7 +286,7 @@ class Glm4MoeLiteModel(DeepseekV2Model):
 
         self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         if self.skip_mtp:
@@ -292,14 +309,21 @@ class Glm4MoeLiteModel(DeepseekV2Model):
             is_mtp = match is not None and int(match.group(1)) >= cls._n_main_layers
             if is_mtp and cls.no_mtp:
                 return None
-            if cls.mtp_only and not is_mtp and name not in (
-                "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight",
+            if (
+                cls.mtp_only
+                and not is_mtp
+                and name
+                not in {
+                    "model.embed_tokens.weight",
+                    "model.norm.weight",
+                    "lm_head.weight",
+                }
             ):
                 return None
 
         return name, gen
 
-    def prepare_metadata(self, vocab_only: bool):
+    def prepare_metadata(self, vocab_only: bool) -> None:
         from_dir = self.fname_out.is_dir()
         super().prepare_metadata(vocab_only=vocab_only)
 
@@ -308,8 +332,14 @@ class Glm4MoeLiteModel(DeepseekV2Model):
 
         output_type: str = self.ftype.name.partition("_")[2]
         fname_default: str = gguf.naming_convention(
-            self.metadata.name, self.metadata.basename, self.metadata.finetune,
-            self.metadata.version, size_label=None, output_type=output_type, model_type=None)
+            self.metadata.name,
+            self.metadata.basename,
+            self.metadata.finetune,
+            self.metadata.version,
+            size_label=None,
+            output_type=output_type,
+            model_type=None,
+        )
         self.fname_out = self.fname_out.parent / f"mtp-{fname_default}.gguf"
 
 
@@ -325,7 +355,7 @@ class GlmMoeDsaModel(DeepseekV2Model):
     # HYV3Model / Step35Model).
     _n_main_layers: int | None = None
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.block_count = self.hparams["num_hidden_layers"]
         if not self.no_mtp:
@@ -352,8 +382,15 @@ class GlmMoeDsaModel(DeepseekV2Model):
             return None
         # --mtp: keep ONLY NextN-block tensors plus the shared embeddings/
         # norm/lm_head (so the resulting GGUF carries just the draft head).
-        if cls.mtp_only and not is_mtp and name not in (
-            "model.embed_tokens.weight", "model.norm.weight", "lm_head.weight",
+        if (
+            cls.mtp_only
+            and not is_mtp
+            and name
+            not in {
+                "model.embed_tokens.weight",
+                "model.norm.weight",
+                "lm_head.weight",
+            }
         ):
             return None
 
@@ -362,7 +399,7 @@ class GlmMoeDsaModel(DeepseekV2Model):
     def set_vocab(self):
         return self._set_vocab_glm()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         rope_dim = self.hparams["qk_rope_head_dim"]
@@ -388,8 +425,9 @@ class SolarOpenModel(Glm4MoeModel):
     model_arch = gguf.MODEL_ARCH.GLM4_MOE
     supports_mtp_export = False
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model)
         special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
         tokens, toktypes, tokpre = self.get_vocab_base()

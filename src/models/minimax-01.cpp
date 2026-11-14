@@ -278,11 +278,10 @@ llama_model_minimax_01::graph::graph(const llama_model & model, const llm_graph_
             // lightning attention layer
 
             const auto * mctx_cur = inp_rs->mctx;
-            const auto kv_head = mctx_cur->get_head();
 
             // TODO unneeded - any way to make conv states optional in recurrent memory?
             ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
-            ggml_tensor * conv_state_all  = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs);
+            ggml_tensor * conv_state_all  = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs, nullptr, il);
             ggml_build_forward_expand(gf, conv_state_all);
 
             float slope_scale = 1.0 - 1.0 * il / (n_layer - 1) + 1e-5;
@@ -309,7 +308,7 @@ llama_model_minimax_01::graph::graph(const llama_model & model, const llm_graph_
 
             // get previous KV
             ggml_tensor * la_states_all = mctx_cur->get_s_l(il);
-            ggml_tensor * state = build_rs(inp_rs, la_states_all, hparams.n_embd_s(), n_seqs);
+            ggml_tensor * state = build_rs(inp_rs, la_states_all, hparams.n_embd_s(), n_seqs, nullptr, il);
 
             ggml_tensor * kv_old = ggml_reshape_4d(ctx0, state, n_embd_head, n_embd_head, n_head, n_seqs);
             cb(kv_old, "kv_old", il);
@@ -388,10 +387,7 @@ llama_model_minimax_01::graph::graph(const llama_model & model, const llm_graph_
             }
 
             // store new KV
-            ggml_build_forward_expand(gf,
-                                     ggml_cpy(ctx0, kv_new,
-                                              ggml_view_1d(ctx0, la_states_all, hparams.n_embd_s() * n_seqs,
-                                                           kv_head * hparams.n_embd_s() * ggml_element_size(la_states_all))));
+            ggml_build_forward_expand(gf, build_rs_store(inp_rs, la_states_all, kv_new, il));
 
             qkv = ggml_cont(ctx0, ggml_permute(ctx0, qkv, 0, 2, 1, 3));
             cb(qkv, "qkv_permuted", il);

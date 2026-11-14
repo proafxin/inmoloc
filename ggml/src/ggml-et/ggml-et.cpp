@@ -1515,6 +1515,10 @@ static bool ggml_backend_et_device_supports_op(ggml_backend_dev_t dev, const ggm
             }
             break;
         case GGML_OP_GATED_DELTA_NET:
+            // the rows mode (ggml_gated_delta_net_rows) is not implemented here
+            if (ggml_get_op_params_i32(op, 1) != 0) {
+                return false;
+            }
             // F32, S_v must be multiple of 8 for vectorization
             // q, k, v may be row-contiguous with strided higher dimensions.
             // g, beta, state stay contiguous.

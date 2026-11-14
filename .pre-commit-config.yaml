@@ -1,16 +1,19 @@
-# See https://pre-commit.com for more information
-# See https://pre-commit.com/hooks.html for more hooks
-exclude: prompts/.*.txt
+# models/ holds tokenizer test inputs and chat templates whose whitespace is the data; vendor/, ggml/ and tools/ui/
+# are third-party code, kept as upstream has it
+exclude: ^(\.git/|__pycache__/|\.venv/|venv/|build/|dist/|.*\.egg-info/|\.pytest_cache/|node_modules/|models/|vendor/|ggml/|tools/ui/|tools/cvector-generator/.*\.txt|tools/server/deps_|prompts/)
+
 repos:
-- repo: https://github.com/pre-commit/pre-commit-hooks
-  rev: v4.6.0
-  hooks:
-  - id: trailing-whitespace
-  - id: end-of-file-fixer
-  - id: check-yaml
-  - id: check-added-large-files
-- repo: https://github.com/PyCQA/flake8
-  rev: 7.0.0
-  hooks:
-  -   id: flake8
-      additional_dependencies: [flake8-no-print]
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+    - id: trailing-whitespace
+    - id: end-of-file-fixer
+    - id: check-yaml
+    - id: check-added-large-files
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.3
+    hooks:
+    - id: ruff-check
+      args: ["--config=pyproject.toml", "--fix"]
+    - id: ruff-format

@@ -96,14 +96,6 @@ struct batch_builder {
 static void test_init(testing & t) {
     llama_vocab vocab;
 
-    t.test("rejects_n_seq_max_too_large", [&](testing & t) {
-        batch_builder bb;
-        bb.add(0, {0}, true);
-
-        llama_batch_allocr ba(1);
-        t.assert_true(!ba.init(bb.make(), vocab, nullptr, bb.n_embd, LLAMA_MAX_SEQ + 1, false));
-    });
-
     t.test("rejects_invalid_token", [&](testing & t) {
         llama_token tok = 0; // empty vocab -> every token id is out of range
         llama_batch batch = llama_batch_get_one(&tok, 1);

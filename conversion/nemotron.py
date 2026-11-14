@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
     from pathlib import Path
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, TextModel, gguf, logger
-
-from .granite import GraniteHybridModel
+from conversion.base import MmprojModel, ModelBase, TextModel, gguf, logger
+from conversion.granite import GraniteHybridModel
 
 
 @ModelBase.register(
@@ -31,7 +32,7 @@ class NemotronNanoV2VLModel(MmprojModel):
         if vision_config is None:
             return None
         # Add ViT-H parameters
-        vision_config = {
+        return {
             **vision_config,
             "hidden_size": self._vit_hidden_size,
             "intermediate_size": self._vit_intermediate_size,
@@ -39,12 +40,11 @@ class NemotronNanoV2VLModel(MmprojModel):
             "num_attention_heads": self._vit_num_heads,
             "image_size": self.global_config.get("force_image_size", 512),
         }
-        return vision_config
 
     def get_audio_config(self) -> dict[str, Any] | None:
         return self.global_config.get("sound_config")
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         if "image_mean" not in self.preprocessor_config:
             self.preprocessor_config["image_mean"] = [0.485, 0.456, 0.406]
         if "image_std" not in self.preprocessor_config:
@@ -94,9 +94,8 @@ class NemotronNanoV2VLModel(MmprojModel):
         if not name.startswith(("vision_model.radio_model.model.", "mlp1.", "sound_encoder.", "sound_projection.")):
             return None
 
-        if "patch_generator.pos_embed" in name:
-            if not name.endswith(".weight"):
-                name += ".weight"
+        if "patch_generator.pos_embed" in name and not name.endswith(".weight"):
+            name += ".weight"
 
         # num_batches is only used for training not inference.
         if "conv.norm" in name and "num_batches" in name:
@@ -109,6 +108,7 @@ class NemotronNanoV2VLModel(MmprojModel):
         if "patch_generator.pos_embed" in name:
             # Downsample position embeddings for fixed 512x512 image size
             import torch.nn.functional as F
+
             n_embd = self.hparams["hidden_size"]
             image_size = self.global_config.get("force_image_size", 512)
             patch_size = self.hparams["patch_size"]
@@ -118,8 +118,12 @@ class NemotronNanoV2VLModel(MmprojModel):
                 # Reshape to grid, interpolate, flatten back
                 data_torch = data_torch.reshape(1, max_patches_per_side, max_patches_per_side, n_embd)
                 data_torch = data_torch.permute(0, 3, 1, 2).float()  # [1, n_embd, 128, 128]
-                data_torch = F.interpolate(data_torch, size=(target_patches_per_side, target_patches_per_side),
-                                           mode='bilinear', align_corners=True)
+                data_torch = F.interpolate(
+                    data_torch,
+                    size=(target_patches_per_side, target_patches_per_side),
+                    mode="bilinear",
+                    align_corners=True,
+                )
                 data_torch = data_torch.permute(0, 2, 3, 1)  # [1, 32, 32, n_embd]
                 data_torch = data_torch.reshape(1, target_patches_per_side * target_patches_per_side, n_embd)
 
@@ -138,13 +142,11 @@ class NemotronNanoV2VLModel(MmprojModel):
             if len(data_torch.shape) == 3 and data_torch.shape[2] == 1:
                 data_torch = data_torch.reshape(data_torch.shape[0], data_torch.shape[1])
 
-        if "subsampling.layers" in name and name.endswith(".bias"):
-            if len(data_torch.shape) == 1:
-                data_torch = data_torch.reshape(1, -1, 1, 1)
+        if "subsampling.layers" in name and name.endswith(".bias") and len(data_torch.shape) == 1:
+            data_torch = data_torch.reshape(1, -1, 1, 1)
 
-        if "pointwise_conv" in name and name.endswith(".bias"):
-            if len(data_torch.shape) == 1:
-                data_torch = data_torch.reshape(1, -1, 1, 1)
+        if "pointwise_conv" in name and name.endswith(".bias") and len(data_torch.shape) == 1:
+            data_torch = data_torch.reshape(1, -1, 1, 1)
 
         for mapped_name, tensor in super().modify_tensors(data_torch, name, bid):
             if name.startswith("sound_projection.") and mapped_name.startswith("mm.model.mlp."):
@@ -157,12 +159,12 @@ class NemotronNanoV2VLModel(MmprojModel):
 class NemotronModel(TextModel):
     model_arch = gguf.MODEL_ARCH.NEMOTRON
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_sentencepiece()
         self.gguf_writer.add_pad_token_id(0)
         self.gguf_writer.add_unk_token_id(1)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         hparams = self.hparams
         self.gguf_writer.add_vocab_size(hparams["vocab_size"])
@@ -190,7 +192,7 @@ class NemotronModel(TextModel):
         #   model.layers.{l}.post_attention_layernorm.weight
         #   model.norm.weight
         if name.endswith("norm.weight"):
-            data_torch = data_torch + 1
+            data_torch += 1
 
         yield from super().modify_tensors(data_torch, name, bid)
 
@@ -199,6 +201,7 @@ class NemotronModel(TextModel):
 @ModelBase.example("nvidia/Nemotron-H-8B-Base-8K")
 class NemotronHModel(GraniteHybridModel):
     """Hybrid mamba2/attention model from NVIDIA"""
+
     model_arch = gguf.MODEL_ARCH.NEMOTRON_H
     is_moe: bool = False
     supports_mtp_export = True
@@ -208,7 +211,7 @@ class NemotronHModel(GraniteHybridModel):
     _ATTN_LAYER_TYPES = {"attention", "full_attention"}
     _MLP_LAYER_TYPES = {"moe"}
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         # We have to determine the correct model architecture (MoE vs non-MoE) before
         # calling the parent __init__. This is because the parent constructor
         # uses self.model_arch to build the tensor name map, and all MoE-specific
@@ -256,9 +259,7 @@ class NemotronHModel(GraniteHybridModel):
         if self.is_moe and not self.no_mtp:
             n_nextn = self.hparams.get("num_nextn_predict_layers", 0) or 0
             if n_nextn > 0:
-                assert n_nextn == 1, (
-                    "NemotronH MTP conversion currently supports num_nextn_predict_layers == 1"
-                )
+                assert n_nextn == 1, "NemotronH MTP conversion currently supports num_nextn_predict_layers == 1"
                 self._mtp_bid = self.block_count
                 self.block_count += 1
                 # The folded MTP block carries both an attention sub-layer and a
@@ -274,7 +275,9 @@ class NemotronHModel(GraniteHybridModel):
         pattern = self.hparams.get("hybrid_override_pattern") or self.hparams.get("layers_block_type")
         if pattern is None:
             return []
-        assert len(pattern) == self.block_count, f"Mismatch between pattern ({len(pattern)}) and block_count ({self.block_count})!"
+        assert len(pattern) == self.block_count, (
+            f"Mismatch between pattern ({len(pattern)}) and block_count ({self.block_count})!"
+        )
         if isinstance(pattern, str):
             return [i for i, val in enumerate(pattern) if val == "*"]
 
@@ -290,7 +293,7 @@ class NemotronHModel(GraniteHybridModel):
         elif cls.mtp_only:
             # --mtp: export the MTP head plus the tensors it shares with the target model
             # Include lm_head scale sidecars so NVFP4 packing sees them.
-            keep = name in (
+            keep = name in {
                 "backbone.embeddings.weight",
                 "backbone.norm_f.weight",
                 "lm_head.weight",
@@ -301,7 +304,7 @@ class NemotronHModel(GraniteHybridModel):
                 "lm_head.input_global_scale",
                 "lm_head.weight_global_scale",
                 "lm_head.weight_packed",
-            )
+            }
             if not keep:
                 return None
         # PEFT names adapter tensors using model.layers.*, while Nemotron-H checkpoints
@@ -310,7 +313,7 @@ class NemotronHModel(GraniteHybridModel):
             name = name.replace("model.layers.", "backbone.layers.", 1)
         return super().filter_tensors((name, gen))
 
-    def prepare_metadata(self, vocab_only: bool):
+    def prepare_metadata(self, vocab_only: bool) -> None:
         from_dir = self.fname_out.is_dir()
         super().prepare_metadata(vocab_only=vocab_only)
 
@@ -318,11 +321,17 @@ class NemotronHModel(GraniteHybridModel):
             return
         output_type: str = self.ftype.name.partition("_")[2]
         fname_default: str = gguf.naming_convention(
-            self.metadata.name, self.metadata.basename, self.metadata.finetune,
-            self.metadata.version, size_label=None, output_type=output_type, model_type=None)
+            self.metadata.name,
+            self.metadata.basename,
+            self.metadata.finetune,
+            self.metadata.version,
+            size_label=None,
+            output_type=output_type,
+            model_type=None,
+        )
         self.fname_out = self.fname_out.parent / f"mtp-{fname_default}.gguf"
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         head_dim = self.head_dim
@@ -336,14 +345,14 @@ class NemotronHModel(GraniteHybridModel):
         #   duplicating all the parent logic
         if not self.is_moe:
             n_ff = self.find_hparam(["intermediate_size", "n_inner", "hidden_dim"])
-            self.gguf_writer.add_feed_forward_length([
-                n_ff if i in self._mlp_layers else 0 for i in range(self.block_count)
-            ])
+            self.gguf_writer.add_feed_forward_length(
+                [n_ff if i in self._mlp_layers else 0 for i in range(self.block_count)]
+            )
         else:
             moe_intermediate_size = self.hparams["moe_intermediate_size"]
-            self.gguf_writer.add_feed_forward_length([
-                moe_intermediate_size if i in self._mlp_layers else 0 for i in range(self.block_count)
-            ])
+            self.gguf_writer.add_feed_forward_length(
+                [moe_intermediate_size if i in self._mlp_layers else 0 for i in range(self.block_count)]
+            )
             self.gguf_writer.add_expert_used_count(self.hparams["num_experts_per_tok"])
             self.gguf_writer.add_expert_feed_forward_length(self.hparams["moe_intermediate_size"])
             self.gguf_writer.add_expert_shared_feed_forward_length(self.hparams["moe_shared_expert_intermediate_size"])
@@ -364,7 +373,7 @@ class NemotronHModel(GraniteHybridModel):
         if self._mtp_bid is not None:
             self.gguf_writer.add_nextn_predict_layers(self.hparams["num_nextn_predict_layers"])
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         # The NemotronH config uses pattern characters (e.g. '-') that may not
         # be supported by the installed transformers version. AutoTokenizer
         # internally calls AutoConfig which triggers this parsing failure.
@@ -373,10 +382,13 @@ class NemotronHModel(GraniteHybridModel):
         toktypes: list[int] = []
 
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
 
         # Pad vocab size (from Mamba2Model/GraniteHybridModel)
-        self.hparams["pad_vocab_size_multiple"] = 8 # Setting this here since GraniteHybridModel.set_vocab() isn't being invoked now.
+        self.hparams["pad_vocab_size_multiple"] = (
+            8  # Setting this here since GraniteHybridModel.set_vocab() isn't being invoked now.
+        )
         # From Mamba2Model.set_vocab():
         vocab_size = self.hparams["vocab_size"]
         pad_vocab = self.hparams.get("pad_vocab_size_multiple", 16)
@@ -404,7 +416,9 @@ class NemotronHModel(GraniteHybridModel):
                         previous_token = token
                         token = tokenizer.decode(tokenizer.encode(token, add_special_tokens=False))  # ty: ignore[unresolved-attribute, invalid-assignment]
                         if previous_token != token:
-                            logger.info(f"{repr(previous_token)} is encoded and decoded back to {repr(token)} using AutoTokenizer")
+                            logger.info(
+                                f"{previous_token!r} is encoded and decoded back to {token!r} using AutoTokenizer"
+                            )
 
                     if added_tokens_decoder[i].special or self.does_token_look_special(token):
                         toktypes.append(gguf.TokenType.CONTROL)
@@ -431,10 +445,10 @@ class NemotronHModel(GraniteHybridModel):
             self.gguf_writer.add_add_bos_token(True)
 
     _MTP_SPECIAL_RENAMES = {
-        "mtp.layers.0.enorm.weight":           "model.layers.{bid}.enorm.weight",
-        "mtp.layers.0.hnorm.weight":           "model.layers.{bid}.hnorm.weight",
-        "mtp.layers.0.eh_proj.weight":         "model.layers.{bid}.eh_proj.weight",
-        "mtp.layers.1.norm.weight":            "model.layers.{bid}.post_attention_layernorm.weight",
+        "mtp.layers.0.enorm.weight": "model.layers.{bid}.enorm.weight",
+        "mtp.layers.0.hnorm.weight": "model.layers.{bid}.hnorm.weight",
+        "mtp.layers.0.eh_proj.weight": "model.layers.{bid}.eh_proj.weight",
+        "mtp.layers.1.norm.weight": "model.layers.{bid}.post_attention_layernorm.weight",
         "mtp.layers.1.final_layernorm.weight": "model.layers.{bid}.shared_head.norm.weight",
     }
 
@@ -507,14 +521,15 @@ class NemotronHModel(GraniteHybridModel):
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
 
         if self._experts is not None:
             # flatten `list[dict[str, Tensor]]` into `list[str]`
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)
 
 
 @ModelBase.register("NemotronHPuzzleForCausalLM")
@@ -530,7 +545,7 @@ class NemotronHPuzzleModel(NemotronHModel):
     is_moe: bool = True
     supports_mtp_export = False
 
-    def __init__(self, dir_model: "Path", *args, **kwargs):
+    def __init__(self, dir_model: Path, *args, **kwargs) -> None:
         hparams = dict(kwargs.pop("hparams", None) or ModelBase.load_hparams(dir_model, self.is_mistral_format))
 
         self.block_configs: list[dict] = hparams["block_configs"]
@@ -557,7 +572,7 @@ class NemotronHPuzzleModel(NemotronHModel):
         # head has a different layout and no inference path, so stay opted out.
         self._mtp_bid = None
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         GraniteHybridModel.set_gguf_parameters(self)
 
         head_dim = self.head_dim
@@ -588,7 +603,7 @@ class NemotronHPuzzleModel(NemotronHModel):
         # the router bias "e_score_correction_bias" instead of "e_score_correction.bias";
         # normalize so both convert identically.
         if name.startswith("model."):
-            name = "backbone." + name[len("model."):]
+            name = "backbone." + name[len("model.") :]
         if name.endswith("mixer.gate.e_score_correction_bias"):
             name = name[: -len("e_score_correction_bias")] + "e_score_correction.bias"
 

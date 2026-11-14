@@ -60,7 +60,7 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->set_desc("Number of tokens after n_keep that may be discarded when shifting context (0 = half context)"));
 
     add((new field_num("n_cmpl", params.n_cmpl))
-        ->set_hard_limits(1, params_base.n_parallel)
+        ->set_hard_limits(1, 1024)
         ->add_alias("n") // alias "n" as fallback (OpenAI completions API)
         ->set_desc("Number of completions to generate. If the input has multiple prompts, total outputs will be N prompts times n_cmpl"));
 

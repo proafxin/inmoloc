@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 
 import argparse
-import os
-import sys
 import importlib
-import torch
-import numpy as np
+import os
+import pathlib
+import sys
 
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForImageTextToText, AutoConfig
+import numpy as np
+import torch
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer
 
 # Add parent directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(pathlib.Path(__file__).parent, ".."))
+import pathlib
+
 from utils.common import debug_hook, save_output_data
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Process model with specified path")
@@ -20,6 +24,7 @@ def parse_arguments():
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose debug output")
     parser.add_argument("--device", "-d", help="Device to use (cpu, cuda, mps, auto)", default="auto")
     return parser.parse_args()
+
 
 def load_model_and_tokenizer(model_path, device="auto"):
     print("Loading model and tokenizer using AutoTokenizer:", model_path)
@@ -42,7 +47,7 @@ def load_model_and_tokenizer(model_path, device="auto"):
         config = config.text_config
         multimodal = True
 
-    def print_if_exists(label, obj, attr, default="N/A"):
+    def print_if_exists(label, obj, attr, default="N/A") -> None:
         val = getattr(obj, attr) if hasattr(obj, attr) else default
         print(f"{label}", val)
 
@@ -55,74 +60,61 @@ def load_model_and_tokenizer(model_path, device="auto"):
     unreleased_model_name = os.getenv("UNRELEASED_MODEL_NAME")
     if unreleased_model_name:
         model_name_lower = unreleased_model_name.lower()
-        unreleased_module_path = (
-            f"transformers.models.{model_name_lower}.modular_{model_name_lower}"
-        )
+        unreleased_module_path = f"transformers.models.{model_name_lower}.modular_{model_name_lower}"
         class_name = f"{unreleased_model_name}ForCausalLM"
         print(f"Importing unreleased model module: {unreleased_module_path}")
 
         try:
             model_class = getattr(importlib.import_module(unreleased_module_path), class_name)
             model = model_class.from_pretrained(
-                    model_path,
-                    device_map=device_map,
-                    offload_folder="offload",
-                    trust_remote_code=True,
-                    config=config
+                model_path, device_map=device_map, offload_folder="offload", trust_remote_code=True, config=config
             )
         except (ImportError, AttributeError) as e:
             print(f"Failed to import or load model: {e}")
-            exit(1)
+            sys.exit(1)
+    elif multimodal:
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_path, device_map=device_map, offload_folder="offload", trust_remote_code=True, config=full_config
+        )
     else:
-        if multimodal:
-            model = AutoModelForImageTextToText.from_pretrained(
-                    model_path,
-                    device_map=device_map,
-                    offload_folder="offload",
-                    trust_remote_code=True,
-                    config=full_config
-            )
-        else:
-            model = AutoModelForCausalLM.from_pretrained(
-                    model_path,
-                    device_map=device_map,
-                    offload_folder="offload",
-                    trust_remote_code=True,
-                    config=config
-            )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path, device_map=device_map, offload_folder="offload", trust_remote_code=True, config=config
+        )
 
     print(f"Model class: {model.__class__.__name__}")
 
     return model, tokenizer, config
 
-def enable_torch_debugging(model):
-        for name, module in model.named_modules():
-            if len(list(module.children())) == 0:  # only leaf modules
-                module.register_forward_hook(debug_hook(name))
+
+def enable_torch_debugging(model) -> None:
+    for name, module in model.named_modules():
+        if len(list(module.children())) == 0:  # only leaf modules
+            module.register_forward_hook(debug_hook(name))
+
 
 def get_prompt(args):
     if args.prompt_file:
-        with open(args.prompt_file, encoding='utf-8') as f:
+        with pathlib.Path(args.prompt_file).open(encoding="utf-8") as f:
             return f.read()
     elif os.getenv("MODEL_TESTING_PROMPT"):
         return os.getenv("MODEL_TESTING_PROMPT")
     else:
         return "Hello, my name is"
 
-def main():
+
+def main() -> None:
     args = parse_arguments()
     model_path = os.environ.get("MODEL_PATH", args.model_path)
     if model_path is None:
         print("Error: Model path must be specified either via --model-path argument or MODEL_PATH environment variable")
         sys.exit(1)
 
-
-    model, tokenizer, config = load_model_and_tokenizer(model_path, args.device)
+    model, tokenizer, _config = load_model_and_tokenizer(model_path, args.device)
 
     if args.verbose:
         enable_torch_debugging(model)
 
-    model_name = os.path.basename(model_path)
+    model_name = pathlib.Path(model_path).name
 
     # Iterate over the model parameters (the tensors) and get the first one
     # and use it to get the device the model is on.
@@ -132,7 +124,7 @@ def main():
     token_ids = input_ids[0].cpu().tolist()
 
     print(f"Input tokens: {input_ids}")
-    print(f"Input text: {repr(prompt)}")
+    print(f"Input text: {prompt!r}")
     print(f"Tokenized: {tokenizer.convert_ids_to_tokens(input_ids[0])}")
 
     batch_size = 512
@@ -142,11 +134,11 @@ def main():
         outputs = None
         for i in range(0, input_ids.size(1), batch_size):
             print(f"Processing chunk with tokens {i} to {i + batch_size}")
-            chunk = input_ids[:, i:i + batch_size]
+            chunk = input_ids[:, i : i + batch_size]
             outputs = model(chunk.to(model.device), past_key_values=past, use_cache=True)
             past = outputs.past_key_values
 
-        logits = outputs.logits # type: ignore
+        logits = outputs.logits  # type: ignore
 
         # Extract logits for the last token (next token prediction)
         last_logits = logits[0, -1, :].float().cpu().numpy()
@@ -164,9 +156,10 @@ def main():
         print("Top 5 predictions:")
         for idx in top_indices:
             token = tokenizer.decode([idx])
-            print(f"  Token {idx} ({repr(token)}): {last_logits[idx]:.6f}")
+            print(f"  Token {idx} ({token!r}): {last_logits[idx]:.6f}")
 
         save_output_data(last_logits, token_ids, prompt, model_name)
+
 
 if __name__ == "__main__":
     main()

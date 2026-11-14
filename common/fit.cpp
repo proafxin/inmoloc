@@ -1,9 +1,11 @@
 #include "fit.h"
 
 #include "log.h"
+#include "sampling.h"
 
 #include "../src/llama-ext.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <stdexcept>
@@ -191,9 +193,6 @@ static void common_params_fit_impl(
     uint32_t hp_nct = 0; // hparams.n_ctx_train
     uint32_t hp_nex = 0; // hparams.n_expert
 
-    // with non-unified kv, we need to take into account n_streams
-    // for example, if memory can hold more than model's trained context size, we must extend the n_ctx to hold enough n_streams
-    const uint32_t n_streams  = cparams->kv_unified ? 1 : std::max<uint32_t>(1, cparams->n_seq_max);
     const bool     n_ctx_auto = cparams->n_ctx == 0;
 
     dmds_t   dmds_extra;       // memory of the extra model, laid out on the devices of the main model
@@ -262,18 +261,13 @@ static void common_params_fit_impl(
     LOG_TRC("%s: getting device memory data for initial parameters:\n", __func__);
     dmds_t dmds_full = common_get_device_memory_data_impl(path_model, mparams, cparams, devs, hp_ngl, hp_nct, hp_nex, log_level);
 
-    // saturate instead of overflowing, this also preserves the UINT32_MAX sentinel of n_ctx_min:
-    const uint32_t n_ctx_max       = (uint32_t) std::min<uint64_t>(uint64_t(hp_nct)    * n_streams, UINT32_MAX);
-    const uint32_t n_ctx_min_total = (uint32_t) std::min<uint64_t>(uint64_t(n_ctx_min) * n_streams, UINT32_MAX);
+    // the sequences share one memory: the context is the trained one at most
+    const uint32_t n_ctx_max       = hp_nct;
+    const uint32_t n_ctx_min_total = n_ctx_min;
 
     // llama_context would use only hp_nct in total for n_ctx == 0, resolve the context before measuring anything else:
     if (n_ctx_auto) {
         cparams->n_ctx = n_ctx_max;
-        if (n_streams > 1) {
-            LOG_TRC("%s: context size unset and KV cache not unified -> using %" PRIu32 " for %" PRIu32 " sequences:\n",
-                __func__, n_ctx_max, n_streams);
-            dmds_full = common_get_device_memory_data_impl(path_model, mparams, cparams, devs, hp_ngl, hp_nct, hp_nex, log_level);
-        }
     }
     add_extra_memory(dmds_full);
 
@@ -424,8 +418,8 @@ static void common_params_fit_impl(
                         // linear interpolation between minimum and maximum context size:
                         cparams->n_ctx += (n_ctx_max - n_ctx_min_total) * (sum_used_target - sum_projected_used_min_ctx)
                             / (sum_projected_used - sum_projected_used_min_ctx);
-                        // round down context for CUDA backend, keep it divisible by the number of streams:
-                        const uint32_t align = 256 * n_streams;
+                        // round down context for CUDA backend
+                        const uint32_t align = 256;
                         cparams->n_ctx = std::max(cparams->n_ctx - cparams->n_ctx % align, n_ctx_min_total);
 
                         const int64_t bytes_per_ctx = (sum_projected_used - sum_projected_used_min_ctx) / (n_ctx_max - n_ctx_min_total);
@@ -1099,6 +1093,91 @@ static common_budget_mem common_budget_device_mem(llama_context * ctx, bool with
     return res;
 }
 
+bool common_budget_box(
+                  llama_model * model,
+                llama_context * ctx,
+                llama_context * ctx_dft,
+                           bool   dft_backend_sampling,
+                         size_t   budget,
+                         size_t   budget_used,
+                       size_t *   box_bytes,
+                       size_t *   predicted,
+                       size_t *   free_before) {
+    constexpr double MiB = 1024.0*1024.0;
+
+    const auto own_mem = common_budget_device_mem(ctx, true);
+
+    // what an MTP draft takes, with its tokens in the blocks of this context
+    size_t dft = 0;
+    if (ctx_dft) {
+        // the outputs of the draft and its samplers on the backend are part of its compute buffers
+        llama_sampler * chain = nullptr;
+        if (dft_backend_sampling) {
+            chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
+            llama_sampler_chain_add(chain, llama_sampler_init_top_k(10));
+            llama_set_sampler(ctx_dft, LLAMA_SEQ_ID_ALL, chain);
+        }
+
+        // the outputs of the draft are set, see common_speculative_set_outputs()
+        llama_context_reserve(ctx_dft);
+
+        // a draft model of its own brings its weights
+        const auto dft_mem = common_budget_device_mem(ctx_dft, llama_get_model(ctx_dft) != model);
+
+        dft = dft_mem.model + dft_mem.compute;
+
+        // speculative decoding sets its own
+        if (chain) {
+            llama_set_sampler(ctx_dft, LLAMA_SEQ_ID_ALL, nullptr);
+            llama_sampler_free(chain);
+        }
+    }
+
+    const size_t free_now = common_device_memory_free(model);
+
+    // the process as it is now holds the weights, the compute buffers and the draft, not the box, which has no buffer yet
+    size_t     held = 0;
+    const bool own  = common_device_memory_own(model, held);
+
+    // a compute buffer the device has not committed yet is not in what the process holds, and it will be
+    held = std::max(held, own_mem.model + own_mem.compute + dft);
+
+    // a device does not place an allocation in the last of its free memory: this room is for that, and only counts when
+    // the device is what limits the budget
+    const size_t device_room = 128*1024*1024;
+    const size_t device_max  = free_now + held > device_room ? free_now + held - device_room : free_now + held;
+
+    const size_t limit = budget > 0 ? std::min(budget, device_max) : device_max;
+
+    const size_t fixed = held + budget_used;
+
+    LOG_INF("%s: budget %.0f MiB, limit %.0f, free %.0f, process %.0f (%s), model %.0f, context %.0f, compute %.0f, "
+            "draft %.0f, other %.0f, fixed %.0f\n", __func__, budget/MiB, limit/MiB, free_now/MiB, held/MiB,
+            own ? "measured" : "not measured, model + compute", own_mem.model/MiB, own_mem.context/MiB, own_mem.compute/MiB,
+            dft/MiB, budget_used/MiB, fixed/MiB);
+
+    if (fixed >= limit) {
+        LOG_ERR("%s: the elastic memory does not fit in the memory budget of %.0f MiB: %.0f MiB are fixed costs\n",
+                __func__, limit/MiB, fixed/MiB);
+        return false;
+    }
+
+    *box_bytes = limit - fixed;
+
+    LOG_INF("%s: the elastic memory takes %.0f MiB: process %.0f (model %.0f + compute %.0f + draft %.0f + runtime) + other %.0f "
+            "are the fixed costs of the budget of %.0f MiB\n", __func__, *box_bytes/MiB, held/MiB, own_mem.model/MiB,
+            own_mem.compute/MiB, dft/MiB, budget_used/MiB, limit/MiB);
+
+    if (predicted) {
+        *predicted = limit;
+    }
+    if (free_before) {
+        *free_before = free_now + held;
+    }
+
+    return true;
+}
+
 bool common_budget_params(
                    const char * path_model,
      const llama_model_params * mparams,
@@ -1106,11 +1185,11 @@ bool common_budget_params(
  const common_fit_extra_model * extra,
                          size_t   budget,
                          size_t   budget_used,
-                       uint32_t   n_ctx_typical,
                            bool   size_ctx,
                  ggml_log_level   log_level,
                        size_t *   predicted,
-                       size_t *   free_before) {
+                       size_t *   free_before,
+ const common_params_sampling * sampling) {
     constexpr double MiB = 1024.0*1024.0;
 
     // the dry runs print what a real load prints; below log_level it goes to the debug log
@@ -1158,6 +1237,12 @@ bool common_budget_params(
         return false;
     }
 
+    // the elastic memory (llama_memory_box_*): seen in the first dry run, it is then all the bytes that the fixed costs
+    // leave, nothing about it is sized by requests or context
+    bool   box       = false;
+    size_t box_bytes = 0; // the size of the box of the next dry run
+    size_t box_total = 0; // the size of the box of the last dry run
+
     // the memory of n_seq concurrent sequences, for the main and the draft context
     struct measured {
         common_budget_mem main;
@@ -1170,33 +1255,59 @@ bool common_budget_params(
 
     const auto measure = [&](uint32_t n_seq, uint32_t n_ctx, measured & res) {
         llama_context_params cp = *cparams;
-        cp.n_ctx      = n_ctx;
+        cp.n_ctx      = box ? llama_model_n_ctx_train(model) : n_ctx;
         cp.n_seq_max  = n_seq;
-        cp.n_rs_cells = 0; // one recurrent state per sequence
+        cp.n_rs_cells = box ? 1 : 0; // one recurrent state per sequence, or a box of states and cells
+        cp.box_bytes  = box ? box_bytes : 0;
+
+        // the same samplers as the real context: they outlive the context
+        std::vector<common_sampler_ptr> smpls;
+        std::vector<llama_sampler_seq_config> smpl_seqs;
+        common_params_sampling smpl_params;
+        if (sampling) {
+            smpl_params = *sampling;
+            smpls.resize(n_seq);
+            smpl_seqs.resize(n_seq);
+            for (uint32_t i = 0; i < n_seq; ++i) {
+                smpls[i].reset(common_sampler_init(model, smpl_params));
+                smpl_seqs[i] = { (llama_seq_id) i, common_sampler_get(smpls[i].get()) };
+            }
+            cp.samplers   = smpl_seqs.data();
+            cp.n_samplers = smpl_seqs.size();
+        }
 
         llama_context * ctx = llama_init_from_model(model, cp);
         if (ctx == nullptr) {
             return false;
         }
         res.main = common_budget_device_mem(ctx, true);
-        llama_free(ctx);
+
+        llama_memory_box_info info;
+        if (llama_memory_box_get_info(llama_get_memory(ctx), &info)) {
+            box       = true;
+            box_total = info.total_bytes;
+        }
 
         res.dft = {};
         if (extra) {
-            // the draft context follows the main one: same context size and number of sequences
+            // the draft context follows the main one: same context size and number of sequences; an MTP draft keeps its
+            // tokens in the elastic memory of the main one
             llama_context_params cpd = *extra->cparams;
             cpd.n_ctx      = cp.n_ctx;
             cpd.n_seq_max  = n_seq;
-            cpd.kv_unified = cp.kv_unified;
+            cpd.ctx_other  = ctx;
 
             llama_context * ctx_dft = llama_init_from_model(extra->shares_model ? model : model_dft, cpd);
             if (ctx_dft == nullptr) {
+                llama_free(ctx);
                 return false;
             }
             // an MTP context runs on the weights of the main model, which are counted already
             res.dft = common_budget_device_mem(ctx_dft, !extra->shares_model);
             llama_free(ctx_dft);
         }
+
+        llama_free(ctx);
 
         return true;
     };
@@ -1250,12 +1361,12 @@ bool common_budget_params(
     };
     set_avail();
 
-    const uint32_t n_seq_cap   = std::max<uint32_t>(1, cparams->n_seq_max);
+    uint32_t n_seq_cap = std::max<uint32_t>(1, cparams->n_seq_max);
     const uint32_t n_ctx_train = llama_model_n_ctx_train(model);
 
-    // size_ctx: the tokens a typical request holds, --ctx-typical, else the longest request; n_ctx on entry (--ctx-size)
+    // size_ctx: the tokens of a request are those of the longest request; n_ctx on entry (--ctx-size)
     // is the most the cache holds, 0 = no most
-    uint32_t       typical   = n_ctx_typical > 0 ? n_ctx_typical : n_ctx_train;
+    uint32_t       typical   = n_ctx_train;
     const uint32_t n_ctx_cap = cparams->n_ctx > 0 ? cparams->n_ctx : UINT32_MAX;
 
     const auto pad_ctx = [&](uint64_t n) {
@@ -1318,9 +1429,71 @@ bool common_budget_params(
     measured m_one;
     measured m_best;
 
+    bool box_probed = false;
+
+    // the elastic memory: every byte the fixed costs leave; the compute grows with the lists of the box, by a little when
+    // the rows are read in place and by more than the box itself when they are copied, so the box comes down until it
+    // all fits: what it takes over, off the size it took, or by half when that is more than the box
+    const auto box_size = [&](measured & res) -> bool {
+        box_bytes = 1;
+        if (!measure(n_seq_cap, 0, res) || res.total() > avail) {
+            return false;
+        }
+        box_bytes = avail - (res.total() - box_total);
+        if (!measure(n_seq_cap, 0, res)) {
+            return false;
+        }
+        for (int i = 0; i < 16 && res.total() > avail; ++i) {
+            const size_t over = res.total() - avail;
+            box_bytes = over < box_total ? box_total - over : box_total/2;
+            if (!measure(n_seq_cap, 0, res)) {
+                return false;
+            }
+        }
+        return res.total() <= avail;
+    };
+
     // sizes the sequences and the cache to avail; false when not even one sequence fits (logged and cleaned up)
     const auto size_all = [&]() -> bool {
-        typical = n_ctx_typical > 0 ? n_ctx_typical : n_ctx_train;
+        typical = n_ctx_train;
+
+        // the first dry run shows whether the memory is elastic
+        if (!box_probed) {
+            measured m;
+            if (!measure(1, 256, m)) {
+                cleanup();
+                LOG_ERR("%s: failed to create a context to measure its memory\n", func);
+                return false;
+            }
+            box_probed = true;
+        }
+
+        // the elastic memory takes all the budget the fixed costs leave, and the requests are admitted by what fits in it:
+        // no number of requests is set for it
+        if (box) {
+            n_seq_cap = 1;
+
+            // the outputs of a ubatch follow its tokens, and no number of requests was asked for
+            cparams->n_outputs_max = cparams->n_ubatch;
+
+            measured m;
+            if (!box_size(m)) {
+                restore_log();
+                LOG_ERR("%s: the elastic memory does not fit in the memory budget of %.0f MiB: model %.0f, compute %.0f, "
+                        "draft %.0f, other %.0f, runtime %.0f, available %.0f\n", func, budget/MiB, m.main.model/MiB,
+                        m.main.compute/MiB, m.dft.total()/MiB, budget_used/MiB, runtime/MiB, avail/MiB);
+                cleanup();
+                return false;
+            }
+
+            lo            = n_seq_cap;
+            n_ctx         = n_ctx_train;
+            m_best        = m;
+            m_one         = m;
+            n_ctx_longest = 0;
+            shared        = false;
+            return true;
+        }
 
         // the longest request this budget holds: the largest cache of one sequence, up to the training context
         n_ctx_longest = 0;
@@ -1334,17 +1507,7 @@ bool common_budget_params(
                 cleanup();
                 return false;
             }
-            if (typical > n_ctx_longest) {
-                if (n_ctx_typical > 0) {
-                    restore_log();
-                    LOG_ERR("%s: a typical request of %u tokens (--ctx-typical) does not fit, the longest request this "
-                            "budget holds is %u tokens%s\n", func, typical, n_ctx_longest,
-                            n_ctx_cap < UINT32_MAX ? " (at most --ctx-size)" : "");
-                    cleanup();
-                    return false;
-                }
-                typical = n_ctx_longest;
-            }
+            typical = std::min(typical, n_ctx_longest);
         }
 
         if (!measure(1, ctx_for(1), m_one)) {
@@ -1483,17 +1646,23 @@ bool common_budget_params(
 
     restore_log();
 
-    print(lo < n_seq_cap ? "limited by the budget" : "at the requested maximum", lo, n_ctx, m_best);
-    if (shared) {
+    if (box) {
+        LOG_INF("%s: the elastic memory takes %.0f MiB: model %.0f + compute %.0f + draft %.0f + other %.0f + runtime %.0f "
+                "are the fixed costs of the budget of %.0f MiB\n", __func__, box_total/MiB, m_best.main.model/MiB,
+                m_best.main.compute/MiB, m_best.dft.total()/MiB, budget_used/MiB, runtime/MiB, budget/MiB);
+    } else {
+        print(lo < n_seq_cap ? "limited by the budget" : "at the requested maximum", lo, n_ctx, m_best);
+    }
+    if (box) {
+        LOG_INF("%s: up to %u sequences at once (--parallel), as many as fit in it\n", __func__, lo);
+    } else if (shared) {
         LOG_INF("%s: the model holds no memory per sequence: the %u sequences share a cache of %u tokens, so how many "
-                "requests run at once follows their sizes: %u of %u tokens (--ctx-typical), more of smaller ones, up to "
+                "requests run at once follows their sizes: %u of %u tokens, more of smaller ones, up to "
                 "%u; the longest request this budget holds is %u tokens\n", __func__, lo, n_ctx,
                 std::min(lo, n_ctx/std::max<uint32_t>(1, typical)), typical, lo, n_ctx_longest);
     } else if (size_ctx) {
-        LOG_INF("%s: the longest request this budget holds is %u tokens%s; a typical request holds %u tokens%s, the "
-                "cache holds %u tokens: %u per sequence\n", __func__, n_ctx_longest,
-                n_ctx_cap < UINT32_MAX ? " (at most --ctx-size)" : "", typical,
-                n_ctx_typical > 0 ? " (--ctx-typical)" : "", n_ctx, n_ctx/lo);
+        LOG_INF("%s: the longest request this budget holds is %u tokens%s; the cache holds %u tokens: %u per sequence\n",
+                __func__, n_ctx_longest, n_ctx_cap < UINT32_MAX ? " (at most --ctx-size)" : "", n_ctx, n_ctx/lo);
     } else if (lo > 1) {
         LOG_INF("%s: each sequence adds %.0f MiB (its state and compute), the context of %u tokens takes %.0f MiB\n",
                 __func__, (double) (m_best.total() - m_one.total())/(lo - 1)/MiB, n_ctx,
@@ -1505,7 +1674,8 @@ bool common_budget_params(
 
     cparams->n_ctx      = n_ctx;
     cparams->n_seq_max  = lo;
-    cparams->n_rs_cells = 0;
+    cparams->n_rs_cells = box ? 1 : 0;
+    cparams->box_bytes  = box ? box_bytes : 0;
 
     if (predicted) {
         *predicted = m_best.total() + budget_used + runtime;

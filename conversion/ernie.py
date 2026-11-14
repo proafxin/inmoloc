@@ -3,15 +3,18 @@ from __future__ import annotations
 import json
 import math
 import re
-
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, TextModel, gguf
+import pathlib
+
+from conversion.base import MmprojModel, ModelBase, TextModel, gguf
 
 
 @ModelBase.register("Ernie4_5_ForCausalLM", "Ernie4_5ForCausalLM")
@@ -19,17 +22,17 @@ from .base import MmprojModel, ModelBase, TextModel, gguf
 class Ernie4_5Model(TextModel):
     model_arch = gguf.MODEL_ARCH.ERNIE4_5
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_sentencepiece()
 
-        tokenizer_config_file = self.dir_model / 'tokenizer_config.json'
+        tokenizer_config_file = self.dir_model / "tokenizer_config.json"
         if tokenizer_config_file.is_file():
-            with open(tokenizer_config_file, "r", encoding="utf-8") as f:
+            with pathlib.Path(tokenizer_config_file).open("r", encoding="utf-8") as f:
                 tokenizer_config_json = json.load(f)
                 if "add_prefix_space" in tokenizer_config_json:
                     self.gguf_writer.add_add_space_prefix(tokenizer_config_json["add_prefix_space"])
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
     @classmethod
@@ -56,7 +59,9 @@ class Ernie4_5Model(TextModel):
             total_q_dim = num_heads * head_dim
             total_k_dim = num_kv_heads * head_dim
             total_v_dim = num_kv_heads * head_dim
-            q_proj_weight, k_proj_weight, v_proj_weight = data_torch.split([total_q_dim, total_k_dim, total_v_dim], dim=0)
+            q_proj_weight, k_proj_weight, v_proj_weight = data_torch.split(
+                [total_q_dim, total_k_dim, total_v_dim], dim=0
+            )
             yield from super().modify_tensors(q_proj_weight, name_q, bid)
             yield from super().modify_tensors(k_proj_weight, name_k, bid)
             yield from super().modify_tensors(v_proj_weight, name_v, bid)
@@ -79,11 +84,11 @@ class Ernie4_5MoeModel(Ernie4_5Model):
     model_arch = gguf.MODEL_ARCH.ERNIE4_5_MOE
     _experts: list[dict[str, Tensor]] | None = None
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._experts = [{} for _ in range(self.block_count)]
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_expert_count(self.hparams["moe_num_experts"])
         self.gguf_writer.add_expert_used_count(self.hparams["moe_k"])
@@ -91,14 +96,20 @@ class Ernie4_5MoeModel(Ernie4_5Model):
         self.gguf_writer.add_leading_dense_block_count(self.hparams["moe_layer_start_index"])
         if (moe_intermediate_size := self.hparams.get("moe_intermediate_size")) is not None:
             self.gguf_writer.add_expert_feed_forward_length(moe_intermediate_size)
-        if (shared_expert_count := self.hparams.get('moe_num_shared_experts')) is not None:
+        if (shared_expert_count := self.hparams.get("moe_num_shared_experts")) is not None:
             self.gguf_writer.add_expert_shared_count(shared_expert_count)
-            if shared_expert_count > 0 and (shared_expert_intermediate_size := self.hparams.get('intermediate_size')) is not None and (num_key_value_heads := self.hparams.get('num_key_value_heads')) is not None:
-                self.gguf_writer.add_expert_shared_feed_forward_length(shared_expert_intermediate_size // num_key_value_heads)
+            if (
+                shared_expert_count > 0
+                and (shared_expert_intermediate_size := self.hparams.get("intermediate_size")) is not None
+                and (num_key_value_heads := self.hparams.get("num_key_value_heads")) is not None
+            ):
+                self.gguf_writer.add_expert_shared_feed_forward_length(
+                    shared_expert_intermediate_size // num_key_value_heads
+                )
 
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
+        name, _gen = item
 
         # skip Multi-Token Prediction (MTP) layers (again, same as DeepseekV2)
         match = re.match(r"model.mtp_block.(\d+)", name)
@@ -147,14 +158,15 @@ class Ernie4_5MoeModel(Ernie4_5Model):
         else:
             yield from ModelBase.modify_tensors(self, data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
 
         if self._experts is not None:
             # flatten `list[dict[str, Tensor]]` into `list[str]`
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)
 
 
 @ModelBase.register("PaddleOCRVLForConditionalGeneration")
@@ -170,14 +182,14 @@ class PaddleOCRVisionModel(MmprojModel):
     min_pixels: int = 0
     max_pixels: int = 0
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         assert self.hparams_vision is not None
         self.min_pixels = self.preprocessor_config["min_pixels"]
         self.max_pixels = self.preprocessor_config["max_pixels"]
         self.hparams_vision["image_size"] = int(math.sqrt(self.max_pixels))
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         assert self.hparams_vision is not None
         hparams = self.hparams_vision

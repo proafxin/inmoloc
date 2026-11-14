@@ -8,8 +8,7 @@
 
 // uses two instances of llama_kv_cache, one for K/V tensors, and one for the MSA indexer tensors
 // both receive identical sequence operations and identical ubatches, so their cell layouts stay in synced.
-// the context also exposes per-ubatch pos - cell translation maps populated from llama_kv_cells via
-// llama_kv_cache::get_cells(), which the model graph uses to run MSA block selection in position space
+// the context lays out the rows of the sequences of a ubatch in the elastic memory, see set_input_box()
 
 class llama_kv_cache_msa : public llama_memory_i {
 public:
@@ -17,9 +16,7 @@ public:
             const llama_model & model,
                     ggml_type   type_k,
                     ggml_type   type_v,
-                         bool   v_trans,
                          bool   offload,
-                         bool   unified,
                      uint32_t   kv_size,
                      uint32_t   n_seq_max,
                      uint32_t   n_pad,
@@ -27,7 +24,9 @@ public:
                llama_swa_type   swa_type,
         const layer_filter_cb & filter,
         const layer_filter_cb & filter_idx,
-        const  layer_reuse_cb & reuse);
+        const  layer_reuse_cb & reuse,
+                       size_t   box_bytes = 0,
+                         bool   box_deferred = false);
 
     ~llama_kv_cache_msa() = default;
 
@@ -67,16 +66,22 @@ public:
     llama_kv_cache * get_base() const;
     llama_kv_cache * get_idx () const;
 
+    // the elastic memory, owned by the main cache: the indexer keeps its keys in the same blocks
+    std::shared_ptr<llama_box> get_box_shared() const override { return kv_base->get_box_shared(); }
+    bool box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) override { return kv_base->box_reserve(seq_id, n_input, n_output); }
+    void box_reserve_drop(llama_seq_id seq_id) override { kv_base->box_reserve_drop(seq_id); }
+    void box_finalized() override { kv_base->box_finalized(); kv_idx->box_finalized(); }
+
     uint32_t       get_n_pad()    const { return n_pad; }
     uint32_t       get_n_seq_max() const { return n_seq_max; }
     uint32_t       get_n_swa()    const { return n_swa; }
     llama_swa_type get_swa_type() const { return swa_type; }
+    uint32_t       get_n_ctx_train() const { return hparams_idx.n_ctx_train; }
 
 private:
     // keep the indexer KV cache hparams instance here as llama_kv_cache stores only a reference
     llama_hparams hparams_idx;
 
-    const uint32_t n_stream  = 1;
     const uint32_t n_seq_max = 1;
     const uint32_t n_pad     = 1;
 
@@ -126,17 +131,21 @@ public:
     const llama_kv_cache_context * get_base() const;
     const llama_kv_cache_context * get_idx () const;
 
-    // max position currently present in the cache plus one, padded MSA blocks are defined over token positions
-    // so the block-selection tensors are sized by this value rather than by the number of cells
-    uint32_t get_n_pos() const;
+    // the elastic memory: the list of the slots of the sequences of the ubatch, one after the other, and the window of a
+    // token in it, which starts at the slots of its sequence; the cell of rank r of a sequence (causal order) is the slot
+    // base + p0 % blk + r, p0 its first position, so that the blocks are those of the positions while they follow each
+    // other; a reserve takes the most there can be
+    //   n_list: the slots of the list, a whole number of blocks
+    //   n_win:  the slots of a window, a whole number of blocks
+    void box_layout(const llama_ubatch & ubatch, int blk, int64_t & n_list, int64_t & n_win) const;
 
-    // position <-> cell translation maps, populated from the base cache cells
-    // the model graph relates cache contents to token positions only through these per ubatch inputs
-    // value for empty or other-sequence cells is 0 so consumers must mask them
-    void set_input_cell_pos(ggml_tensor * dst, const llama_ubatch * ubatch, int32_t div) const;
-    // positions without a cell map to cell 0, consumers must mask them assumes one sequence per stream
-    void set_input_pos_slot(ggml_tensor * dst, const llama_ubatch * ubatch) const;
-    void set_input_pos_mask(ggml_tensor * dst, const llama_ubatch * ubatch) const;
+    //   rows:   I32 [n_list, 1], the row of each slot
+    //   win:    I32 [3, n_tokens], the window of a token in rows and the slots it sees, see ggml_lightning_indexer_rows()
+    //   off:    I32 [1, 1, n_tokens], the block of rows the window starts at
+    //   bias:   F32 [n_win/blk, n_tokens], the blocks of the window a token always reads
+    //   q_base: I32 [2, n_tokens], the list of a token and where its range starts
+    void set_input_box(ggml_tensor * rows, ggml_tensor * win, ggml_tensor * off, ggml_tensor * bias, ggml_tensor * q_base,
+            const llama_ubatch * ubatch, int blk, int local) const;
 
 private:
     llama_kv_cache_msa * kv;

@@ -161,7 +161,7 @@ Now you can convert the exported LLM to GGUF with the normal converter in the ro
 ```bash
 $ LLM_GGUF_PATH=$LLM_EXPORT_PATH/granite_llm.gguf
 ...
-$ python convert_hf_to_gguf.py --outfile $LLM_GGUF_PATH $LLM_EXPORT_PATH
+$ uv run scripts/convert_hf_to_gguf.py --outfile $LLM_GGUF_PATH $LLM_EXPORT_PATH
 ```
 
 
