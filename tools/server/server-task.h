@@ -159,13 +159,6 @@ struct server_task {
     // why the task was last held back before it got a slot (server_defer_reason), -1 = never
     int32_t defer_reason = -1;
 
-    // set when the task waits for memory (SERVER_DEFER_KV_CELLS, SERVER_DEFER_RECURRENT_CELL): the KV cells and the
-    // recurrent-state cells it takes, and the free KV cells (counting what evicting idle slots frees) at which it is
-    // offered again
-    int32_t  n_kv_need    = 0;
-    int32_t  n_kv_wait_at = 0;
-    uint32_t n_rs_need    = 0;
-
     // the elastic memory: the blocks the task takes, computed once; it is only offered again when that many are free
     int64_t n_box_cost = 0;
 

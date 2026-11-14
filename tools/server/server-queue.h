@@ -109,20 +109,6 @@ public:
     // skips the tasks that wait for memory (SERVER_DEFER_KV_CELLS, SERVER_DEFER_RECURRENT_CELL)
     void pop_deferred_task(int id_slot);
 
-    // a deferred task that waits for memory, see server_task::n_kv_need
-    struct mem_wait {
-        int      id;
-        int32_t  n_kv_need;
-        int32_t  n_kv_wait_at;
-        uint32_t n_rs_need;
-    };
-
-    // the deferred tasks that wait for memory, oldest first
-    std::vector<mem_wait> get_deferred_mem_tasks();
-
-    // move the deferred tasks with these ids to the front of the main queue, in this order
-    void pop_deferred_tasks(const std::vector<int> & ids);
-
     // the elastic memory: move the deferred tasks that fit in n_free blocks to the front of the main queue, oldest first;
     // a later task that fits goes ahead of an earlier one that does not; returns how many moved
     size_t pop_deferred_fit(int64_t n_free);

@@ -2018,11 +2018,6 @@ private:
                        try_clear_idle_slot_rs(ret, "KV cells for a prompt cache load")) {
                 }
             }
-            if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
-                const uint32_t n_new = ret->prompt.n_tokens() > 0 ? 0 : 1;
-                while (n_rs_cells_held() + n_new > llama_n_rs_cells(ctx_tgt) && try_clear_idle_slot_rs(ret)) {
-                }
-            }
 
             if (!ret->prompt_load(*prompt_cache, task.tokens)) {
                 ret->prompt_clear();
@@ -2037,19 +2032,6 @@ private:
     // return true if at least one slot has been cleared
     bool try_clear_idle_slots() {
         return try_clear_idle_slot_rs(nullptr, "KV cells");
-    }
-
-    // recurrent/hybrid models hold one recurrent-state cell per sequence still in memory:
-    // a slot holds one while processing, and afterwards for as long as its prompt stays loaded
-    // a preempted slot holds no memory until it is resumed
-    uint32_t n_rs_cells_held() const {
-        uint32_t n = 0;
-        for (auto & slot : slots) {
-            if ((slot.is_processing() && slot.state != SLOT_STATE_PREEMPTED) || slot.prompt.n_tokens() > 0) {
-                n++;
-            }
-        }
-        return n;
     }
 
     // a starting slot that may share a prefix, and the tokens its own memory already provides
@@ -2195,29 +2177,6 @@ private:
             n += std::max(kv_cells_step(slot), kv_gen_expected(slot.n_predict_max) - (int32_t) slot.stats.n_gen);
         }
         return n;
-    }
-
-    // the free KV cells, counting what evicting idle slots frees and what the running slots take as they generate:
-    // evicting does not change it
-    int32_t kv_cells_avail() const {
-        return kv_cells_total() - kv_cells_committed() - kv_cells_growth() + kv_cells_evictable(nullptr, nullptr);
-    }
-
-    // the recurrent-state cells that try_clear_idle_slot_rs() can free while it spares `keep` and `keep_donor`
-    uint32_t n_rs_cells_evictable(const server_slot * keep, const server_slot * keep_donor) const {
-        uint32_t n = 0;
-        for (const auto & slot : slots) {
-            if (&slot != keep && &slot != keep_donor && !slot.is_processing() && slot.prompt.n_tokens() > 0) {
-                n++;
-            }
-        }
-        return n;
-    }
-
-    // the free recurrent-state cells, counting what evicting idle slots frees
-    uint32_t n_rs_cells_avail() const {
-        const uint32_t n_rs_cells = llama_n_rs_cells(ctx_tgt);
-        return n_rs_cells - std::min(n_rs_cells, n_rs_cells_held()) + n_rs_cells_evictable(nullptr, nullptr);
     }
 
     // offer the tasks that wait for memory again once the KV cells and the recurrent-state cells they take are free:
@@ -3526,14 +3485,6 @@ private:
         queue_tasks.defer(std::move(task));
     }
 
-    // holds a task back until the memory it takes is free, see mem_offer_waiting(): n_kv_missing more KV cells than
-    // now (counting what evicting idle slots frees), and n_rs_need recurrent-state cells
-    void defer_task_mem(server_task && task, server_defer_reason reason, int32_t n_kv_need, int32_t n_kv_missing, uint32_t n_rs_need) {
-        task.n_kv_need    = n_kv_need;
-        task.n_kv_wait_at = 0;
-        task.n_rs_need    = n_rs_need;
-        defer_task(std::move(task), reason);
-    }
 
     // returns false to decline the task, it is offered again after the decode is done
     bool process_single_task(server_task && task, bool is_yielding) {
@@ -3668,7 +3619,7 @@ private:
                         if (n_kv_missing > 0) {
                             SRV_DBG("not enough free memory (committed = %d, prompt = %d, reused = %d, total = %d), defer task, id_task = %d\n",
                                     kv_cells_committed(), task.n_tokens(), n_reuse, n_total, id_task);
-                            defer_task_mem(std::move(task), SERVER_DEFER_KV_CELLS, n_need, n_kv_missing, 0);
+                            defer_task(std::move(task), SERVER_DEFER_KV_CELLS);
                             break;
                         }
                     }
@@ -3698,7 +3649,7 @@ private:
                         if (n_kv_missing > 0) {
                             SRV_DBG("not enough free memory after evicting idle slots (committed = %d, prompt = %d, reused = %d, total = %d), defer task, id_task = %d\n",
                                     kv_cells_committed(), task.n_tokens(), n_reuse, n_total, id_task);
-                            defer_task_mem(std::move(task), SERVER_DEFER_KV_CELLS, n_need, n_kv_missing, 0);
+                            defer_task(std::move(task), SERVER_DEFER_KV_CELLS);
                             break;
                         }
                     }
@@ -3734,7 +3685,7 @@ private:
 
                             SRV_DBG("the memory is held by running requests, defer task, id_task = %d\n", id_task);
                             task.n_box_cost = n_box_cost;
-                            defer_task_mem(std::move(task), SERVER_DEFER_KV_CELLS, 0, 0, 0);
+                            defer_task(std::move(task), SERVER_DEFER_KV_CELLS);
                             break;
                         }
                     }

@@ -213,7 +213,7 @@ int server_queue::get_new_id() {
     return new_id;
 }
 
-// a task that waits for memory (KV cells, a recurrent-state cell) is offered again only by pop_deferred_tasks(ids),
+// a task that waits for memory (KV cells, a recurrent-state cell) is offered again only by pop_deferred_fit(n_free),
 // once the memory it needs is free
 static bool waits_for_memory(const server_task & task) {
     return task.defer_reason == SERVER_DEFER_KV_CELLS || task.defer_reason == SERVER_DEFER_RECURRENT_CELL;
@@ -233,41 +233,6 @@ void server_queue::pop_deferred_task(int id_slot) {
         QUE_DBG("pop deferred task, id_task = %d\n", it->id);
         queue_tasks.emplace_front(std::move(*it));
         queue_tasks_deferred.erase(it);
-    }
-    time_last_task = ggml_time_ms();
-    condition_tasks.notify_one();
-}
-
-std::vector<server_queue::mem_wait> server_queue::get_deferred_mem_tasks() {
-    std::unique_lock<std::mutex> lock(mutex_tasks);
-    std::vector<mem_wait> res;
-    for (const auto & task : queue_tasks_deferred) {
-        if (waits_for_memory(task)) {
-            res.push_back({ task.id, task.n_kv_need, task.n_kv_wait_at, task.n_rs_need });
-        }
-    }
-    return res;
-}
-
-void server_queue::pop_deferred_tasks(const std::vector<int> & ids) {
-    std::unique_lock<std::mutex> lock(mutex_tasks);
-    std::vector<server_task> tasks;
-    for (const int id : ids) {
-        // a task cancelled since it was listed is gone
-        auto it = std::find_if(queue_tasks_deferred.begin(), queue_tasks_deferred.end(), [id](const server_task & task) {
-            return task.id == id;
-        });
-        if (it != queue_tasks_deferred.end()) {
-            tasks.push_back(std::move(*it));
-            queue_tasks_deferred.erase(it);
-        }
-    }
-    if (tasks.empty()) {
-        return;
-    }
-    QUE_DBG("pop %zu deferred tasks\n", tasks.size());
-    for (size_t i = tasks.size(); i-- > 0;) {
-        queue_tasks.emplace_front(std::move(tasks[i]));
     }
     time_last_task = ggml_time_ms();
     condition_tasks.notify_one();
