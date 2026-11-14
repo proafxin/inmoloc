@@ -37,7 +37,7 @@ convert = [
 # gguf-editor-gui and the jinja template tester
 gui = [
     "jinja2",
-    "PySide6; python_version < '3.14'",
+    "PySide6; python_version < '4'",
 ]
 
 [project.scripts]
