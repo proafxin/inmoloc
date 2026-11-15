@@ -3,13 +3,13 @@
 # Install Windows on Snapdragon SDKs for llama.cpp.
 #
 
-import sys
-import os
 import argparse
-import shutil
-import logging
-import json
 import hashlib
+import json
+import logging
+import os
+import shutil
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
@@ -17,7 +17,6 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from sdk import SDK_CONFIGS, get_hexagon_tools_dir, is_valid_sdk
-
 
 logger = logging.getLogger("setup_sdk")
 
@@ -33,7 +32,8 @@ def get_sdk_releases(config):
         with urlopen(request, timeout=30) as response:
             releases = json.load(response)
     except (HTTPError, URLError, TimeoutError) as err:
-        raise RuntimeError(f"Cannot query {config['name']} releases: {err}") from err
+        msg = f"Cannot query {config['name']} releases: {err}"
+        raise RuntimeError(msg) from err
 
     result = []
     for release in releases:
@@ -44,16 +44,18 @@ def get_sdk_releases(config):
         for asset in release["assets"]:
             if asset["name"] != archive_name:
                 continue
-            result.append({
-                "version": version,
-                "name": asset["name"],
-                "url": asset["browser_download_url"],
-                "sha256": (asset.get("digest") or "").removeprefix("sha256:"),
-            })
+            result.append(
+                {
+                    "version": version,
+                    "name": asset["name"],
+                    "url": asset["browser_download_url"],
+                    "sha256": (asset.get("digest") or "").removeprefix("sha256:"),
+                }
+            )
     return result
 
 
-def list_sdk_releases():
+def list_sdk_releases() -> None:
     for config in SDK_CONFIGS:
         logger.info("%s:", config["name"])
         releases = get_sdk_releases(config)
@@ -70,23 +72,25 @@ def get_sdk_release(config, version):
     for release in get_sdk_releases(config):
         if release["version"] == version:
             if not release["sha256"]:
-                raise RuntimeError(f"{config['name']} {version} does not provide a SHA-256 digest")
+                msg = f"{config['name']} {version} does not provide a SHA-256 digest"
+                raise RuntimeError(msg)
             return release
-    raise RuntimeError(
+    msg = (
         f"No Windows on Snapdragon release for {config['name']} {version}. "
         "Run scripts/snapdragon/setup-sdk.py --list-sdk-releases to see available versions."
     )
+    raise RuntimeError(msg)
 
 
 def sha256sum(path):
     digest = hashlib.sha256()
-    with open(path, "rb") as file:
+    with Path(path).open("rb") as file:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
 
-def download_sdk(release, archive):
+def download_sdk(release, archive) -> None:
     while True:
         if archive.exists() and sha256sum(archive) == release["sha256"]:
             logger.info("Using existing archive %s", archive)
@@ -103,22 +107,25 @@ def download_sdk(release, archive):
         try:
             with urlopen(Request(release["url"], headers=headers), timeout=30) as response:
                 mode = "ab" if offset and response.status == 206 else "wb"
-                with open(archive, mode) as file:
+                with Path(archive).open(mode) as file:
                     shutil.copyfileobj(response, file)
         except HTTPError as err:
             if err.code != 416:
-                raise RuntimeError(f"Cannot download {release['name']}: {err}") from err
+                msg = f"Cannot download {release['name']}: {err}"
+                raise RuntimeError(msg) from err
             archive.unlink(missing_ok=True)
             continue
         except (URLError, TimeoutError) as err:
-            raise RuntimeError(f"Cannot download {release['name']}: {err}") from err
+            msg = f"Cannot download {release['name']}: {err}"
+            raise RuntimeError(msg) from err
 
         if sha256sum(archive) == release["sha256"]:
             return
-        raise RuntimeError(f"SHA-256 mismatch for {archive}. Re-run the command to resume the download.")
+        msg = f"SHA-256 mismatch for {archive}. Re-run the command to resume the download."
+        raise RuntimeError(msg)
 
 
-def extract_sdk(config, archive, target_dir):
+def extract_sdk(config, archive, target_dir) -> None:
     if not hasattr(tarfile, "data_filter"):
         raise RuntimeError("SDK extraction requires Python 3.10.12 or later")
 
@@ -130,14 +137,16 @@ def extract_sdk(config, archive, target_dir):
         candidates = [staging_dir] + [path for path in staging_dir.iterdir() if path.is_dir()]
         extracted_dirs = [path for path in candidates if is_valid_sdk(config, path)]
         if len(extracted_dirs) != 1:
-            raise RuntimeError(f"{config['name']} archive does not contain the expected files")
+            msg = f"{config['name']} archive does not contain the expected files"
+            raise RuntimeError(msg)
         extracted_dir = extracted_dirs[0]
 
         backup_dir = None
         if target_dir.exists():
             backup_dir = target_dir.parent / f".{target_dir.name}.backup"
             if backup_dir.exists():
-                raise RuntimeError(f"Cannot replace {target_dir}: backup directory {backup_dir} already exists")
+                msg = f"Cannot replace {target_dir}: backup directory {backup_dir} already exists"
+                raise RuntimeError(msg)
             target_dir.replace(backup_dir)
         try:
             extracted_dir.replace(target_dir)
@@ -166,7 +175,7 @@ def install_sdk(config, version, base_dir, force):
     return target_dir
 
 
-def set_user_environment(values):
+def set_user_environment(values) -> None:
     if os.name != "nt":
         raise RuntimeError("SDK setup must run on Windows")
 
@@ -180,10 +189,10 @@ def set_user_environment(values):
     import ctypes
 
     result = ctypes.c_ulong()
-    ctypes.windll.user32.SendMessageTimeoutW(0xffff, 0x001a, 0, "Environment", 0x0002, 5000, ctypes.byref(result))
+    ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 5000, ctypes.byref(result))
 
 
-def setup_sdks(args):
+def setup_sdks(args) -> None:
     base_dir = Path(args.sdk_base_dir).expanduser().resolve()
     hexagon_config, opencl_config = SDK_CONFIGS
     environment = {}
@@ -200,18 +209,39 @@ def setup_sdks(args):
     logger.info("SDK environment variables were updated. Start a new terminal before building.")
 
 
-def main():
+def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description="Install Windows on Snapdragon SDKs for llama.cpp.")
-    parser.add_argument("--list-sdk-releases", action="store_true", help="List available Windows on Snapdragon SDK releases")
-    parser.add_argument("--sdk-base-dir", default=DEFAULT_SDK_BASE_DIR, help=r"SDK installation directory (default: C:\Qualcomm)")
-    parser.add_argument("--hexagon", nargs="?", const=SDK_CONFIGS[0]["default_version"], metavar="VERSION", help="Install the Hexagon SDK, optionally selecting a version")
-    parser.add_argument("--opencl", nargs="?", const=SDK_CONFIGS[1]["default_version"], metavar="VERSION", help="Install the OpenCL SDK, optionally selecting a version")
+    parser.add_argument(
+        "--list-sdk-releases", action="store_true", help="List available Windows on Snapdragon SDK releases"
+    )
+    parser.add_argument(
+        "--sdk-base-dir", default=DEFAULT_SDK_BASE_DIR, help=r"SDK installation directory (default: C:\Qualcomm)"
+    )
+    parser.add_argument(
+        "--hexagon",
+        nargs="?",
+        const=SDK_CONFIGS[0]["default_version"],
+        metavar="VERSION",
+        help="Install the Hexagon SDK, optionally selecting a version",
+    )
+    parser.add_argument(
+        "--opencl",
+        nargs="?",
+        const=SDK_CONFIGS[1]["default_version"],
+        metavar="VERSION",
+        help="Install the OpenCL SDK, optionally selecting a version",
+    )
     parser.add_argument("--force", action="store_true", help="Reinstall selected SDKs even when they already exist")
     args = parser.parse_args()
 
     if args.list_sdk_releases:
-        if args.sdk_base_dir != DEFAULT_SDK_BASE_DIR or args.hexagon is not None or args.opencl is not None or args.force:
+        if (
+            args.sdk_base_dir != DEFAULT_SDK_BASE_DIR
+            or args.hexagon is not None
+            or args.opencl is not None
+            or args.force
+        ):
             parser.error("Installation options cannot be combined with --list-sdk-releases")
         list_sdk_releases()
         return
@@ -229,5 +259,5 @@ if __name__ == "__main__":
         logger.info("\nInterrupted by user.")
         sys.exit(130)
     except RuntimeError as err:
-        logger.error("Error: %s", err)
+        logger.exception("Error: %s", err)
         sys.exit(1)

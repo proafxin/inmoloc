@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, gguf
+from conversion.base import MmprojModel, ModelBase, gguf
 
 
 @ModelBase.register("Llama4ForConditionalGeneration")
 # [TAG_HF_EXAMPLE_GATED] meta-llama/Llama-4-Scout-17B-16E-Instruct is gated
 @ModelBase.example("unsloth/Llama-4-Scout-17B-16E-Instruct")
 class Llama4VisionModel(MmprojModel):
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.LLAMA4)
         self.gguf_writer.add_vision_attention_layernorm_eps(self.hparams["norm_eps"])
@@ -35,6 +37,6 @@ class Llama4VisionModel(MmprojModel):
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         if "multi_modal_projector.linear_1" in name:
             # despite the name with number postfix, this is a single fully connected layer
-            yield (gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_MMPROJ_FC] + '.weight', data_torch)
+            yield (gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_MMPROJ_FC] + ".weight", data_torch)
         else:
             yield from super().modify_tensors(data_torch, name, bid)

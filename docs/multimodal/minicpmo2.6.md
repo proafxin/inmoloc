@@ -31,7 +31,7 @@ Convert PyTorch model to gguf files (You can also download the converted [gguf](
 ```bash
 python ./tools/mtmd/legacy-models/minicpmv-surgery.py -m ../MiniCPM-o-2_6
 python ./tools/mtmd/legacy-models/minicpmv-convert-image-encoder-to-gguf.py -m ../MiniCPM-o-2_6 --minicpmv-projector ../MiniCPM-o-2_6/minicpmv.projector --output-dir ../MiniCPM-o-2_6/ --minicpmv_version 4
-python ./convert_hf_to_gguf.py ../MiniCPM-o-2_6/model
+uv run scripts/convert_hf_to_gguf.py ../MiniCPM-o-2_6/model
 
 # quantize int4 version
 ./build/bin/local-inference-quantize ../MiniCPM-o-2_6/model/ggml-model-f16.gguf ../MiniCPM-o-2_6/model/ggml-model-Q4_K_M.gguf Q4_K_M

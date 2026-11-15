@@ -1,17 +1,19 @@
 from __future__ import annotations
 
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, gguf
+from conversion.base import MmprojModel, ModelBase, gguf
 
 
 @ModelBase.register("Idefics3ForConditionalGeneration", "SmolVLMForConditionalGeneration")
 @ModelBase.example("HuggingFaceTB/SmolVLM-Instruct", "HuggingFaceM4/Idefics3-8B-Llama3")
 class SmolVLMModel(MmprojModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         if self.hparams["model_type"] == "smolvlm_vision":
             # fix for SmolVLM2, missing some keys in config.json
@@ -20,7 +22,7 @@ class SmolVLMModel(MmprojModel):
             self.hparams["num_attention_heads"] = self.hparams.get("num_attention_heads", 16)
             self.hparams["intermediate_size"] = self.hparams.get("intermediate_size", 3072)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.IDEFICS3)
         self.gguf_writer.add_vision_attention_layernorm_eps(self.hparams.get("layer_norm_eps", 1e-5))
@@ -38,7 +40,7 @@ class SmolVLMModel(MmprojModel):
 
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
+        name, _gen = item
 
         is_vision_tensor = "vision_tower" in name or "vision_model" in name or "model.connector" in name
 

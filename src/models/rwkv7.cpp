@@ -176,7 +176,7 @@ llama_model_rwkv7::graph::graph(const llama_model & model, const llm_graph_param
                                   ggml_view_3d(ctx0, ffn_norm, n_embd, 1, n_seqs, ffn_norm->nb[1], ffn_norm->nb[2],
                                                (n_seq_tokens - 1) * n_embd * ggml_element_size(ffn_norm)),
                                   1);
-        ggml_build_forward_expand(gf, build_rwkv_token_shift_store(token_shift, ubatch, il));
+        ggml_build_forward_expand(gf, build_rwkv_token_shift_store(rs_inp, token_shift, ubatch, il));
 
         ffn_inp  = ggml_reshape_2d(ctx0, ffn_inp, n_embd, n_tokens);
         ffn_norm = ggml_reshape_2d(ctx0, ffn_norm, n_embd, n_tokens);

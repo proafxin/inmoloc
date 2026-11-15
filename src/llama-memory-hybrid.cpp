@@ -1,8 +1,12 @@
 #include "llama-memory-hybrid.h"
 
+#include "llama-box.h"
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-context.h"
+
+#include <limits>
+#include <map>
 
 //
 // llama_memory_hybrid
@@ -13,7 +17,6 @@ llama_memory_hybrid::llama_memory_hybrid(
                             /* attn */
                 ggml_type   type_k,
                 ggml_type   type_v,
-                     bool   v_trans,
                  uint32_t   kv_size,
                  uint32_t   n_pad,
                  uint32_t   n_swa,
@@ -27,20 +30,26 @@ llama_memory_hybrid::llama_memory_hybrid(
                  uint32_t   n_rs_seq,
                      bool   rs_replay,
                      bool   offload,
-                     bool   unified,
                             /* layer filters */
     const layer_filter_cb & filter_attn,
-    const layer_filter_cb & filter_recr) :
+    const layer_filter_cb & filter_recr,
+                   size_t   box_bytes,
+                     bool   box_deferred,
+                     const llama_box_draft & box_draft,
+    std::vector<llama_box::attn_layer>   box_extra_attn) :
     hparams(model.hparams),
+    box(llama_box_make(model, type_k, type_v, kv_size, n_seq_max, type_r, type_s, rs_size, n_rs_seq,
+                rs_replay, offload, box_bytes, box_deferred, box_draft,
+                filter_attn == nullptr ? [&](int32_t il) { return !model.hparams.is_recr(il); } : filter_attn,
+                filter_recr == nullptr ? [&](int32_t il) { return  model.hparams.is_recr(il); } : filter_recr,
+                std::move(box_extra_attn))),
     mem_attn(new llama_kv_cache(
         model,
         model.hparams,
         type_k,
         type_v,
-        v_trans,
         offload,
-        unified,
-        kv_size,
+        box->get_n_cells(),
         n_seq_max,
         n_pad,
         n_swa,
@@ -50,21 +59,93 @@ llama_memory_hybrid::llama_memory_hybrid(
             [&](int32_t il) { return !hparams.is_recr(il); }
             : filter_attn,
         nullptr,
-        nullptr
+        nullptr,
+        "",
+        box.get(),
+        0
     )),
     mem_recr(new llama_memory_recurrent(
         model,
-        type_r,
-        type_s,
-        offload,
-        rs_size,
-        n_seq_max,
         n_rs_seq,
         rs_replay,
         filter_recr == nullptr ?
             [&](int32_t il) { return hparams.is_recr(il); }
-            : filter_recr
-    )) {}
+            : filter_recr,
+        box.get()
+    )) {
+    // an admitted request keeps the state its admission took, see llama_box::reserve()
+    mem_recr->box_keep = [this](llama_seq_id seq_id) {
+        return box->seq_admitted(seq_id);
+    };
+}
+
+llama_memory_hybrid::~llama_memory_hybrid() = default;
+
+const llama_box * llama_memory_hybrid::get_box() const {
+    return box.get();
+}
+
+bool llama_memory_hybrid::box_prepare(const std::vector<llama_ubatch> & ubatches) {
+    if (!mem_recr->box_prepare(ubatches)) {
+        return false;
+    }
+
+    // the new tokens of each seq, which take the empty cells of its blocks, then blocks from the free stack
+    std::map<llama_seq_id, uint32_t> n_new;
+    for (const auto & ubatch : ubatches) {
+        for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
+            n_new[ubatch.seq_id[i][0]]++;
+        }
+    }
+
+    for (const auto & [seq_id, n] : n_new) {
+        while (mem_attn->box_seq_free(seq_id) < n) {
+            if (!box->block_take(seq_id)) {
+                LLAMA_LOG_WARN("%s: no free block in the box for the tokens of seq %d\n", __func__, seq_id);
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+void llama_memory_hybrid::box_seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    // all positions of a seq: its blocks go back to the box, except those holding cells of other seqs
+    const bool all = p0 <= 0 && (p1 < 0 || p1 == std::numeric_limits<llama_pos>::max());
+
+    if (all) {
+        if (seq_id >= 0) {
+            box->seq_release(seq_id);
+        } else {
+            for (llama_seq_id s = 0; s < (llama_seq_id) mem_attn->get_n_seq_max(); ++s) {
+                box->seq_release(s);
+            }
+        }
+    }
+
+    // blocks held for other seqs may be empty now
+    box->reclaim();
+}
+
+bool llama_memory_hybrid::box_reserve(llama_seq_id seq_id, uint32_t n_input, uint32_t n_output) {
+    GGML_ASSERT(box);
+
+    std::function<int32_t()> state_alloc = nullptr;
+    if (mem_recr->seq_tails[seq_id] < 0) {
+        state_alloc = [&]() -> int32_t {
+            return mem_recr->box_state_take(seq_id) ? mem_recr->seq_tails[seq_id] : -1;
+        };
+    }
+
+    return box->reserve(seq_id, n_input, n_output, state_alloc);
+}
+
+void llama_memory_hybrid::box_reserve_drop(llama_seq_id seq_id) {
+    GGML_ASSERT(box);
+
+    box->reserve_drop(seq_id);
+}
 
 llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {
     do {
@@ -80,15 +161,13 @@ llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & ba
                 // if all tokens are output, split by sequence
                 ubatch = balloc.split_seq(n_ubatch);
             } else {
-                // Use non-sequential split when KV cache is unified (needed for hellaswag/winogrande/multiple-choice)
-                const bool unified = (mem_attn->get_n_stream() == 1);
-
                 // [TAG_RECURRENT_ROLLBACK_SPLITS]
                 // the trailing (1 + n_rs_seq) tokens of each seq must stay in the same ubatch
                 //   so that the rollback snapshots remain valid
                 const uint32_t n_rs_seq = mem_recr->n_rs_seq;
 
-                ubatch = balloc.split_equal(n_ubatch, !unified, n_rs_seq > 0 ? n_rs_seq + 1 : 0);
+                // non-sequential: the cells are shared by the sequences (needed for hellaswag/winogrande/multiple-choice)
+                ubatch = balloc.split_equal(n_ubatch, false, n_rs_seq > 0 ? n_rs_seq + 1 : 0);
             }
 
             if (ubatch.n_tokens == 0) {
@@ -101,6 +180,21 @@ llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & ba
         if (balloc.get_n_used() < balloc.get_n_tokens()) {
             // failed to find a suitable split
             break;
+        }
+
+        // every ubatch is another pass over the weights: log how the batch was split
+        if (ubatches.size() > 1) {
+            std::string desc;
+            for (const auto & ub : ubatches) {
+                desc += format(" %ux%u", ub.n_seqs, ub.n_seq_tokens);
+            }
+            LLAMA_LOG_DEBUG("%s: %u tokens split into %zu ubatches (seqs x tokens):%s\n",
+                    __func__, balloc.get_n_tokens(), ubatches.size(), desc.c_str());
+        }
+
+        // the box first gives the seqs their states and pages, which the caches then place the ubatches in
+        if (!box_prepare(ubatches)) {
+            return std::make_unique<llama_memory_hybrid_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
         }
 
         // prepare the recurrent batches first
@@ -140,6 +234,8 @@ bool llama_memory_hybrid::get_can_shift() const {
 void llama_memory_hybrid::clear(bool data) {
     mem_attn->clear(data);
     mem_recr->clear(data);
+
+    box->clear();
 }
 
 bool llama_memory_hybrid::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
@@ -148,7 +244,12 @@ bool llama_memory_hybrid::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1
     if (!mem_recr->seq_rm(seq_id, p0, p1)) {
         return false;
     }
-    return mem_attn->seq_rm(seq_id, p0, p1);
+
+    const bool res = mem_attn->seq_rm(seq_id, p0, p1);
+
+    box_seq_rm(seq_id, p0, p1);
+
+    return res;
 }
 
 void llama_memory_hybrid::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
@@ -159,6 +260,12 @@ void llama_memory_hybrid::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_ds
 void llama_memory_hybrid::seq_keep(llama_seq_id seq_id) {
     mem_attn->seq_keep(seq_id);
     mem_recr->seq_keep(seq_id);
+
+    for (llama_seq_id s = 0; s < (llama_seq_id) mem_attn->get_n_seq_max(); ++s) {
+        if (s != seq_id) {
+            box->seq_release(s);
+        }
+    }
 }
 
 void llama_memory_hybrid::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos shift) {
@@ -186,6 +293,7 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_memory_hybrid::memory_breakdo
     for (const auto & buft_size : mem_recr->memory_breakdown()) {
         mb[buft_size.first] += buft_size.second;
     }
+    mb[ggml_backend_buffer_get_type(box->get_buffer())] += box->get_total_bytes();
     return mb;
 }
 
@@ -197,10 +305,22 @@ void llama_memory_hybrid::state_write(llama_io_write_i & io, llama_seq_id seq_id
 }
 
 void llama_memory_hybrid::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
-    if ((flags & LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == 0) {
+    const bool read_attn = (flags & LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == 0;
+
+    if (read_attn) {
         mem_attn->state_read(io, seq_id, flags);
     }
-    mem_recr->state_read(io, seq_id, flags);
+
+    try {
+        mem_recr->state_read(io, seq_id, flags);
+    } catch (...) {
+        // the attention part is already restored - undo it
+        if (read_attn) {
+            mem_attn->state_clear(seq_id);
+        }
+
+        throw;
+    }
 }
 
 llama_kv_cache * llama_memory_hybrid::get_mem_attn() const {

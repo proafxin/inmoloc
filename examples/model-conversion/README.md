@@ -31,11 +31,10 @@ development/conversion process assisting with things like:
 * upload the model to HuggingFace to make it available for others
 
 ## Setup
-Create virtual python environment
+Create the environment from the root of the repository (the `convert` extra) and activate it:
 ```console
-$ python3.11 -m venv venv
-$ source venv/bin/activate
-(venv) $ pip install -r requirements.txt
+uv sync --extra convert
+source .venv/bin/activate
 ```
 
 ## Causal Language Model Conversion
@@ -99,7 +98,7 @@ containing logits which will be used for comparison with the converted model
 later, and the other is a text file which allows for manual visual inspection.
 
 ### Model conversion
-After updates have been made to [gguf-py](../../gguf-py) to add support for the
+After updates have been made to [gguf](../../gguf) to add support for the
 new model, the model can be converted to GGUF format using the following command:
 ```console
 # Using environment variable
@@ -224,7 +223,7 @@ The original model will apply the normalization according to the normalization
 layer specified in the modules.json configuration file.
 
 ### Model conversion
-After updates have been made to [gguf-py](../../gguf-py) to add support for the
+After updates have been made to [gguf](../../gguf) to add support for the
 new model the model can be converted to GGUF format using the following command:
 ```console
 (venv) $ make embedding-convert-model

@@ -28,5 +28,3 @@ fi
 cmake --build $BUILD_DIR --target local-inference-perplexity -j8
 
 ${BUILD_DIR}/bin/local-inference-perplexity -m $QUANTIZED_MODEL -f ppl/wikitext-2-raw/wiki.test.raw
-
-

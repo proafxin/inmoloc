@@ -95,7 +95,6 @@ static bool test_seq_rm_isolated(
     auto params_ctx = common_context_params_to_llama(params);
     params_ctx.n_ctx      = 256;
     params_ctx.n_seq_max  = 2;
-    params_ctx.kv_unified = true;
 
     auto ctx = llama_context_ptr{llama_init_from_model(model, params_ctx)};
     if (!ctx) {
@@ -364,7 +363,6 @@ static bool test_seq_cp_scatter(struct llama_model * model, const struct common_
     auto params_ctx = common_context_params_to_llama(params);
     params_ctx.n_ctx      = 256;
     params_ctx.n_seq_max  = 2;
-    params_ctx.kv_unified = true;
     auto ctx = llama_context_ptr{llama_init_from_model(model, params_ctx)};
 
     LOG("\n=== Test %d: seq copy (%s, scatter) ===\n", test_num, on_device ? "device" : "host");
@@ -634,11 +632,6 @@ int main(int argc, char ** argv) {
 
     if (!common_params_parse(fargc, filtered_argv.data(), params, LLAMA_EXAMPLE_COMMON)) {
         return 1;
-    }
-
-    if (params.n_parallel == 1) {
-        LOG_TRC("%s: n_parallel == 1, enabling unified kv cache\n", __func__);
-        params.kv_unified = true;
     }
 
     if (params.n_predict < 0) {

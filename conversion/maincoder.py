@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .base import ModelBase, TextModel, gguf
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("MaincoderForCausalLM")
@@ -8,7 +8,7 @@ from .base import ModelBase, TextModel, gguf
 class MaincoderModel(TextModel):
     model_arch = gguf.MODEL_ARCH.MAINCODER
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         if (head_dim := self.hparams.get("head_dim")) is not None:

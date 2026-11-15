@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .base import ModelBase, TextModel, gguf
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("CodeShellForCausalLM")
@@ -8,7 +8,7 @@ from .base import ModelBase, TextModel, gguf
 class CodeShellModel(TextModel):
     model_arch = gguf.MODEL_ARCH.CODESHELL
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         self.gguf_writer.add_context_length(self.hparams["n_positions"])
         self.gguf_writer.add_embedding_length(self.hparams["n_embd"])
         self.gguf_writer.add_feed_forward_length(4 * self.hparams["n_embd"])

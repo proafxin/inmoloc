@@ -37,7 +37,7 @@ git clone https://huggingface.co/openai/clip-vit-large-patch14-336
 2. Install the required Python packages:
 
 ```sh
-pip install -r tools/mtmd/requirements.txt
+uv sync --extra convert && source .venv/bin/activate
 ```
 
 3. Use `llava_surgery.py` to split the LLaVA model to LLaMA and multimodel projector constituents:
@@ -69,7 +69,7 @@ git clone https://huggingface.co/liuhaotian/llava-v1.6-vicuna-7b
 2) Install the required Python packages:
 
 ```sh
-pip install -r tools/mtmd/requirements.txt
+uv sync --extra convert && source .venv/bin/activate
 ```
 
 3) Use `llava_surgery_v2.py` which also supports llava-1.5 variants pytorch as well as safetensor models:

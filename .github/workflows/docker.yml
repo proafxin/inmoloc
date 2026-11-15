@@ -1,9 +1,9 @@
 name: Docker
 
-# publishes ghcr.io/proafxin/inmoloc on a version tag (v0.1.0 -> :0.1.0 and :latest), or by hand
+# publishes ghcr.io/proafxin/inmoloc CUDA and CPU images when the version in pyproject.toml changes
 on:
   push:
-    tags: ["v*"]
+    paths: ["pyproject.toml"]
   workflow_dispatch:
 
 concurrency:
@@ -21,7 +21,6 @@ jobs:
   image:
     name: ${{ matrix.name }} image
     runs-on: ubuntu-24.04
-    # six CUDA architectures take a few hours on a hosted runner
     timeout-minutes: 360
     strategy:
       fail-fast: false
@@ -38,49 +37,89 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # the version and commit the binaries report come from the git history
           fetch-depth: 0
 
-      # the CUDA development image and the build need more disk than a runner has free
-      - name: Free disk space
+      - name: Check if version changed in pyproject.toml
+        id: version_changed
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          before="${{ github.event.before }}"
+          after="${{ github.event.after }}"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          before_version="$(git show "$before:pyproject.toml" 2>/dev/null | sed -nE 's/^version = "([^"]+)"/\1/p' | head -1)"
+          after_version="$(git show "$after:pyproject.toml" 2>/dev/null | sed -nE 's/^version = "([^"]+)"/\1/p' | head -1)"
+          if [ "$before_version" = "$after_version" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Version unchanged ($before_version -> $after_version), skipping"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Version changed ($before_version -> $after_version)"
+          fi
+
+      - if: steps.version_changed.outputs.changed == 'true'
+        name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
           df -h /
 
-      - name: Tags
-        id: tags
+      - if: steps.version_changed.outputs.changed == 'true'
+        name: Read version from pyproject.toml
+        id: version
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            version="${GITHUB_REF#refs/tags/v}"
-            # the binaries report the version set in CMakeLists.txt: a tag must match it
-            cmake_version="$(sed -nE 's/^set\(INMOLOC_VERSION_BASE "([^"]+)"\)/\1/p' CMakeLists.txt)"
-            if [ "$version" != "$cmake_version" ]; then
-              echo "::error::tag v$version does not match INMOLOC_VERSION_BASE $cmake_version in CMakeLists.txt"
-              exit 1
-            fi
-            if [ -n "${{ matrix.suffix }}" ]; then latest="cpu"; else latest="latest"; fi
-            tags="$IMAGE:${version}${{ matrix.suffix }},$IMAGE:${latest}"
-            dev=OFF
-          else
-            version="$(git rev-parse --short HEAD)"
-            tags="$IMAGE:sha-${version}${{ matrix.suffix }}"
-            dev=ON
+          version="$(sed -nE 's/^version = "([^"]+)"/\1/p' pyproject.toml | head -1)"
+          if [ -z "$version" ]; then
+            echo "::error::no version found in pyproject.toml"
+            exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "dev=$dev" >> "$GITHUB_OUTPUT"
-          echo "tags=$tags" >> "$GITHUB_OUTPUT"
-          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - if: steps.version_changed.outputs.changed == 'true'
+        uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      - if: steps.version_changed.outputs.changed == 'true'
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@v6
+      - if: steps.version_changed.outputs.changed == 'true'
+        name: Check if image already pushed
+        id: check
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          suffix="${{ matrix.suffix }}"
+          tag="${IMAGE}:${version}${suffix}"
+          if docker manifest inspect "$tag" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Image $tag already exists, skipping build"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.version_changed.outputs.changed == 'true' && steps.check.outputs.skip != 'true'
+        name: Tags
+        id: tags
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          suffix="${{ matrix.suffix }}"
+          if [ -n "$suffix" ]; then latest="cpu"; else latest="latest"; fi
+          tags="${IMAGE}:${version}${suffix},${IMAGE}:${latest}"
+          tags="${tags},${IMAGE}:sha-${{ github.sha }}${suffix}"
+          dev=ON
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "dev=$dev" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - if: steps.version_changed.outputs.changed == 'true' && steps.check.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.dockerfile }}
@@ -89,7 +128,7 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
-            APP_VERSION=${{ steps.tags.outputs.version }}
+            APP_VERSION=${{ steps.version.outputs.version }}
             APP_REVISION=${{ github.sha }}
             BUILD_DATE=${{ steps.tags.outputs.date }}
             BUILD_IS_DEV=${{ steps.tags.outputs.dev }}

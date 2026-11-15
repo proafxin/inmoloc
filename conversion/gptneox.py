@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import re
-
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
+from conversion.base import ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register("GPTNeoXForCausalLM")
@@ -17,7 +18,7 @@ from .base import ModelBase, TextModel, gguf, logger
 class GPTNeoXModel(TextModel):
     model_arch = gguf.MODEL_ARCH.GPTNEOX
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         self.gguf_writer.add_context_length(self.hparams["max_position_embeddings"])
         self.gguf_writer.add_embedding_length(self.hparams["hidden_size"])
         self.gguf_writer.add_block_count(self.block_count)
@@ -37,8 +38,8 @@ class GPTNeoXModel(TextModel):
 
         if re.match(r"gpt_neox\.layers\.\d+\.attention\.query_key_value\.weight", name):
             # Map bloom-style qkv_linear to gpt-style qkv_linear
-            # bloom: https://github.com/huggingface/transformers/blob/main/src/transformers/models/bloom/modeling_bloom.py#L238-L252  # noqa
-            # gpt-2: https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py#L312  # noqa
+            # bloom: https://github.com/huggingface/transformers/blob/main/src/transformers/models/bloom/modeling_bloom.py#L238-L252
+            # gpt-2: https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py#L312
             qkv_weights = data_torch.reshape((n_head, 3, n_embed // n_head, n_embed))
             data_torch = torch.cat(
                 (

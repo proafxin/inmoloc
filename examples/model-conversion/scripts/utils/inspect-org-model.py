@@ -7,29 +7,38 @@ import re
 import struct
 import sys
 from pathlib import Path
-from typing import Optional
-from safetensors import safe_open
 
+from safetensors import safe_open
 
 MODEL_SAFETENSORS_FILE = "model.safetensors"
 MODEL_SAFETENSORS_INDEX = "model.safetensors.index.json"
 
 DTYPE_SIZES = {
-    "F64": 8, "I64": 8, "U64": 8,
-    "F32": 4, "I32": 4, "U32": 4,
-    "F16": 2, "BF16": 2, "I16": 2, "U16": 2,
-    "I8": 1, "U8": 1, "BOOL": 1,
-    "F8_E4M3": 1, "F8_E5M2": 1,
+    "F64": 8,
+    "I64": 8,
+    "U64": 8,
+    "F32": 4,
+    "I32": 4,
+    "U32": 4,
+    "F16": 2,
+    "BF16": 2,
+    "I16": 2,
+    "U16": 2,
+    "I8": 1,
+    "U8": 1,
+    "BOOL": 1,
+    "F8_E4M3": 1,
+    "F8_E5M2": 1,
 }
 
-SIZE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB']
+SIZE_UNITS = ["B", "KB", "MB", "GB", "TB"]
 
 
-def get_weight_map(model_path: Path) -> Optional[dict[str, str]]:
+def get_weight_map(model_path: Path) -> dict[str, str] | None:
     index_file = model_path / MODEL_SAFETENSORS_INDEX
 
     if index_file.exists():
-        with open(index_file, 'r') as f:
+        with Path(index_file).open(encoding="utf-8") as f:
             index = json.load(f)
             return index.get("weight_map", {})
 
@@ -55,7 +64,7 @@ def get_all_tensor_names(model_path: Path) -> list[str]:
     sys.exit(1)
 
 
-def find_tensor_file(model_path: Path, tensor_name: str) -> Optional[str]:
+def find_tensor_file(model_path: Path, tensor_name: str) -> str | None:
     weight_map = get_weight_map(model_path)
 
     if weight_map is not None:
@@ -69,8 +78,8 @@ def find_tensor_file(model_path: Path, tensor_name: str) -> Optional[str]:
 
 
 def read_safetensors_header(file_path: Path) -> dict:
-    with open(file_path, 'rb') as f:
-        header_size = struct.unpack('<Q', f.read(8))[0]
+    with Path(file_path).open("rb") as f:
+        header_size = struct.unpack("<Q", f.read(8))[0]
         return json.loads(f.read(header_size))
 
 
@@ -126,19 +135,18 @@ def get_all_tensor_metadata(model_path: Path) -> dict[str, dict]:
 
 
 def normalize_tensor_name(tensor_name: str) -> str:
-    normalized = re.sub(r'\.\d+\.', '.#.', tensor_name)
-    normalized = re.sub(r'\.\d+$', '.#', normalized)
-    return normalized
+    normalized = re.sub(r"\.\d+\.", ".#.", tensor_name)
+    return re.sub(r"\.\d+$", ".#", normalized)
 
 
 def list_all_tensors(
     model_path: Path,
     short: bool = False,
     show_sizes: bool = False,
-):
+) -> None:
     tensor_names = get_all_tensor_names(model_path)
 
-    metadata: Optional[dict[str, dict]] = None
+    metadata: dict[str, dict] | None = None
     if show_sizes:
         metadata = get_all_tensor_metadata(model_path)
 
@@ -150,14 +158,17 @@ def list_all_tensors(
             normalized = normalize_tensor_name(tensor_name)
             if normalized not in seen:
                 seen[normalized] = tensor_name
-        display_pairs = list(sorted(seen.items()))
+        display_pairs = sorted(seen.items())
         name_width = max((len(n) for n, _ in display_pairs), default=0)
         for normalized, first_name in display_pairs:
             if metadata and first_name in metadata:
                 m = metadata[first_name]
                 size = get_tensor_size_bytes(m)
                 total_bytes += size
-                print(f"{normalized:{name_width}}  {m.get('dtype', '?'):6s}  {str(m.get('shape', '')):30s}  {format_size(size)}")
+                print(
+                    f"{normalized:{name_width}}  {m.get('dtype', '?'):6s}  {m.get('shape', '')!s:30s}  "
+                    f"{format_size(size)}"
+                )
             else:
                 print(normalized)
     else:
@@ -167,7 +178,10 @@ def list_all_tensors(
                 m = metadata[tensor_name]
                 size = get_tensor_size_bytes(m)
                 total_bytes += size
-                print(f"{tensor_name:{name_width}}  {m.get('dtype', '?'):6s}  {str(m.get('shape', '')):30s}  {format_size(size)}")
+                print(
+                    f"{tensor_name:{name_width}}  {m.get('dtype', '?'):6s}  {m.get('shape', '')!s:30s}  "
+                    f"{format_size(size)}"
+                )
             else:
                 print(tensor_name)
 
@@ -175,7 +189,7 @@ def list_all_tensors(
         print(f"\nTotal: {format_size(total_bytes)}")
 
 
-def print_tensor_info(model_path: Path, tensor_name: str, num_values: Optional[int] = None):
+def print_tensor_info(model_path: Path, tensor_name: str, num_values: int | None = None) -> None:
     tensor_file = find_tensor_file(model_path, tensor_name)
 
     if tensor_file is None:
@@ -191,7 +205,7 @@ def print_tensor_info(model_path: Path, tensor_name: str, num_values: Optional[i
         dtype_str = tensor_meta.get("dtype")
 
         with safe_open(file_path, framework="pt", device="cpu") as f:
-            if tensor_name in f.keys():
+            if tensor_name in f.keys():  # ruff: ignore[in-dict-keys] - safe_open handles are not iterable
                 tensor_slice = f.get_slice(tensor_name)
                 shape = tensor_slice.get_shape()
                 print(f"Tensor: {tensor_name}")
@@ -220,43 +234,33 @@ def print_tensor_info(model_path: Path, tensor_name: str, num_values: Optional[i
         sys.exit(1)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Print tensor information from a safetensors model"
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Print tensor information from a safetensors model")
+    parser.add_argument("tensor_name", nargs="?", help="Name of the tensor to inspect")
+    parser.add_argument(
+        "-m", "--model-path", type=Path, help="Path to the model directory (default: MODEL_PATH environment variable)"
     )
     parser.add_argument(
-        "tensor_name",
-        nargs="?",
-        help="Name of the tensor to inspect"
-    )
-    parser.add_argument(
-        "-m", "--model-path",
-        type=Path,
-        help="Path to the model directory (default: MODEL_PATH environment variable)"
-    )
-    parser.add_argument(
-        "-l", "--list-all-short",
+        "-l",
+        "--list-all-short",
         action="store_true",
-        help="List unique tensor patterns (layer numbers replaced with #)"
+        help="List unique tensor patterns (layer numbers replaced with #)",
     )
     parser.add_argument(
-        "-la", "--list-all",
-        action="store_true",
-        help="List all tensor names with actual layer numbers"
+        "-la", "--list-all", action="store_true", help="List all tensor names with actual layer numbers"
     )
     parser.add_argument(
-        "-n", "--num-values",
+        "-n",
+        "--num-values",
         nargs="?",
         const=10,
         default=None,
         type=int,
         metavar="N",
-        help="Print the first N values of the tensor flattened (default: 10 if flag is given without a number)"
+        help="Print the first N values of the tensor flattened (default: 10 if flag is given without a number)",
     )
     parser.add_argument(
-        "-s", "--sizes",
-        action="store_true",
-        help="Show dtype, shape, and size for each tensor when listing"
+        "-s", "--sizes", action="store_true", help="Show dtype, shape, and size for each tensor when listing"
     )
 
     args = parser.parse_args()

@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import json
-
 from pathlib import Path
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
+from conversion.base import ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register("MambaForCausalLM", "MambaLMHeadModel", "FalconMambaForCausalLM")
@@ -18,15 +19,15 @@ from .base import ModelBase, TextModel, gguf, logger
 class MambaModel(TextModel):
     model_arch = gguf.MODEL_ARCH.MAMBA
 
-    def __init__(self, dir_model: Path, *args, **kwargs):
+    def __init__(self, dir_model: Path, *args, **kwargs) -> None:
         # Avoid using AutoConfig for hparams
         hparams = kwargs.pop("hparams", None)
         if hparams is None:
-            with open(dir_model / "config.json", "r", encoding="utf-8") as f:
+            with Path(dir_model / "config.json").open(encoding="utf-8") as f:
                 hparams = json.load(f)
         super().__init__(dir_model, *args, hparams=hparams, **kwargs)
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         vocab_size = self.hparams["vocab_size"]
         # Round vocab size to next multiple of 8
         pad_vocab = self.hparams.get("pad_vocab_size_multiple", 8)
@@ -43,34 +44,36 @@ class MambaModel(TextModel):
             # Use the GPT-NeoX tokenizer when no tokenizer files are present
             self._set_vocab_builtin("gpt-neox", vocab_size)
 
-    def set_gguf_parameters(self):
-        d_model = self.find_hparam(["hidden_size",       "d_model"])
-        d_conv  = self.find_hparam(["conv_kernel",       "d_conv"],  optional=True) or 4
+    def set_gguf_parameters(self) -> None:
+        d_model = self.find_hparam(["hidden_size", "d_model"])
+        d_conv = self.find_hparam(["conv_kernel", "d_conv"], optional=True) or 4
         d_inner = self.find_hparam(["intermediate_size", "d_inner"], optional=True) or 2 * d_model
-        d_state = self.find_hparam(["state_size",        "d_state"], optional=True) or 16
+        d_state = self.find_hparam(["state_size", "d_state"], optional=True) or 16
         # ceiling division
         # ref: https://stackoverflow.com/a/17511341/22827863
         # ref: https://github.com/state-spaces/mamba/blob/ce59daea3a090d011d6476c6e5b97f6d58ddad8b/mamba_ssm/modules/mamba_simple.py#L58
-        dt_rank      = self.find_hparam(["time_step_rank",     "dt_rank"],      optional=True) or -(d_model // -16)
+        dt_rank = self.find_hparam(["time_step_rank", "dt_rank"], optional=True) or -(d_model // -16)
         rms_norm_eps = self.find_hparam(["layer_norm_epsilon", "rms_norm_eps"], optional=True) or 1e-5
         use_dt_b_c_norm = False
         # For falconmamba we do apply RMS norm on B / DT and C layers
-        if self.find_hparam(["model_type"], optional=True) in ("falcon_mamba",):
+        if self.find_hparam(["model_type"], optional=True) == "falcon_mamba":
             use_dt_b_c_norm = True
         # Fail early for models which don't have a block expansion factor of 2
         assert d_inner == 2 * d_model
 
-        self.gguf_writer.add_context_length(2**20) # arbitrary value; for those who use the default
+        self.gguf_writer.add_context_length(2**20)  # arbitrary value; for those who use the default
         self.gguf_writer.add_embedding_length(d_model)
-        self.gguf_writer.add_feed_forward_length(0) # unused, but seemingly required when loading
-        self.gguf_writer.add_head_count(0) # unused, but seemingly required when loading
+        self.gguf_writer.add_feed_forward_length(0)  # unused, but seemingly required when loading
+        self.gguf_writer.add_head_count(0)  # unused, but seemingly required when loading
         self.gguf_writer.add_block_count(self.block_count)
         self.gguf_writer.add_ssm_conv_kernel(d_conv)
         self.gguf_writer.add_ssm_inner_size(d_inner)
         self.gguf_writer.add_ssm_state_size(d_state)
         self.gguf_writer.add_ssm_time_step_rank(dt_rank)
         self.gguf_writer.add_layer_norm_rms_eps(rms_norm_eps)
-        self.gguf_writer.add_ssm_dt_b_c_rms(use_dt_b_c_norm) # For classic Mamba we don't apply rms norm on B / DT layers
+        self.gguf_writer.add_ssm_dt_b_c_rms(
+            use_dt_b_c_norm
+        )  # For classic Mamba we don't apply rms norm on B / DT layers
         self.gguf_writer.add_file_type(self.ftype)
 
     _tok_embd = None
@@ -105,22 +108,25 @@ class MambaModel(TextModel):
 class Mamba2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.MAMBA2
 
-    def __init__(self, dir_model: Path, *args, **kwargs):
+    def __init__(self, dir_model: Path, *args, **kwargs) -> None:
         # Avoid using AutoConfig for hparams
         # It wrongly assumes all Mamba2 models are Mamba-Codestral-7B-v0.1
         hparams = kwargs.pop("hparams", None)
         if hparams is None:
-            with open(dir_model / "config.json", "r", encoding="utf-8") as f:
+            with Path(dir_model / "config.json").open(encoding="utf-8") as f:
                 hparams = json.load(f)
         if "llm_config" in hparams:
             hparams["text_config"] = hparams["llm_config"]
         super().__init__(dir_model, *args, hparams=hparams, **kwargs)
         self.d_model = self.find_hparam(["hidden_size", "d_model", "dim"])
         self.expand = self.find_hparam(["mamba_expand", "expand"], optional=True) or 2
-        self.d_inner = self.find_hparam(["mamba_d_ssm", "intermediate_size", "d_inner"], optional=True) or self.expand * self.d_model
+        self.d_inner = (
+            self.find_hparam(["mamba_d_ssm", "intermediate_size", "d_inner"], optional=True)
+            or self.expand * self.d_model
+        )
         self.n_group = self.find_hparam(["n_groups"], optional=True) or 1
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         vocab_size = self.hparams["vocab_size"]
         # Round vocab size to next multiple of 16
         pad_vocab = self.hparams.get("pad_vocab_size_multiple", 16)
@@ -133,16 +139,17 @@ class Mamba2Model(TextModel):
             self._set_vocab_sentencepiece()
         elif (self.dir_model / "tokenizer.model.v3").is_file():
             # mamba-codestral
-            raise NotImplementedError(f"Please rename {self.dir_model / 'tokenizer.model.v3'} to {self.dir_model / 'tokenizer.model'}")
+            msg = f"Please rename {self.dir_model / 'tokenizer.model.v3'} to {self.dir_model / 'tokenizer.model'}"
+            raise NotImplementedError(msg)
         elif (self.dir_model / "tokenizer.json").is_file():
             self._set_vocab_gpt2()
         else:
             # Use the GPT-NeoX tokenizer when no tokenizer files are present
             self._set_vocab_builtin("gpt-neox", vocab_size)
 
-    def set_gguf_parameters(self):
-        d_conv  = self.find_hparam(["conv_kernel", "d_conv"],     optional=True) or 4
-        d_state = self.find_hparam(["state_size",  "d_state"],    optional=True) or 128
+    def set_gguf_parameters(self) -> None:
+        d_conv = self.find_hparam(["conv_kernel", "d_conv"], optional=True) or 4
+        d_state = self.find_hparam(["state_size", "d_state"], optional=True) or 128
         head_dim = self.find_hparam(["mamba_d_head", "head_dim"], optional=True) or 64
 
         rms_norm_eps = self.find_hparam(["layer_norm_epsilon", "rms_norm_eps"], optional=True) or 1e-5
@@ -183,10 +190,13 @@ class Mamba2Model(TextModel):
 
         if self.match_model_tensor_name(new_name, gguf.MODEL_TENSOR.SSM_CONV1D, bid):
             data_torch = data_torch.squeeze()
-        elif any(self.match_model_tensor_name(new_name, t, bid, suffix="") for t in [
-            gguf.MODEL_TENSOR.SSM_A,
-            gguf.MODEL_TENSOR.SSM_D,
-        ]):
+        elif any(
+            self.match_model_tensor_name(new_name, t, bid, suffix="")
+            for t in [
+                gguf.MODEL_TENSOR.SSM_A,
+                gguf.MODEL_TENSOR.SSM_D,
+            ]
+        ):
             # unsqueeze A to use similar shape semantics as Mamba-1
             # (D is also unsqueezed, but for more straightforward broadcast internally)
             data_torch = data_torch.reshape((*data_torch.shape, 1))

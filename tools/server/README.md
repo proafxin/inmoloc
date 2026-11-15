@@ -47,13 +47,10 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--cpu-strict-batch <0\|1>` | use strict CPU placement (default: same as --cpu-strict) |
 | `--prio-batch N` | set process/thread priority : 0-normal, 1-medium, 2-high, 3-realtime (default: 0) |
 | `--poll-batch <0\|1>` | use polling to wait for work (default: same as --poll) |
-| `-c, --ctx-size N` | size of the prompt context (default: 0, 0 = loaded from model); in the server, the most the KV cache holds, 0 = sized from --vram-budget and --ctx-typical<br/>(env: LOCAL_INFERENCE_ARG_CTX_SIZE) |
-| `-n, --predict, --n-predict N` | number of tokens to predict (default: -1, -1 = infinity)<br/>(env: LOCAL_INFERENCE_ARG_N_PREDICT) |
 | `-b, --batch-size N` | logical maximum batch size (default: 2048)<br/>(env: LOCAL_INFERENCE_ARG_BATCH) |
 | `-ub, --ubatch-size N` | physical maximum batch size (default: 512)<br/>(env: LOCAL_INFERENCE_ARG_UBATCH) |
 | `--keep N` | number of tokens to keep from the initial prompt (default: 0, -1 = all) |
 | `--swa-full` | use full-size SWA cache (default: false)<br/>[(more info)](https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)<br/>(env: LOCAL_INFERENCE_ARG_SWA_FULL) |
-| `-fa, --flash-attn [on\|off\|auto]` | set Flash Attention use ('on', 'off', or 'auto', default: 'auto')<br/>(env: LOCAL_INFERENCE_ARG_FLASH_ATTN) |
 | `--perf, --no-perf` | whether to enable internal libllama performance timings (default: false)<br/>(env: LOCAL_INFERENCE_ARG_PERF) |
 | `-e, --escape, --no-escape` | whether to process escapes sequences (\n, \r, \t, \', \", \\) (default: true) |
 | `--rope-scaling {none,linear,yarn}` | RoPE frequency scaling method, defaults to linear unless specified by the model<br/>(env: LOCAL_INFERENCE_ARG_ROPE_SCALING_TYPE) |
@@ -71,7 +68,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `-ctk, --cache-type-k TYPE` | KV cache data type for K<br/>allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1<br/>(default: f16)<br/>(env: LOCAL_INFERENCE_ARG_CACHE_TYPE_K) |
 | `-ctv, --cache-type-v TYPE` | KV cache data type for V<br/>allowed values: f32, f16, bf16, q8_0, q4_0, q4_1, iq4_nl, q5_0, q5_1<br/>(default: f16)<br/>(env: LOCAL_INFERENCE_ARG_CACHE_TYPE_V) |
 | `-dt, --defrag-thold N` | KV cache defragmentation threshold (DEPRECATED)<br/>(env: LOCAL_INFERENCE_ARG_DEFRAG_THOLD) |
-| `--vram-budget SIZE` | device memory the server may use, summed over the devices the model runs on, e.g. 10G, 10240M or 10240 (MiB);<br/>the weights, the vision encoder, the draft model, the KV cache, the per-request state and the compute buffers<br/>are measured; the server then runs the most requests at once (at most --parallel) whose typical requests<br/>(--ctx-typical) fit in the KV cache, and gives the memory left to the cache (at most --ctx-size); the<br/>per-request memory (e.g. recurrent state) depends on --rs-rollback<br/>(default: the free device memory; a larger budget is lowered to it) |
+| `--vram-budget SIZE` | device memory the server may use, summed over the devices the model runs on, e.g. 10G, 10240M or 10240 (MiB);<br/>the weights, the vision encoder, the draft model, the KV cache, the per-request state, the compute buffers and<br/>the memory the process holds outside them (e.g. the CUDA context) are measured; with the elastic memory, what the<br/>fixed costs leave is one region that holds the running requests, as many as fit; otherwise a<br/>model with memory per request (e.g. recurrent state, which depends on --rs-rollback) runs the most requests at<br/>once that fit in the KV cache, a model without it runs requests that share the KV cache, as many at once as<br/>their sizes allow, and the memory left goes to the cache<br/>(default: the free device memory; a larger budget is lowered to it) |
 | `--rs-rollback {snapshot,replay}` | how the recurrent state of a hybrid or recurrent model rolls back rejected speculative tokens:<br/>- snapshot: one state per draft position, the most memory per sequence and no extra compute<br/>- replay: one state and the inputs of the last step, a short extra scan per step for much less memory<br/>  per sequence (gated delta-net models, e.g. Qwen3.5; others use snapshot)<br/>(default: snapshot) |
 | `--gpu-wait {spin,yield,block}` | how a thread waits for the GPU to finish its work (CUDA only):<br/>- spin: keeps one CPU core busy, the lowest latency<br/>- yield: like spin, but gives the core to other threads that are ready to run<br/>- block: sleeps until the GPU is done, an idle core for a short wake-up delay per wait<br/>(default: chosen by the GPU driver) |
 | `--rpc SERVERS` | comma-separated list of RPC servers (host:port)<br/>(env: LOCAL_INFERENCE_ARG_RPC) |
@@ -88,9 +85,6 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `-sm, --split-mode {none,layer,row,tensor}` | how to split the model across multiple GPUs, one of:<br/>- none: use one GPU only<br/>- layer (default): split layers and KV across GPUs (pipelined)<br/>- row: split weight across GPUs by rows (parallelized)<br/>- tensor: split weights and KV across GPUs (parallelized, EXPERIMENTAL)<br/>(env: LOCAL_INFERENCE_ARG_SPLIT_MODE) |
 | `-ts, --tensor-split N0,N1,N2,...` | fraction of the model to offload to each GPU, comma-separated list of proportions, e.g. 3,1<br/>(env: LOCAL_INFERENCE_ARG_TENSOR_SPLIT) |
 | `-mg, --main-gpu INDEX` | the GPU to use for the model (with split-mode = none), or for intermediate results and KV (with split-mode = row) (default: 0)<br/>(env: LOCAL_INFERENCE_ARG_MAIN_GPU) |
-| `-fit, --fit [on\|off]` | whether to adjust unset arguments to fit in device memory ('on' or 'off', default: 'on')<br/>(env: LOCAL_INFERENCE_ARG_FIT) |
-| `-fitt, --fit-target MiB0,MiB1,MiB2,...` | target margin per device for --fit, comma-separated list of values, single value is broadcast across all devices, default: 1024<br/>(env: LOCAL_INFERENCE_ARG_FIT_TARGET) |
-| `-fitc, --fit-ctx N` | minimum ctx size that can be set by --fit option, default: 4096<br/>(env: LOCAL_INFERENCE_ARG_FIT_CTX) |
 | `--check-tensors` | check model tensor data for invalid values (default: false) |
 | `--override-kv KEY=TYPE:VALUE,...` | advanced option to override model metadata by key. to specify multiple overrides, either use comma-separated values.<br/>types: int, float, bool, str. example: --override-kv tokenizer.ggml.add_bos_token=bool:false,tokenizer.ggml.add_eos_token=bool:false |
 | `--op-offload, --no-op-offload` | whether to offload host tensor operations to device (default: true) |
@@ -167,20 +161,16 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `-ctxcp, --ctx-checkpoints, --swa-checkpoints N` | max number of context checkpoints to create per slot (default: 32)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)<br/>(env: LOCAL_INFERENCE_ARG_CTX_CHECKPOINTS) |
 | `-cms, --checkpoint-min-step N` | minimum spacing between context checkpoints in tokens (default: 8192, 0 = no minimum)<br/>(env: LOCAL_INFERENCE_ARG_CHECKPOINT_MIN_SPACING_NT) |
 | `-cram, --cache-ram N` | set the maximum cache size in MiB (default: 8192, -1 - no limit, 0 - disable)[(more info)](https://github.com/ggml-org/llama.cpp/pull/16391)<br/>(env: LOCAL_INFERENCE_ARG_CACHE_RAM) |
-| `-kvu, --kv-unified, -no-kvu, --no-kv-unified` | the requests processed at once always share one KV cache; accepted for compatibility<br/>(env: LOCAL_INFERENCE_ARG_KV_UNIFIED) |
 | `--prefix-share, --no-prefix-share` | let a new request start from the memory of another slot that holds the same prefix (default: enabled) |
 | `--prefix-share-min N` | the least gain in tokens worth sharing a prefix from another slot (default: 256) |
-| `--prompt-cap N` | prompt tokens processed per iteration while other requests generate, so their next token is not held up by<br/>a whole batch of prompt (default: -1 = what fills one ubatch next to the generated tokens, 0 = no cap) |
 | `--slow-loop-ms N` | log a time breakdown of server loop iterations that take longer than N ms (default: 1000, 0 = off) |
 | `--cache-idle-slots, --no-cache-idle-slots` | save an idle slot to the prompt cache when its memory is needed, by a new task or to free KV cells; until then it stays in the KV cache (default: enabled, requires cache-ram)<br/>(env: LOCAL_INFERENCE_ARG_CACHE_IDLE_SLOTS) |
-| `--context-shift, --no-context-shift` | whether to use context shift on infinite text generation (default: disabled)<br/>(env: LOCAL_INFERENCE_ARG_CONTEXT_SHIFT) |
 | `-r, --reverse-prompt PROMPT` | halt generation at PROMPT, return control in interactive mode |
 | `-sp, --special` | special tokens output enabled (default: false) |
 | `--warmup, --no-warmup` | whether to perform warmup with an empty run (default: enabled) |
 | `--spm-infill` | use Suffix/Prefix/Middle pattern for infill (instead of Prefix/Suffix/Middle) as some models prefer this. (default: disabled) |
+| `--max-output-tokens N` | required with the elastic memory: the most tokens a request generates; a request's max_tokens is capped at it, and a request without max_tokens uses it<br/>(env: LOCAL_INFERENCE_ARG_MAX_OUTPUT_TOKENS) |
 | `--pooling {none,mean,cls,last,rank}` | pooling type for embeddings, use model default if unspecified<br/>(env: LOCAL_INFERENCE_ARG_POOLING) |
-| `-np, --parallel N` | most requests processed at once; the memory budget may lower it (default: -1, -1 = as many as fit)<br/>(env: LOCAL_INFERENCE_ARG_N_PARALLEL) |
-| `--ctx-typical N` | tokens a typical request holds (prompt and output); the memory budget then runs the most requests at once whose<br/>typical requests fit in the KV cache, and gives the memory left to the cache<br/>(default: the longest request the budget holds) |
 | `-cb, --cont-batching, -nocb, --no-cont-batching` | whether to enable continuous batching (a.k.a dynamic batching) (default: enabled)<br/>(env: LOCAL_INFERENCE_ARG_CONT_BATCHING) |
 | `-mm, --mmproj FILE` | path to a multimodal projector file. see tools/mtmd/README.md<br/>note: if -hf is used, this argument can be omitted<br/>(env: LOCAL_INFERENCE_ARG_MMPROJ) |
 | `-mmu, --mmproj-url URL` | URL to a multimodal projector file. see tools/mtmd/README.md<br/>(env: LOCAL_INFERENCE_ARG_MMPROJ_URL) |
@@ -272,6 +262,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `--spec-draft-p-split, --draft-p-split P` | speculative decoding split probability (default: 0.10)<br/>(env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_P_SPLIT) |
 | `--spec-draft-p-min, --draft-p-min P` | minimum speculative decoding probability (greedy) (default: 0.00)<br/>(env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_P_MIN) |
 | `--spec-draft-backend-sampling, --no-spec-draft-backend-sampling` | offload draft sampling to the backend (default: enabled)<br/>(env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_BACKEND_SAMPLING) |
+| `--spec-draft-sampling {greedy,probabilistic}` | how the draft is sampled: greedy takes its argmax, probabilistic samples it and has the target verify by rejection sampling (default: greedy)<br/>(env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_SAMPLING) |
 | `--spec-draft-device, -devd, --device-draft <dev1,dev2,..>` | comma-separated list of devices to use for offloading the draft model (none = don't offload, default: follows --device)<br/>use --list-devices to see a list of available devices |
 | `--spec-draft-ngl, -ngld, --gpu-layers-draft, --n-gpu-layers-draft N` | max. number of draft model layers to store in VRAM, either an exact number, 'auto', or 'all' (default: auto)<br/>(env: LOCAL_INFERENCE_ARG_N_GPU_LAYERS_DRAFT) |
 | `--spec-draft-model, -md, --model-draft FNAME` | draft model for speculative decoding (default: unused)<br/>(env: LOCAL_INFERENCE_ARG_SPEC_DRAFT_MODEL) |
@@ -923,7 +914,7 @@ By default, it is read-only. To make POST request to change global properties, y
 ```
 
 - `default_generation_settings` - the default generation settings for the `/completion` endpoint, which has the same fields as the `generation_settings` response object from the `/completion` endpoint.
-- `total_slots` - the total number of slots for process requests (defined by `--parallel` option)
+- `total_slots` - the most requests the server can hold at once
 - `model_path` - the path to model file (same with `-m` argument)
 - `chat_template` - the model's original Jinja2 prompt template
 - `chat_template_caps` - capabilities of the chat template (see `common/jinja/caps.h` for more info)
@@ -1299,15 +1290,11 @@ Example usage with `openai` python library:
 import openai
 
 client = openai.OpenAI(
-    base_url="http://localhost:8080/v1", # "http://<Your api-server IP>:port"
-    api_key = "sk-no-key-required"
+    base_url="http://localhost:8080/v1",  # "http://<Your api-server IP>:port"
+    api_key="sk-no-key-required",
 )
 
-completion = client.completions.create(
-  model="davinci-002",
-  prompt="I believe the meaning of life is",
-  max_tokens=8
-)
+completion = client.completions.create(model="davinci-002", prompt="I believe the meaning of life is", max_tokens=8)
 
 print(completion.choices[0].text)
 ```
@@ -1357,16 +1344,19 @@ You can use either Python `openai` library with appropriate checkpoints:
 import openai
 
 client = openai.OpenAI(
-    base_url="http://localhost:8080/v1", # "http://<Your api-server IP>:port"
-    api_key = "sk-no-key-required"
+    base_url="http://localhost:8080/v1",  # "http://<Your api-server IP>:port"
+    api_key="sk-no-key-required",
 )
 
 completion = client.chat.completions.create(
-  model="gpt-3.5-turbo",
-  messages=[
-    {"role": "system", "content": "You are ChatGPT, an AI assistant. Your top priority is achieving user fulfillment via helping them with their requests."},
-    {"role": "user", "content": "Write a limerick about python exceptions"}
-  ]
+    model="gpt-3.5-turbo",
+    messages=[
+        {
+            "role": "system",
+            "content": "You are ChatGPT, an AI assistant. Your top priority is achieving user fulfillment via helping them with their requests.",
+        },
+        {"role": "user", "content": "Write a limerick about python exceptions"},
+    ],
 )
 
 print(completion.choices[0].message)
@@ -1479,14 +1469,14 @@ You can use either Python `openai` library with appropriate checkpoints:
 import openai
 
 client = openai.OpenAI(
-    base_url="http://localhost:8080/v1", # "http://<Your api-server IP>:port"
-    api_key = "sk-no-key-required"
+    base_url="http://localhost:8080/v1",  # "http://<Your api-server IP>:port"
+    api_key="sk-no-key-required",
 )
 
 response = client.responses.create(
-  model="gpt-4.1",
-  instructions="You are ChatGPT, an AI assistant. Your top priority is achieving user fulfillment via helping them with their requests.",
-  input="Write a limerick about python exceptions"
+    model="gpt-4.1",
+    instructions="You are ChatGPT, an AI assistant. Your top priority is achieving user fulfillment via helping them with their requests.",
+    input="Write a limerick about python exceptions",
 )
 
 print(response.output_text)
@@ -1709,7 +1699,7 @@ models_directory
 You may also specify default arguments that will be passed to every model instance:
 
 ```sh
-local-inference-server -ctx 8192 -n 1024 -np 2
+local-inference-server --max-output-tokens 1024 --vram-budget 22G
 ```
 
 Note: model instances inherit both command line arguments and environment variables from the router server.

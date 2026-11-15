@@ -309,7 +309,7 @@ bool server_http_context::init(const common_params & params) {
     auto n_threads_http = params.n_threads_http;
     if (n_threads_http < 1) {
         // +4 threads for monitoring, health and some threads reserved for MCP and other tasks in the future
-        n_threads_http = std::max(params.n_parallel + 4, static_cast<int32_t>(std::thread::hardware_concurrency() - 1));
+        n_threads_http = std::max(5, static_cast<int32_t>(std::thread::hardware_concurrency()) - 1);
     }
     SRV_TRC("using %d threads for HTTP server\n", n_threads_http);
     srv->new_task_queue = [n_threads_http] {

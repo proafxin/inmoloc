@@ -38,7 +38,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING
 
 from qualcomm_device_cloud_sdk.api import qdc_api
 from qualcomm_device_cloud_sdk.logging import configure_logging
@@ -50,6 +50,9 @@ from qualcomm_device_cloud_sdk.models import (
     JobType,
     TestFramework,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # configure_logging only sets up the SDK logger; basicConfig is needed for
 # our own log.info to reach stdout.
@@ -65,15 +68,15 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
-POLL_INTERVAL        = 30
-JOB_TIMEOUT          = 3600
-LOG_UPLOAD_TIMEOUT   = 600
-CAPACITY_TIMEOUT     = 1800
-CAPACITY_POLL        = 60
-MAX_CONCURRENT_JOBS  = 5
-DEFAULT_RETRIES      = 0
-RETRY_DELAY          = 300
-TERMINAL_STATES     = {JobState.COMPLETED, JobState.CANCELED}
+POLL_INTERVAL = 30
+JOB_TIMEOUT = 3600
+LOG_UPLOAD_TIMEOUT = 600
+CAPACITY_TIMEOUT = 1800
+CAPACITY_POLL = 60
+MAX_CONCURRENT_JOBS = 5
+DEFAULT_RETRIES = 0
+RETRY_DELAY = 300
+TERMINAL_STATES = {JobState.COMPLETED, JobState.CANCELED}
 NON_TERMINAL_STATES = {JobState.DISPATCHED, JobState.RUNNING, JobState.SETUP, JobState.SUBMITTED}
 
 
@@ -87,9 +90,7 @@ _TESTS_DIR = _SCRIPTS_DIR / "tests"
 # --- Shared test assets -------------------------------------------------------
 _UTILS = _TESTS_DIR / "utils.py"
 _CONFTEST = _TESTS_DIR / "conftest.py"
-_PYTEST_LINE_RE = re.compile(
-    r"(?:[\w/]+\.py::)?(?:\w+::)?([\w\[\].-]+)\s+(PASSED|FAILED|ERROR|SKIPPED)"
-)
+_PYTEST_LINE_RE = re.compile(r"(?:[\w/]+\.py::)?(?:\w+::)?([\w\[\].-]+)\s+(PASSED|FAILED|ERROR|SKIPPED)")
 _EXCLUDED_LOGS = {
     "qdc_android_whole_host-000.log",
     "qdc_kernel_host-000.log",
@@ -124,8 +125,7 @@ class JobResult:
 
 def _write_lf(path: Path, content: str) -> None:
     """Write text with LF line endings (required by /bin/bash on Linux)."""
-    with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(content)
+    Path(path).write_text(content, encoding="utf-8", newline="\n")
 
 
 def _build_android_artifact(
@@ -160,18 +160,14 @@ def _build_android_artifact(
     shutil.copy(_UTILS, tests_dir / "utils.py")
     shutil.copy(_CONFTEST, tests_dir / "conftest.py")
 
-    if test_mode in ("bench", "all"):
+    if test_mode in {"bench", "all"}:
         assert model_url is not None
-        (tests_dir / "test_bench_posix.py").write_text(
-            _RUN_BENCH.read_text().replace("<<MODEL_URL>>", model_url)
-        )
-    if test_mode in ("backend-ops", "all"):
+        (tests_dir / "test_bench_posix.py").write_text(_RUN_BENCH.read_text().replace("<<MODEL_URL>>", model_url))
+    if test_mode in {"backend-ops", "all"}:
         shutil.copy(_RUN_BACKEND_OPS, tests_dir / "test_backend_ops_posix.py")
 
     shutil.copy(_REQUIREMENTS, stage_dir / "requirements.txt")
-    (stage_dir / "pytest.ini").write_text(
-        "[pytest]\naddopts = --junitxml=results.xml\n"
-    )
+    (stage_dir / "pytest.ini").write_text("[pytest]\naddopts = --junitxml=results.xml\n")
 
     zip_base = str(stage_dir / "artifact")
     shutil.make_archive(zip_base, "zip", stage_dir)
@@ -194,9 +190,7 @@ def _build_linux_artifact(
     shutil.copytree(pkg_dir, bundle_dir)
 
     template = _RUN_LINUX_TEMPLATE.read_text(encoding="utf-8")
-    rendered = template.replace("{MODEL_URL}", model_url or "").replace(
-        "{TEST_MODE}", test_mode
-    )
+    rendered = template.replace("{MODEL_URL}", model_url or "").replace("{TEST_MODE}", test_mode)
     script_path = stage_dir / "run_linux.sh"
     _write_lf(script_path, rendered)
     script_path.chmod(0o755)
@@ -292,7 +286,8 @@ def wait_for_job(client, job_id: str, timeout: int) -> str:
         log.warning("Aborted job %s after timeout to free concurrency slot", job_id)
     except Exception as e:
         log.warning("Failed to abort job %s: %s", job_id, e)
-    raise TimeoutError(f"Job {job_id} did not finish within {timeout}s")
+    msg = f"Job {job_id} did not finish within {timeout}s"
+    raise TimeoutError(msg)
 
 
 def wait_for_log_upload(client, job_id: str) -> None:
@@ -317,14 +312,10 @@ def wait_for_capacity(client, max_jobs: int = MAX_CONCURRENT_JOBS) -> None:
     while elapsed < CAPACITY_TIMEOUT:
         jobs_page = qdc_api.get_jobs_list(client, page_number=0, page_size=50)
         if jobs_page is None:
-            log.warning(
-                "Could not retrieve job list; proceeding without capacity check"
-            )
+            log.warning("Could not retrieve job list; proceeding without capacity check")
             return
         items = getattr(jobs_page, "data", []) or []
-        active = sum(
-            1 for j in items if getattr(j, "state", None) in _NON_TERMINAL_STATE_VALUES
-        )
+        active = sum(1 for j in items if getattr(j, "state", None) in _NON_TERMINAL_STATE_VALUES)
         if active < max_jobs:
             log.info("Active QDC jobs: %d / %d — proceeding", active, max_jobs)
             return
@@ -336,9 +327,8 @@ def wait_for_capacity(client, max_jobs: int = MAX_CONCURRENT_JOBS) -> None:
         )
         time.sleep(CAPACITY_POLL)
         elapsed += CAPACITY_POLL
-    raise TimeoutError(
-        f"Capacity wait timed out after {CAPACITY_TIMEOUT}s"
-    )
+    msg = f"Capacity wait timed out after {CAPACITY_TIMEOUT}s"
+    raise TimeoutError(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -387,13 +377,14 @@ def fetch_logs_and_parse_tests(
             if attempt < max_retries:
                 log.warning(
                     "get_job_log_files failed (attempt %d/%d): %s — retrying in %ds",
-                    attempt, max_retries, e, retry_delay,
+                    attempt,
+                    max_retries,
+                    e,
+                    retry_delay,
                 )
                 time.sleep(retry_delay)
             else:
-                log.error(
-                    "get_job_log_files failed after %d attempts: %s", max_retries, e
-                )
+                log.exception("get_job_log_files failed after %d attempts: %s", max_retries, e)
                 return {}, {}, {}
     if not log_files:
         log.warning("No log files returned for job %s", job_id)
@@ -417,7 +408,7 @@ def fetch_logs_and_parse_tests(
         for root_dir, _, files in os.walk(tmpdir):
             for fname in sorted(files):
                 fpath = os.path.join(root_dir, fname)
-                content = Path(fpath).read_text(errors="replace")
+                content = Path(fpath).read_text(encoding="utf-8", errors="replace")
                 if fname.endswith(".xml"):
                     results, failures = _parse_junit_xml(content)
                     test_results.update(results)
@@ -430,7 +421,7 @@ def fetch_logs_and_parse_tests(
                     pytest_fallback.update(_parse_pytest_output(content))
 
     return (
-        (test_results if test_results else pytest_fallback),
+        (test_results or pytest_fallback),
         raw_logs,
         failure_details,
     )
@@ -487,7 +478,7 @@ def write_summary(result: JobResult, title: str = "QDC Test Results") -> None:
                 "</details>",
             ]
 
-    with open(summary_path, "a") as f:
+    with Path(summary_path).open("a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
 
@@ -495,27 +486,43 @@ def write_summary(result: JobResult, title: str = "QDC Test Results") -> None:
 # CLI + main
 # =============================================================================
 
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--pkg-dir", required=True, type=Path,
-                   help="Installed llama.cpp package directory (contains bin/ and lib/)")
-    p.add_argument("--model-url",
-                   help="Direct URL to the GGUF model file (required for --test bench)")
-    p.add_argument("--device", required=True,
-                   help="QDC chipset name, e.g. SM8750")
-    p.add_argument("--test", choices=["bench", "backend-ops", "all"], default="bench",
-                   help="Test suite to run (default: bench)")
-    p.add_argument("--job-timeout", type=int, default=JOB_TIMEOUT, metavar="SECONDS",
-                   help=f"Max seconds to wait for job completion (default: {JOB_TIMEOUT})")
-    p.add_argument("--retries", type=int, default=DEFAULT_RETRIES, metavar="N",
-                   help="Number of retries when device is unavailable (default: 0)")
-    p.add_argument("--retry-delay", type=int, default=RETRY_DELAY, metavar="SECONDS",
-                   help=f"Seconds to wait between retries (default: {RETRY_DELAY})")
+    p.add_argument(
+        "--pkg-dir", required=True, type=Path, help="Installed llama.cpp package directory (contains bin/ and lib/)"
+    )
+    p.add_argument("--model-url", help="Direct URL to the GGUF model file (required for --test bench)")
+    p.add_argument("--device", required=True, help="QDC chipset name, e.g. SM8750")
+    p.add_argument(
+        "--test", choices=["bench", "backend-ops", "all"], default="bench", help="Test suite to run (default: bench)"
+    )
+    p.add_argument(
+        "--job-timeout",
+        type=int,
+        default=JOB_TIMEOUT,
+        metavar="SECONDS",
+        help=f"Max seconds to wait for job completion (default: {JOB_TIMEOUT})",
+    )
+    p.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        metavar="N",
+        help="Number of retries when device is unavailable (default: 0)",
+    )
+    p.add_argument(
+        "--retry-delay",
+        type=int,
+        default=RETRY_DELAY,
+        metavar="SECONDS",
+        help=f"Seconds to wait between retries (default: {RETRY_DELAY})",
+    )
     args = p.parse_args()
-    if args.test in ("bench", "all") and not args.model_url:
+    if args.test in {"bench", "all"} and not args.model_url:
         p.error("--model-url is required when --test bench or --test all")
     return args
 
@@ -565,9 +572,8 @@ def _submit_and_run_job(client, args, spec, target_id, artifact_id) -> JobResult
     job_ok = job_status == JobState.COMPLETED.value.lower()
 
     if not job_ok and not tests:
-        raise DeviceUnavailableError(
-            f"Job did not complete (status={job_status}) and produced no test results"
-        )
+        msg = f"Job did not complete (status={job_status}) and produced no test results"
+        raise DeviceUnavailableError(msg)
 
     passed = job_ok and all(tests.values()) if tests else job_ok
     if spec.test_framework == TestFramework.BASH and not tests:
@@ -586,7 +592,8 @@ def main() -> int:
     if platform is None:
         log.error(
             "Unknown device %r. Known: %s",
-            args.device, ", ".join(sorted(DEVICE_PLATFORM.keys())),
+            args.device,
+            ", ".join(sorted(DEVICE_PLATFORM.keys())),
         )
         return 1
     spec = PLATFORM_SPECS[platform]
@@ -613,9 +620,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         log.info("Building %s artifact (test=%s) ...", platform.value, args.test)
-        zip_path = spec.build_artifact(
-            args.pkg_dir, Path(tmpdir), args.test, args.model_url
-        )
+        zip_path = spec.build_artifact(args.pkg_dir, Path(tmpdir), args.test, args.model_url)
         log.info("Uploading artifact (%d MB) ...", zip_path.stat().st_size // 1_000_000)
         artifact_id = qdc_api.upload_file(client, str(zip_path), ArtifactType.TESTSCRIPT)
 
@@ -632,13 +637,18 @@ def main() -> int:
             if attempt < max_attempts:
                 log.warning(
                     "Attempt %d/%d failed (device unavailable): %s — retrying in %ds",
-                    attempt, max_attempts, e, args.retry_delay,
+                    attempt,
+                    max_attempts,
+                    e,
+                    args.retry_delay,
                 )
                 time.sleep(args.retry_delay)
             else:
-                log.error(
+                log.exception(
                     "Attempt %d/%d failed (device unavailable): %s — no retries left",
-                    attempt, max_attempts, e,
+                    attempt,
+                    max_attempts,
+                    e,
                 )
                 write_summary(
                     JobResult(passed=False, tests={}),

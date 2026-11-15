@@ -27,7 +27,7 @@ else
     # byteswap models if on big endian
     if [ "$(uname -m)" = s390x ]; then
         for f in $folder/*/*.gguf; do
-            echo YES | python3 "$(dirname $0)/../gguf-py/gguf/scripts/gguf_convert_endian.py" $f big
+            echo YES | uv run gguf-convert-endian $f big
         done
     fi
 fi
@@ -40,4 +40,3 @@ for gguf in $folder/**/*.gguf; do
         printf "Found \"$gguf\" without matching inp/out files, ignoring...\n"
     fi
 done
-

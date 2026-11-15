@@ -172,7 +172,8 @@ std::unique_ptr<llm_graph_context> llama_model_kimi_linear::build_arch_graph(con
 
 // Causal Conv1d function for Q,K,V
 // When qkv is 0, it is Q, 1 is K, 2 is V
-static ggml_tensor * causal_conv1d(ggml_cgraph * gf, ggml_context * ctx0, ggml_tensor * conv_states_all, ggml_tensor * conv_state_all, int64_t qkv, ggml_tensor * x, ggml_tensor * proj_w, ggml_tensor * conv_w, int64_t d_conv, int64_t head_dim, int64_t n_head, int64_t n_seq_tokens, int64_t n_seqs, int64_t n_tokens, int64_t kv_head) {
+// The part of the state to store is returned in last, [conv_state_size, n_seqs], for a store of the whole row
+static ggml_tensor * causal_conv1d(ggml_context * ctx0, ggml_tensor * conv_state_all, int64_t qkv, ggml_tensor * x, ggml_tensor * proj_w, ggml_tensor * conv_w, int64_t d_conv, int64_t head_dim, int64_t n_head, int64_t n_seq_tokens, int64_t n_seqs, int64_t n_tokens, ggml_tensor *& last) {
     const int64_t d_inner = head_dim * n_head;
     const int64_t conv_state_size = (d_conv - 1) * d_inner;
     const int64_t n_embd_r_total = 3 * conv_state_size;  // Q + K + V
@@ -206,13 +207,8 @@ static ggml_tensor * causal_conv1d(ggml_cgraph * gf, ggml_context * ctx0, ggml_t
     // Save last (d_conv-1) columns back to Q conv state
     ggml_tensor * last_conv_x = ggml_view_3d(ctx0, conv_x, d_conv - 1, d_inner, n_seqs,
         conv_x->nb[1], conv_x->nb[2], n_seq_tokens * conv_x->nb[0]);
-    ggml_build_forward_expand(gf,
-        ggml_cpy(ctx0, last_conv_x,
-            ggml_view_3d(ctx0, conv_states_all,
-                d_conv - 1, d_inner, n_seqs,
-                (d_conv - 1) * ggml_element_size(conv_states_all),           // nb1: contiguous within one channel's conv taps
-                n_embd_r_total * ggml_element_size(conv_states_all),         // nb2: stride between sequences (skip over K,V states)
-                (kv_head * n_embd_r_total + qkv * conv_state_size) * ggml_element_size(conv_states_all))));  // offset to first seq's Q/K/V state
+    last = ggml_reshape_2d(ctx0, ggml_cont(ctx0, last_conv_x), conv_state_size, n_seqs);
+
     // Reshape conv weight: GGUF [d_conv, 1, d_inner, 1] -> ggml_ssm_conv expects [d_conv, d_inner]
     // GGUF stores as [d_conv, 1, d_inner, 1] with memory layout w[conv_step + channel * d_conv]
     // vLLM stores as [d_inner, d_conv] with memory layout w[channel * d_conv + conv_step]
@@ -289,12 +285,12 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
             // === KDA Layer (Kimi Delta Attention) with Recurrent State ===
             // Reference: vLLM kda.py
             const auto * mctx_cur = inp_rs->mctx;
-            const auto kv_head = mctx_cur->get_head();
 
             // Get conv states from r_l tensor (Q, K, V each have separate state)
             ggml_tensor * conv_states_all = mctx_cur->get_r_l(il);
             cb(conv_states_all, "conv_states_all", il);
-            ggml_tensor * conv_state_all = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs);
+            ggml_tensor * conv_state_all = build_rs(inp_rs, conv_states_all, hparams.n_embd_r(), n_seqs, nullptr, il);
+            ggml_tensor * last_q = nullptr, * last_k = nullptr, * last_v = nullptr;
             ggml_tensor * q_in = cur, * k_in = cur, * v_in = cur;
             ggml_tensor * q_w = layer.wq, * k_w = layer.wk, * v_w = layer.wv;
             if (layer.wqkv) {
@@ -306,9 +302,12 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
                 v_in = ggml_cont(ctx0, ggml_view_2d(ctx0, qkv, d_inner, n_tokens, qkv->nb[1], 2 * d_inner * esize));
                 q_w = nullptr; k_w = nullptr; v_w = nullptr;
             }
-            ggml_tensor * Qcur = causal_conv1d(gf, ctx0, conv_states_all, conv_state_all, 0, q_in, q_w, layer.ssm_q_conv, d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, kv_head);
-            ggml_tensor * Kcur = causal_conv1d(gf, ctx0, conv_states_all, conv_state_all, 1, k_in, k_w, layer.ssm_k_conv, d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, kv_head);
-            ggml_tensor * Vcur = causal_conv1d(gf, ctx0, conv_states_all, conv_state_all, 2, v_in, v_w, layer.ssm_v_conv, d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, kv_head);
+            ggml_tensor * Qcur = causal_conv1d(ctx0, conv_state_all, 0, q_in, q_w, layer.ssm_q_conv, d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, last_q);
+            ggml_tensor * Kcur = causal_conv1d(ctx0, conv_state_all, 1, k_in, k_w, layer.ssm_k_conv, d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, last_k);
+            ggml_tensor * Vcur = causal_conv1d(ctx0, conv_state_all, 2, v_in, v_w, layer.ssm_v_conv, d_conv, head_dim, n_head, n_seq_tokens, n_seqs, n_tokens, last_v);
+
+            ggml_build_forward_expand(gf, build_rs_store(inp_rs, conv_states_all,
+                        ggml_concat(ctx0, ggml_concat(ctx0, last_q, last_k, 0), last_v, 0), il));
 
             // g1 = -exp(A_log) * softplus(f_b(f_a(x)) + dt_bias)
             ggml_tensor * f_a = ggml_mul_mat(ctx0, layer.ssm_f_a, cur);
@@ -339,7 +338,7 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
 
             // Get SSM state and compute KDA recurrence using ggml_kda_scan
             ggml_tensor * ssm_states_all = mctx_cur->get_s_l(il);
-            ggml_tensor * state = build_rs(inp_rs, ssm_states_all, hparams.n_embd_s(), n_seqs);
+            ggml_tensor * state = build_rs(inp_rs, ssm_states_all, hparams.n_embd_s(), n_seqs, nullptr, il);
             state = ggml_reshape_4d(ctx0, state, head_dim, head_dim, n_head, n_seqs);
 
 
@@ -357,10 +356,7 @@ llama_model_kimi_linear::graph::graph(const llama_model & model, const llm_graph
             cb(new_state, "new_state", il);
 
             // Update the recurrent states
-            ggml_build_forward_expand(gf,
-                                     ggml_cpy(ctx0, new_state,
-                                              ggml_view_1d(ctx0, ssm_states_all, hparams.n_embd_s() * n_seqs,
-                                                           kv_head * hparams.n_embd_s() * ggml_element_size(ssm_states_all))));
+            ggml_build_forward_expand(gf, build_rs_store(inp_rs, ssm_states_all, new_state, il));
 
             // Output gating g2 = g_b(g_a(x))
             ggml_tensor * cur_2d = ggml_reshape_2d(ctx0, cur, cur->ne[0], n_seq_tokens * n_seqs);

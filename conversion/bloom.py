@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import re
-
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
+from conversion.base import ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register("BloomForCausalLM", "BloomModel")
@@ -17,7 +18,7 @@ from .base import ModelBase, TextModel, gguf, logger
 class BloomModel(TextModel):
     model_arch = gguf.MODEL_ARCH.BLOOM
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         n_embed = self.hparams.get("hidden_size", self.hparams.get("n_embed"))
         n_head = self.hparams.get("n_head", self.hparams.get("num_attention_heads"))
         assert n_head is not None
@@ -37,12 +38,12 @@ class BloomModel(TextModel):
         assert n_head is not None
         assert n_embed is not None
 
-        name = re.sub(r'transformer\.', '', name)
+        name = re.sub(r"transformer\.", "", name)
 
         if re.match(r"h\.\d+\.self_attention\.query_key_value\.weight", name):
             # Map bloom-style qkv_linear to gpt-style qkv_linear
-            # bloom: https://github.com/huggingface/transformers/blob/main/src/transformers/models/bloom/modeling_bloom.py#L238-L252  # noqa
-            # gpt-2: https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py#L312  # noqa
+            # bloom: https://github.com/huggingface/transformers/blob/main/src/transformers/models/bloom/modeling_bloom.py#L238-L252
+            # gpt-2: https://github.com/huggingface/transformers/blob/main/src/transformers/models/gpt2/modeling_gpt2.py#L312
             qkv_weights = data_torch.reshape((n_head, 3, n_embed // n_head, n_embed))
             data_torch = torch.cat(
                 (

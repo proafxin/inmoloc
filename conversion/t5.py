@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import os
-
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, SentencePieceTokenTypes, TextModel, gguf, logger
+import pathlib
+
+from conversion.base import ModelBase, SentencePieceTokenTypes, TextModel, gguf, logger
 
 
 @ModelBase.register("T5WithLMHeadModel")
@@ -20,7 +23,7 @@ from .base import ModelBase, SentencePieceTokenTypes, TextModel, gguf, logger
 class T5Model(TextModel):
     model_arch = gguf.MODEL_ARCH.T5
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.shared_token_embeddings_found = False
 
@@ -31,25 +34,25 @@ class T5Model(TextModel):
         from sentencepiece import SentencePieceProcessor
         from sentencepiece import sentencepiece_model_pb2 as model
 
-        tokenizer_path = self.dir_model / 'tokenizer.model'
+        tokenizer_path = self.dir_model / "tokenizer.model"
 
         # many older models use spiece.model tokenizer model filename
         if not tokenizer_path.is_file():
-            tokenizer_path = self.dir_model / 'spiece.model'
+            tokenizer_path = self.dir_model / "spiece.model"
 
         if not tokenizer_path.is_file():
-            raise FileNotFoundError(f"File not found: {tokenizer_path}")
+            msg = f"File not found: {tokenizer_path}"
+            raise FileNotFoundError(msg)
 
         sentencepiece_model = model.ModelProto()  # pyright: ignore[reportAttributeAccessIssue] # ty: ignore[unresolved-attribute]
-        sentencepiece_model.ParseFromString(open(tokenizer_path, "rb").read())
+        sentencepiece_model.ParseFromString(pathlib.Path(tokenizer_path).open("rb").read())
 
         # some models like Pile-T5 family use BPE tokenizer instead of Unigram
         if sentencepiece_model.trainer_spec.model_type == 2:  # BPE
             # assure the tokenizer model file name is correct
-            assert tokenizer_path.name == 'tokenizer.model'
+            assert tokenizer_path.name == "tokenizer.model"
             return self._set_vocab_sentencepiece()
-        else:
-            assert sentencepiece_model.trainer_spec.model_type == 1  # UNIGRAM
+        assert sentencepiece_model.trainer_spec.model_type == 1  # UNIGRAM
 
         add_prefix = sentencepiece_model.normalizer_spec.add_dummy_prefix
         remove_whitespaces = sentencepiece_model.normalizer_spec.remove_extra_whitespaces
@@ -58,9 +61,9 @@ class T5Model(TextModel):
         tokenizer = SentencePieceProcessor()
         tokenizer.LoadFromFile(str(tokenizer_path))
 
-        vocab_size = self.hparams.get('vocab_size', tokenizer.vocab_size())
+        vocab_size = self.hparams.get("vocab_size", tokenizer.vocab_size())
 
-        tokens: list[bytes] = [f"[PAD{i}]".encode("utf-8") for i in range(vocab_size)]
+        tokens: list[bytes] = [f"[PAD{i}]".encode() for i in range(vocab_size)]
         scores: list[float] = [-10000.0] * vocab_size
         toktypes: list[int] = [SentencePieceTokenTypes.UNUSED] * vocab_size
 
@@ -83,14 +86,14 @@ class T5Model(TextModel):
             scores[token_id] = score
             toktypes[token_id] = toktype
 
-        added_tokens_file = self.dir_model / 'added_tokens.json'
+        added_tokens_file = self.dir_model / "added_tokens.json"
         if added_tokens_file.is_file():
-            with open(added_tokens_file, "r", encoding="utf-8") as f:
+            with pathlib.Path(added_tokens_file).open("r", encoding="utf-8") as f:
                 added_tokens_json = json.load(f)
                 for key in added_tokens_json:
                     token_id = added_tokens_json[key]
                     if token_id >= vocab_size:
-                        logger.warning(f'ignore token {token_id}: id is out of range, max={vocab_size - 1}')
+                        logger.warning(f"ignore token {token_id}: id is out of range, max={vocab_size - 1}")
                         continue
 
                     tokens[token_id] = key.encode("utf-8")
@@ -117,8 +120,9 @@ class T5Model(TextModel):
 
         special_vocab = gguf.SpecialVocab(self.dir_model, n_vocab=len(tokens))
         special_vocab.add_to_gguf(self.gguf_writer)
+        return None
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         if (n_ctx := self.find_hparam(["n_positions"], optional=True)) is None:
             logger.warning("Couldn't find context length in config.json, assuming default value of 512")
             n_ctx = 512
@@ -142,7 +146,7 @@ class T5Model(TextModel):
         # "decoder.embed_tokens.weight" or "shared.weight" tensor. In some models there are even multiple of them stored
         # in the safetensors files. We use the first tensor from these three as the token embeddings for both encoder
         # and decoder and ignore the remaining ones.
-        if name in ["decoder.embed_tokens.weight", "encoder.embed_tokens.weight", "shared.weight"]:
+        if name in {"decoder.embed_tokens.weight", "encoder.embed_tokens.weight", "shared.weight"}:
             if not self.shared_token_embeddings_found:
                 name = "shared.weight"
                 self.shared_token_embeddings_found = True
@@ -158,7 +162,7 @@ class T5Model(TextModel):
 class T5EncoderModel(TextModel):
     model_arch = gguf.MODEL_ARCH.T5ENCODER
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.shared_token_embeddings_found = False
 
@@ -169,25 +173,25 @@ class T5EncoderModel(TextModel):
         from sentencepiece import SentencePieceProcessor
         from sentencepiece import sentencepiece_model_pb2 as model
 
-        tokenizer_path = self.dir_model / 'tokenizer.model'
+        tokenizer_path = self.dir_model / "tokenizer.model"
 
         # many older models use spiece.model tokenizer model filename
         if not tokenizer_path.is_file():
-            tokenizer_path = self.dir_model / 'spiece.model'
+            tokenizer_path = self.dir_model / "spiece.model"
 
         if not tokenizer_path.is_file():
-            raise FileNotFoundError(f"File not found: {tokenizer_path}")
+            msg = f"File not found: {tokenizer_path}"
+            raise FileNotFoundError(msg)
 
         sentencepiece_model = model.ModelProto()  # pyright: ignore[reportAttributeAccessIssue] # ty: ignore[unresolved-attribute]
-        sentencepiece_model.ParseFromString(open(tokenizer_path, "rb").read())
+        sentencepiece_model.ParseFromString(pathlib.Path(tokenizer_path).open("rb").read())
 
         # some models like Pile-T5 family use BPE tokenizer instead of Unigram
         if sentencepiece_model.trainer_spec.model_type == 2:  # BPE
             # assure the tokenizer model file name is correct
-            assert tokenizer_path.name == 'tokenizer.model'
+            assert tokenizer_path.name == "tokenizer.model"
             return self._set_vocab_sentencepiece()
-        else:
-            assert sentencepiece_model.trainer_spec.model_type == 1  # UNIGRAM
+        assert sentencepiece_model.trainer_spec.model_type == 1  # UNIGRAM
 
         add_prefix = sentencepiece_model.normalizer_spec.add_dummy_prefix
         remove_whitespaces = sentencepiece_model.normalizer_spec.remove_extra_whitespaces
@@ -196,9 +200,9 @@ class T5EncoderModel(TextModel):
         tokenizer = SentencePieceProcessor()
         tokenizer.LoadFromFile(str(tokenizer_path))
 
-        vocab_size = self.hparams.get('vocab_size', tokenizer.vocab_size())
+        vocab_size = self.hparams.get("vocab_size", tokenizer.vocab_size())
 
-        tokens: list[bytes] = [f"[PAD{i}]".encode("utf-8") for i in range(vocab_size)]
+        tokens: list[bytes] = [f"[PAD{i}]".encode() for i in range(vocab_size)]
         scores: list[float] = [-10000.0] * vocab_size
         toktypes: list[int] = [SentencePieceTokenTypes.UNUSED] * vocab_size
 
@@ -221,14 +225,14 @@ class T5EncoderModel(TextModel):
             scores[token_id] = score
             toktypes[token_id] = toktype
 
-        added_tokens_file = self.dir_model / 'added_tokens.json'
+        added_tokens_file = self.dir_model / "added_tokens.json"
         if added_tokens_file.is_file():
-            with open(added_tokens_file, "r", encoding="utf-8") as f:
+            with pathlib.Path(added_tokens_file).open("r", encoding="utf-8") as f:
                 added_tokens_json = json.load(f)
                 for key in added_tokens_json:
                     token_id = added_tokens_json[key]
                     if token_id >= vocab_size:
-                        logger.warning(f'ignore token {token_id}: id is out of range, max={vocab_size - 1}')
+                        logger.warning(f"ignore token {token_id}: id is out of range, max={vocab_size - 1}")
                         continue
 
                     tokens[token_id] = key.encode("utf-8")
@@ -255,8 +259,9 @@ class T5EncoderModel(TextModel):
 
         special_vocab = gguf.SpecialVocab(self.dir_model, n_vocab=len(tokens))
         special_vocab.add_to_gguf(self.gguf_writer)
+        return None
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         if (n_ctx := self.find_hparam(["n_positions"], optional=True)) is None:
             logger.warning("Couldn't find context length in config.json, assuming default value of 512")
             n_ctx = 512
@@ -277,7 +282,7 @@ class T5EncoderModel(TextModel):
         # "decoder.embed_tokens.weight" or "shared.weight" tensor. In some models there are even multiple of them stored
         # in the safetensors files. We use the first tensor from these three as the token embeddings for both encoder
         # and decoder and ignore the remaining ones.
-        if name in ["decoder.embed_tokens.weight", "encoder.embed_tokens.weight", "shared.weight"]:
+        if name in {"decoder.embed_tokens.weight", "encoder.embed_tokens.weight", "shared.weight"}:
             if not self.shared_token_embeddings_found:
                 name = "shared.weight"
                 self.shared_token_embeddings_found = True

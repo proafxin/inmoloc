@@ -15,16 +15,10 @@ Quantization is done in two phases:
 
 If the model supports multimodal inputs (images or audio), you also need to convert and quantize the multimodal encoders and projectors.
 
-To perform these tasks, you need to install the Python requirements:
+To perform these tasks, you need the Python dependencies of the converters, from the root of the repository:
 
 ```bash
-python3 -m pip install -r requirements.txt
-```
-
-Or if you use `uv`:
-
-```bash
-uv pip install -r requirements.txt --index-strategy unsafe-best-match
+uv sync --extra convert
 ```
 
 ## Prepare the input GGUF file
@@ -32,13 +26,12 @@ uv pip install -r requirements.txt --index-strategy unsafe-best-match
 To convert a model from a Hugging Face repo, you can use a command like the following:
 
 ```
-python convert_hf_to_gguf.py --outfile gemma-4-E2B-it-bf16.gguf --outtype bf16 --remote google/gemma-4-E2B-it
+uv run scripts/convert_hf_to_gguf.py --outfile gemma-4-E2B-it-bf16.gguf --outtype bf16 --remote google/gemma-4-E2B-it
 ```
 
 Notes:
 - In the usual case where the model is distributed in 16-bit format, `--outtype auto` (or omitting `--outtype` entirely) also works well.
 - If you have previously downloaded the model locally, specify the directory and remove the `--remote` flag.
-- For compatibility reasons, the Python requirements install transformers 4, but more and more models (like Gemma 4) require transformers 5. You can safely `pip install -U transformers` to get the latest version.
 
 ## Quantize the GGUF
 
@@ -75,7 +68,7 @@ Multimodal components are usually much smaller than the LLMs they come with. In 
 For these reasons, multimodal components are usually kept in a high-quality format such as bf16 or q8. The impact on speed and memory from using a smaller quant is negligible, but overall quality could be impacted.
 
 ```bash
-python convert_hf_to_gguf.py --mmproj --outfile mmproj-gemma-4-E2B-it-Q8_0.gguf --outtype q8_0 --remote google/gemma-4-E2B-it
+uv run scripts/convert_hf_to_gguf.py --mmproj --outfile mmproj-gemma-4-E2B-it-Q8_0.gguf --outtype q8_0 --remote google/gemma-4-E2B-it
 ```
 
 ## Run the quantized model

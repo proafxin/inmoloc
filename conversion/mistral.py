@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch import Tensor
 
-from .base import MistralTokenizerType, MistralVocab, _mistral_common_installed, _mistral_import_error_msg, gguf, logger
-
-from .deepseek import DeepseekV2Model
-from .llama import LlamaModel
+from conversion.base import (
+    MistralTokenizerType,
+    MistralVocab,
+    _mistral_common_installed,
+    _mistral_import_error_msg,
+    gguf,
+    logger,
+)
+from conversion.deepseek import DeepseekV2Model
+from conversion.llama import LlamaModel
 
 if _mistral_common_installed:
     from mistral_common.tokens.tokenizers.base import TokenizerVersion  # type: ignore[import-not-found, ty:unresolved-import]
-    from mistral_common.tokens.tokenizers.tekken import Tekkenizer  # type: ignore[import-not-found, ty:unresolved-import]
     from mistral_common.tokens.tokenizers.sentencepiece import SentencePieceTokenizer  # type: ignore[import-not-found, ty:unresolved-import]
+    from mistral_common.tokens.tokenizers.tekken import Tekkenizer  # type: ignore[import-not-found, ty:unresolved-import]
 else:
     TokenizerVersion = None  # type: ignore[assignment]
     Tekkenizer = None  # type: ignore[assignment]
@@ -28,7 +36,7 @@ class MistralModel(LlamaModel):
     is_mistral_format = True
     undo_permute = False
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # for compatibility, we use LLAMA arch for older models
         # TODO: remove this once everyone migrates to newer version of llama.cpp
@@ -52,22 +60,24 @@ class MistralModel(LlamaModel):
 
     @staticmethod
     def get_community_chat_template(vocab: MistralVocab, templates_dir: Path, is_mistral_format: bool):
-        assert TokenizerVersion is not None and Tekkenizer is not None and SentencePieceTokenizer is not None, _mistral_import_error_msg
+        assert TokenizerVersion is not None and Tekkenizer is not None and SentencePieceTokenizer is not None, (
+            _mistral_import_error_msg
+        )
         assert isinstance(vocab.tokenizer, (Tekkenizer, SentencePieceTokenizer)), (
             f"Expected Tekkenizer or SentencePieceTokenizer, got {type(vocab.tokenizer)}"
         )
 
         if vocab.tokenizer.version == TokenizerVersion.v1:
             return "mistral-v1"
-        elif vocab.tokenizer.version == TokenizerVersion.v3 and vocab.tokenizer_type == MistralTokenizerType.spm:
+        if vocab.tokenizer.version == TokenizerVersion.v3 and vocab.tokenizer_type == MistralTokenizerType.spm:
             return "mistral-v3"
-        elif vocab.tokenizer.version == TokenizerVersion.v3 and vocab.tokenizer_type == MistralTokenizerType.tekken:
+        if vocab.tokenizer.version == TokenizerVersion.v3 and vocab.tokenizer_type == MistralTokenizerType.tekken:
             return "mistral-v3-tekken"
-        elif vocab.tokenizer.version == TokenizerVersion.v7 and vocab.tokenizer_type == MistralTokenizerType.spm:
+        if vocab.tokenizer.version == TokenizerVersion.v7 and vocab.tokenizer_type == MistralTokenizerType.spm:
             return "mistral-v7"
-        elif vocab.tokenizer.version == TokenizerVersion.v7 and vocab.tokenizer_type == MistralTokenizerType.tekken:
+        if vocab.tokenizer.version == TokenizerVersion.v7 and vocab.tokenizer_type == MistralTokenizerType.tekken:
             return "mistral-v7-tekken"
-        elif vocab.tokenizer.version == TokenizerVersion.v11:
+        if vocab.tokenizer.version == TokenizerVersion.v11:
             template_file = "Mistral-Small-3.2-24B-Instruct-2506.jinja"
         elif vocab.tokenizer.version == TokenizerVersion.v13:
             template_file = "unsloth-mistral-Devstral-Small-2507.jinja"
@@ -82,19 +92,18 @@ class MistralModel(LlamaModel):
 
         template_path = templates_dir / template_file
         if not template_path.exists():
-            raise FileNotFoundError(f"Template file not found: {template_path}")
+            msg = f"Template file not found: {template_path}"
+            raise FileNotFoundError(msg)
 
-        with open(template_path, "r", encoding="utf-8") as f:
-            template = f.read()
+        with Path(template_path).open(encoding="utf-8") as f:
+            return f.read()
 
-        return template
-
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         MistralModel.set_mistral_config(self.gguf_writer, self.hparams)
 
     @staticmethod
-    def set_mistral_config(gguf_writer: gguf.GGUFWriter, hparams: dict):
+    def set_mistral_config(gguf_writer: gguf.GGUFWriter, hparams: dict) -> None:
         if "yarn" in hparams:
             yarn_params = hparams["yarn"]
             mscale_all_dim = 1.0 if not yarn_params["apply_scale"] else 0.0
@@ -116,7 +125,7 @@ class MistralMoeModel(DeepseekV2Model):
     hf_arch = ""
     is_mistral_format = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         logger.info("Using MistralMoeModel")
         # remap hparams from Mistral MoE format to DeepseekV2 format
@@ -167,10 +176,10 @@ class MistralMoeModel(DeepseekV2Model):
         config["norm_topk_prob"] = True
         config["scoring_func"] = "softmax"
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_mistral()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         MistralModel.set_mistral_config(self.gguf_writer, self.hparams)
         yarn_params = self.hparams["yarn"]
@@ -179,7 +188,7 @@ class MistralMoeModel(DeepseekV2Model):
         # [TAG_DEEPSEEK2_YARN_LOG_MUL_FIX]
         # note: for legacy reasons, this is not consistent with the other usages of self.gguf_writer.add_rope_scaling_yarn_log_mul
         # ref https://github.com/ggml-org/llama.cpp/pull/17945
-        self.gguf_writer.add_rope_scaling_yarn_log_mul(0.1) # mscale_all_dim * 0.1
+        self.gguf_writer.add_rope_scaling_yarn_log_mul(0.1)  # mscale_all_dim * 0.1
 
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:

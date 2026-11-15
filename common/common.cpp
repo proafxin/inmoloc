@@ -10,6 +10,8 @@
 #include "speculative.h"
 #include "unicode.h"
 
+#include "../src/llama-ext.h" // staging API: llama_set_embeddings_nextn, llama_context_reserve
+
 #include <algorithm>
 #include <cinttypes>
 #include <climits>
@@ -1289,6 +1291,8 @@ struct common_init_result::impl {
 
     llama_model_ptr   model;
     llama_context_ptr context;
+    llama_model_ptr   model_dft;   // an MTP head in a GGUF of its own, until the caller takes it
+    llama_context_ptr context_dft; // an MTP draft on the elastic memory of the context, until the caller takes it
 
     std::vector<llama_adapter_lora_ptr> lora;
 
@@ -1324,17 +1328,15 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
 
     const ggml_log_level log_level_fit = params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR;
 
-    // the requests processed at once share one cache of n_ctx tokens
-    if (params.n_parallel > 1) {
-        params.kv_unified  = true;
-        cparams.kv_unified = true;
-    }
-
     // with the cache sized by the budget, fit only places the layers: for the cache of one typical request, against the
     // budget and without a margin
     const bool fit_layers_only = params.vram_budget_ctx && !model_only;
 
-    if (params.fit_params) {
+    // the elastic memory needs no dry run: all layers go on the device, and it is what the real context leaves of the
+    // budget, allocated last; a draft keeps its tokens in it, an MTP head or a draft model of its own
+    const bool box_direct = !model_only;
+
+    if (params.fit_params && model_only) {
         COM_TRC("%s", "fitting params to device memory ...\n");
         COM_TRC("%s", "(for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)\n");
 
@@ -1363,10 +1365,13 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             }
 
             // fit_params_min_ctx is negative (UINT32_MAX) after -c 0
-            cparams.n_ctx = params.n_ctx_typical > 0 ? params.n_ctx_typical : params.fit_params_min_ctx > 0 ? params.fit_params_min_ctx : 4096;
+            cparams.n_ctx = params.fit_params_min_ctx > 0 ? params.fit_params_min_ctx : 4096;
             if (n_ctx_user > 0) {
                 cparams.n_ctx = std::min(cparams.n_ctx, n_ctx_user);
             }
+
+            // one request holds one recurrent state, the sizing of the sequences is the budget's
+            cparams.n_rs_cells = 1;
         }
 
         common_fit_params(params.model.path.c_str(), &mparams, &cparams,
@@ -1378,24 +1383,35 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             log_level_fit);
 
         if (fit_layers_only) {
-            cparams.n_ctx = n_ctx_user;
+            cparams.n_ctx      = n_ctx_user;
+            cparams.n_rs_cells = 0;
         }
     }
 
     // the number of requests processed at once: the most that fit in the memory budget, at most --parallel
-    if (!model_only) {
+    const auto budget_dry = [&]() {
         if (!common_budget_params(params.model.path.c_str(), &mparams, &cparams,
                 has_draft || spec_mtp ? &extra : nullptr, params.vram_budget, params.vram_budget_used,
-                params.n_ctx_typical, params.vram_budget_ctx,
+                params.vram_budget_ctx,
                 log_level_fit,
-                &params.vram_predicted, &params.vram_free_at_start)) {
-            return;
+                &params.vram_predicted, &params.vram_free_at_start,
+                params.sampling.backend_sampling ? &params.sampling : nullptr)) {
+            return false;
         }
 
         params.n_parallel = (int32_t) cparams.n_seq_max;
+        params.box_bytes  = cparams.box_bytes;
         if (params.vram_budget_ctx) {
             params.n_ctx = (int32_t) cparams.n_ctx;
         }
+
+        return true;
+    };
+
+    const auto cparams_user = cparams;
+
+    if (!model_only && !box_direct && !budget_dry()) {
+        return;
     }
 
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);
@@ -1404,6 +1420,31 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     }
 
     pimpl->model.reset(model);
+
+    if (box_direct) {
+        // a draft in a GGUF of its own, an MTP head or a draft model: the blocks of the elastic memory hold its layers
+        if (has_draft) {
+            COM_INF("%s: loading the draft model '%s'\n", __func__, params_dft.model.path.c_str());
+
+            pimpl->model_dft.reset(llama_model_load_from_file(params_dft.model.path.c_str(), mparams_dft));
+            if (pimpl->model_dft == nullptr) {
+                COM_ERR("failed to load the draft model '%s'\n", params_dft.model.path.c_str());
+                return;
+            }
+
+            cparams.box_draft            = true;
+            cparams.box_draft_model      = pimpl->model_dft.get();
+            cparams.box_draft_standalone = !spec_mtp;
+        }
+
+        // the sequences follow the memory, and the outputs of a ubatch its tokens
+        cparams.n_ctx         = llama_model_n_ctx_train(model);
+        cparams.n_seq_max     = 1;
+        cparams.n_rs_cells    = 1;
+        cparams.n_outputs_max = cparams.n_ubatch;
+        cparams.box_bytes     = params.vram_budget > 0 ? params.vram_budget : common_device_memory_free(model);
+        cparams.box_deferred  = true;
+    }
 
     if (model_only) {
         return;
@@ -1473,7 +1514,83 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
         return;
     }
 
+    if (box_direct) {
+        llama_memory_box_info info;
+        if (llama_memory_box_get_info(llama_get_memory(lctx), &info)) {
+            // the draft is created once, here: what it takes is known before the elastic memory is allocated
+            llama_context * ctx_dft = nullptr;
+            if (spec_mtp || has_draft) {
+                llama_model * model_dft = pimpl->model_dft ? pimpl->model_dft.get() : model;
+
+                cparams_dft.n_ctx         = llama_n_ctx(lctx);
+                cparams_dft.n_seq_max     = llama_n_seq_max(lctx);
+                cparams_dft.n_outputs_max = cparams_dft.n_ubatch;
+                cparams_dft.ctx_other     = lctx;
+
+                ctx_dft = llama_init_from_model(model_dft, cparams_dft);
+                if (ctx_dft == nullptr) {
+                    COM_ERR("%s", "failed to create the draft context\n");
+                    llama_free(lctx);
+                    return;
+                }
+            }
+
+            // the outputs a draft asks of this context and of its own are part of their compute buffers
+            if (ctx_dft) {
+                common_speculative_set_outputs(params.speculative, lctx, ctx_dft);
+                llama_context_reserve(lctx);
+            }
+
+            size_t box_bytes = 0;
+            if (!common_budget_box(model, lctx, ctx_dft, params.speculative.draft.backend_sampling,
+                        params.vram_budget, params.vram_budget_used, &box_bytes, &params.vram_predicted, &params.vram_free_at_start)) {
+                llama_free(ctx_dft);
+                llama_free(lctx);
+                return;
+            }
+
+            llama_context_box_finalize(lctx, box_bytes);
+
+            if (ctx_dft) {
+                llama_context_box_follow(ctx_dft);
+                pimpl->context_dft.reset(ctx_dft);
+            }
+
+            params.box_bytes = box_bytes;
+        } else {
+            // a memory that is not elastic: sized by dry runs, a draft is loaded with it
+            llama_free(lctx);
+            pimpl->model_dft.reset();
+
+            const auto samplers_user = cparams.samplers;
+
+            cparams = cparams_user;
+            if (!budget_dry()) {
+                return;
+            }
+
+            if (params.sampling.backend_sampling) {
+                cparams.samplers   = samplers_user;
+                cparams.n_samplers = std::min<size_t>(pimpl->samplers_seq_config.size(), cparams.n_seq_max);
+            }
+
+            lctx = llama_init_from_model(model, cparams);
+            if (lctx == NULL) {
+                COM_ERR("failed to create context with model '%s'\n", params.model.path.c_str());
+                return;
+            }
+        }
+    }
+
     pimpl->context.reset(lctx);
+
+    // with the elastic memory, the sequences that can run are what fits in it
+    {
+        llama_memory_box_info info;
+        if (llama_memory_box_get_info(llama_get_memory(lctx), &info)) {
+            params.n_parallel = (int32_t) llama_n_seq_max(lctx);
+        }
+    }
 
     set_process_priority(params.cpuparams.priority);
 
@@ -1486,6 +1603,14 @@ llama_model * common_init_result::model() {
 
 llama_context * common_init_result::context() {
     return pimpl->context.get();
+}
+
+llama_context * common_init_result::release_context_dft() {
+    return pimpl->context_dft.release();
+}
+
+llama_model * common_init_result::release_model_dft() {
+    return pimpl->model_dft.release();
 }
 
 common_sampler * common_init_result::sampler(llama_seq_id seq_id) {
@@ -1800,7 +1925,6 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.n_seq_max         = params.n_parallel;
     cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
     cparams.rs_rollback       = params.rs_rollback;
-    cparams.backend_priority  = params.backend_priority;
     cparams.n_outputs_max     = std::max(params.n_outputs_max, 0);
     cparams.n_outputs_max_per_seq = std::max(params.n_outputs_max_per_seq, 0);
     cparams.n_batch           = params.n_batch;
@@ -1826,7 +1950,11 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.no_perf           = params.no_perf;
     cparams.op_offload        = !params.no_op_offload;
     cparams.swa_full          = params.swa_full;
-    cparams.kv_unified        = params.kv_unified;
+    cparams.box_bytes         = params.box_bytes;
+    cparams.box_draft         = std::find(params.speculative.types.begin(), params.speculative.types.end(),
+                                    COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
+    cparams.box_draft_type_k  = params.speculative.draft.cache_type_k;
+    cparams.box_draft_type_v  = params.speculative.draft.cache_type_v;
 
     cparams.type_k = params.cache_type_k;
     cparams.type_v = params.cache_type_v;
@@ -2432,40 +2560,36 @@ void common_prompt_checkpoint::update_dft(
     }
 }
 
-void common_prompt_checkpoint::load_tgt(
+bool common_prompt_checkpoint::load_tgt(
         llama_context * ctx,
         llama_seq_id seq_id,
         llama_state_seq_flags flags) const {
     if (ctx == nullptr) {
-        return;
+        return true;
     }
 
     if (data_tgt.empty()) {
-        return;
+        return true;
     }
 
     const size_t n = llama_state_seq_set_data_ext(ctx, data_tgt.data(), data_tgt.size(), seq_id, flags);
-    if (n != data_tgt.size()) {
-        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", data_tgt.size(), n);
-    }
+    return n == data_tgt.size();
 }
 
-void common_prompt_checkpoint::load_dft(
+bool common_prompt_checkpoint::load_dft(
         llama_context * ctx,
         llama_seq_id seq_id,
         llama_state_seq_flags flags) const {
     if (ctx == nullptr) {
-        return;
+        return true;
     }
 
     if (data_dft.empty()) {
-        return;
+        return true;
     }
 
     const size_t n = llama_state_seq_set_data_ext(ctx, data_dft.data(), data_dft.size(), seq_id, flags);
-    if (n != data_dft.size()) {
-        GGML_ABORT("checkpoint size mismatch: expected %zu, got %zu\n", data_dft.size(), n);
-    }
+    return n == data_dft.size();
 }
 
 void common_prompt_checkpoint::clear_tgt() {

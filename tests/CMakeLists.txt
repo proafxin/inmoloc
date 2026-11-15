@@ -151,6 +151,7 @@ endif ()
 llama_build(test-recurrent-state-rollback.cpp)
 llama_build(test-recurrent-cell-reuse.cpp)
 llama_build(test-save-load-state.cpp)
+llama_build(test-sched-inputs.cpp)
 
 if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
     # these tests are disabled on Windows because they use internal functions not exported with LLAMA_API (when building with shared libraries)

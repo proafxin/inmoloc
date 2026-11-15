@@ -19652,6 +19652,11 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
             return op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 && op->src[0]->ne[0] == 64;
         case GGML_OP_LIGHTNING_INDEXER:
             {
+                // only the keys themselves with a mask, not the lists of rows of ggml_lightning_indexer_rows()
+                if (op->src[4] != nullptr) {
+                    return false;
+                }
+
                 const ggml_tensor * q = op->src[0];
                 const ggml_tensor * k = op->src[1];
                 const ggml_tensor * w = op->src[2];
@@ -19686,6 +19691,10 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
             }
         case GGML_OP_GATED_DELTA_NET:
             {
+                // the rows mode (ggml_gated_delta_net_rows) is not implemented here
+                if (ggml_get_op_params_i32(op, 1) != 0) {
+                    return false;
+                }
                 const uint32_t S_v = op->src[2]->ne[0];
                 if (S_v != 16 && S_v != 32 && S_v != 64 && S_v != 128) {
                     return false;

@@ -13,17 +13,17 @@ Both images start the server, listen on port 8080 on all interfaces and include 
 
 ## Running the server
 
-Serve a model from a host directory with a 128k-token context shared by all requests, a q8_0 KV cache and a 22 GiB memory budget:
+Serve a model from a host directory with a q8_0 KV cache and a 22 GiB memory budget. Elastic memory needs `--max-output-tokens`, and neither a context size nor a number of requests:
 
 ```sh
 docker run --gpus all -p 8080:8080 -v /path/to/models:/models ghcr.io/proafxin/inmoloc:latest \
-    -m /models/model.gguf -ngl 999 --flash-attn on \
-    --ctx-size 131072 --cache-type-k q8_0 --cache-type-v q8_0 --vram-budget 22G --parallel 64
+    -m /models/model.gguf -ngl 999 \
+    --cache-type-k q8_0 --cache-type-v q8_0 --max-output-tokens 512 --vram-budget 22G
 ```
 
-The arguments after the image name are passed to `local-inference-server`; see [the server documentation](../tools/server/README.md). Every argument can also be given as an environment variable, for example `-e LOCAL_INFERENCE_ARG_CTX_SIZE=131072`.
+The arguments after the image name are passed to `local-inference-server`; see [the server documentation](../tools/server/README.md). Every argument can also be given as an environment variable, for example `-e LOCAL_INFERENCE_ARG_MAX_OUTPUT_TOKENS=512`.
 
-The memory budget is lowered to the device memory that is free when the server starts, so other programs on the GPU reduce the number of requests it runs at once. The log states the number and what fills the budget.
+The memory budget is lowered to the device memory that is free when the server starts, so other programs on the GPU reduce how many requests fit at once. The log states what fills the budget.
 
 With Docker Compose:
 
@@ -36,8 +36,8 @@ services:
     volumes:
       - /path/to/models:/models:ro
     command: >
-      -m /models/model.gguf -ngl 999 --flash-attn on
-      --ctx-size 131072 --cache-type-k q8_0 --cache-type-v q8_0 --vram-budget 22G --parallel 64
+      -m /models/model.gguf -ngl 999
+      --cache-type-k q8_0 --cache-type-v q8_0 --max-output-tokens 512 --vram-budget 22G
     deploy:
       resources:
         reservations:

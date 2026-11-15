@@ -1,0 +1,837 @@
+#!/usr/bin/env python3
+
+# type: ignore[reportUnusedImport]
+
+import http.server
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from json import JSONDecodeError
+from re import RegexFlag
+from typing import (
+    Any,
+    Literal,
+)
+
+import requests
+import wget
+
+TMP_DIR = os.path.join(pathlib.Path(pathlib.Path(__file__).resolve()).parent, "tmp")
+
+# tests/server -> tests -> repo root; absolute, independent of the pytest invocation's cwd
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+DEFAULT_HTTP_TIMEOUT = 60
+
+# per-request timeout, a hung server fails the test instead of stalling the CI for hours
+DEFAULT_REQUEST_TIMEOUT = 600
+
+
+class ServerResponse:
+    headers: dict
+    status_code: int
+    body: dict | Any
+
+
+class ServerError(Exception):
+    def __init__(self, code, body) -> None:
+        self.code = code
+        self.body = body
+
+
+class ServerProcess:
+    # default options
+    debug: bool = False
+    server_port: int = 8080
+    server_host: str = "127.0.0.1"
+    model_hf_repo: str | None = "ggml-org/models"
+    model_hf_file: str | None = "tinyllamas/stories260K.gguf"
+    model_alias: str | None = None
+    temperature: float = 0.8
+    seed: int = 42
+    offline: bool = False
+
+    # custom options
+    model_tags: str | None = None
+    model_url: str | None = None
+    model_file: str | None = None
+    model_draft: str | None = None
+    model_draft_hf_repo: str | None = None
+    n_threads: int | None = None
+    n_gpu_layer: int | None = None
+    n_batch: int | None = None
+    n_ubatch: int | None = None
+    n_ctx: int | None = None
+    n_ga: int | None = None
+    n_ga_w: int | None = None
+    n_predict: int | None = None
+    vram_budget: str = "2G"
+    n_prompts: int | None = 0
+    slot_save_path: str | None = None
+    id_slot: int | None = None
+    cache_prompt: bool | None = None
+    ctk: str | None = None
+    ctv: str | None = None
+    ctkd: str | None = None
+    server_continuous_batching: bool | None = False
+    server_embeddings: bool | None = False
+    server_reranking: bool | None = False
+    server_metrics: bool | None = False
+    swa_full: bool | None = False
+    server_slots: bool | None = False
+    pooling: str | None = None
+    api_key: str | None = None
+    models_dir: str | None = None
+    models_max: int | None = None
+    models_preset: str | None = None
+    no_models_autoload: bool | None = None
+    lora_files: list[str] | None = None
+    spec_type: str | None = None
+    spec_draft_n_min: int | None = None
+    spec_draft_n_max: int | None = None
+    spec_synth_len: float | None = None
+    spec_synth_rates: list[float] | None = None
+    no_ui: bool | None = None
+    jinja: bool | None = None
+    reasoning_format: Literal["deepseek", "none", "nothink"] | None = None
+    reasoning: Literal["on", "off", "auto"] | None = None
+    chat_template: str | None = None
+    chat_template_file: str | None = None
+    server_path: str | None = None
+    mmproj_url: str | None = None
+    no_mmproj: bool | None = None
+    media_path: str | None = None
+    sleep_idle_seconds: int | None = None
+    cache_ram: int | None = None
+    override_kv: str | None = None
+    no_cache_idle_slots: bool = False
+    no_prefix_share: bool = False
+    log_path: str | None = None
+    ui_mcp_proxy: bool = False
+    backend_sampling: bool = False
+    gcp_compat: bool = False
+    server_tools: str | None = None
+    server_tools_runtime: str | None = None
+    mcp_servers_config: str | None = None
+    mcp_servers_json: str | None = None
+    cors_origins: str | None = None
+
+    # session variables
+    process: subprocess.Popen | None = None
+
+    def __init__(self) -> None:
+        if "N_GPU_LAYERS" in os.environ:
+            self.n_gpu_layer = int(os.environ["N_GPU_LAYERS"])
+        if "DEBUG" in os.environ:
+            self.debug = True
+        if "PORT" in os.environ:
+            self.server_port = int(os.environ["PORT"])
+        self.external_server = "DEBUG_EXTERNAL" in os.environ
+
+    def start(self, timeout_seconds: int = DEFAULT_HTTP_TIMEOUT) -> None:
+        env = {
+            **os.environ,
+            "LOCAL_INFERENCE_SERVER_DEBUG_FAKE_TIMING": "1",
+        }
+        if "LOCAL_INFERENCE_CACHE" not in os.environ:
+            env["LOCAL_INFERENCE_CACHE"] = TMP_DIR
+        if self.external_server:
+            print(f"[external_server]: Assuming external server running on {self.server_host}:{self.server_port}")
+            return
+        if self.server_path is not None:
+            server_path = self.server_path
+        elif "LOCAL_INFERENCE_SERVER_BIN_PATH" in os.environ:
+            server_path = os.environ["LOCAL_INFERENCE_SERVER_BIN_PATH"]
+        elif os.name == "nt":
+            server_path = str(REPO_ROOT / "build" / "bin" / "Release" / "local-inference-server.exe")
+        else:
+            server_path = str(REPO_ROOT / "build" / "bin" / "local-inference-server")
+        server_args = [
+            "--host",
+            self.server_host,
+            "--port",
+            self.server_port,
+            "--temp",
+            self.temperature,
+            "--seed",
+            self.seed,
+        ]
+        if self.offline:
+            server_args.append("--offline")
+        if self.model_file:
+            server_args.extend(["--model", self.model_file])
+        if self.model_url:
+            server_args.extend(["--model-url", self.model_url])
+        if self.model_draft:
+            server_args.extend(["--model-draft", self.model_draft])
+        if self.model_draft_hf_repo:
+            server_args.extend(["--hf-repo-draft", self.model_draft_hf_repo])
+        if self.model_hf_repo:
+            server_args.extend(["--hf-repo", self.model_hf_repo])
+        if self.model_hf_file:
+            server_args.extend(["--hf-file", self.model_hf_file])
+        if self.models_dir:
+            server_args.extend(["--models-dir", self.models_dir])
+        if self.models_max is not None:
+            server_args.extend(["--models-max", self.models_max])
+        if self.models_preset:
+            server_args.extend(["--models-preset", self.models_preset])
+        if self.cors_origins:
+            server_args.extend(["--cors-origins", self.cors_origins])
+        if self.n_batch:
+            server_args.extend(["--batch-size", self.n_batch])
+        if self.n_ubatch:
+            server_args.extend(["--ubatch-size", self.n_ubatch])
+        if self.n_threads:
+            server_args.extend(["--threads", self.n_threads])
+        if self.n_gpu_layer:
+            server_args.extend(["--n-gpu-layers", self.n_gpu_layer])
+        if self.server_continuous_batching:
+            server_args.append("--cont-batching")
+        if self.server_embeddings:
+            server_args.append("--embedding")
+        if self.server_reranking:
+            server_args.append("--reranking")
+        if self.server_metrics:
+            server_args.append("--metrics")
+        if self.swa_full:
+            server_args.append("--swa-full")
+        if self.server_slots:
+            server_args.append("--slots")
+        else:
+            server_args.append("--no-slots")
+        if self.pooling:
+            server_args.extend(["--pooling", self.pooling])
+        if self.model_alias:
+            server_args.extend(["--alias", self.model_alias])
+        if self.model_tags:
+            server_args.extend(["--tags", self.model_tags])
+        if self.ctk:
+            server_args.extend(["-ctk", self.ctk])
+        if self.ctv:
+            server_args.extend(["-ctv", self.ctv])
+        if self.ctkd:
+            server_args.extend(["-ctkd", self.ctkd])
+        # required with the elastic memory
+        if self.n_predict and self.n_predict > 0:
+            server_args.extend(["--max-output-tokens", self.n_predict])
+        else:
+            server_args.extend(["--max-output-tokens", self.n_ctx // 2 if self.n_ctx else 1024])
+        # the test models are tiny: without a budget their elastic memory takes all the device memory
+        server_args.extend(["--vram-budget", self.vram_budget])
+        if self.slot_save_path:
+            server_args.extend(["--slot-save-path", self.slot_save_path])
+        if self.n_ga:
+            server_args.extend(["--grp-attn-n", self.n_ga])
+        if self.n_ga_w:
+            server_args.extend(["--grp-attn-w", self.n_ga_w])
+        if self.debug:
+            server_args.append("--verbose")
+        if self.lora_files:
+            for lora_file in self.lora_files:
+                server_args.extend(["--lora", lora_file])
+        if self.spec_type:
+            server_args.extend(["--spec-type", self.spec_type])
+        if self.api_key:
+            server_args.extend(["--api-key", self.api_key])
+        if self.spec_draft_n_max:
+            server_args.extend(["--spec-draft-n-max", self.spec_draft_n_max])
+        if self.spec_draft_n_min:
+            server_args.extend(["--spec-draft-n-min", self.spec_draft_n_min])
+        if self.spec_synth_len is not None:
+            server_args.extend(["--spec-synth-len", self.spec_synth_len])
+        if self.spec_synth_rates is not None:
+            rates = ",".join(str(rate) for rate in self.spec_synth_rates)
+            server_args.extend(["--spec-synth-rates", rates])
+        if self.no_ui:
+            server_args.append("--no-ui")
+        if self.no_models_autoload:
+            server_args.append("--no-models-autoload")
+        if self.jinja:
+            server_args.append("--jinja")
+        else:
+            server_args.append("--no-jinja")
+        if self.reasoning_format is not None:
+            server_args.extend(("--reasoning-format", self.reasoning_format))
+        if self.reasoning is not None:
+            server_args.extend(("--reasoning", self.reasoning))
+        if self.chat_template:
+            server_args.extend(["--chat-template", self.chat_template])
+        if self.chat_template_file:
+            server_args.extend(["--chat-template-file", self.chat_template_file])
+        if self.mmproj_url:
+            server_args.extend(["--mmproj-url", self.mmproj_url])
+        if self.no_mmproj:
+            server_args.append("--no-mmproj")
+        if self.media_path:
+            server_args.extend(["--media-path", self.media_path])
+        if self.sleep_idle_seconds is not None:
+            server_args.extend(["--sleep-idle-seconds", self.sleep_idle_seconds])
+        if self.cache_ram is not None:
+            server_args.extend(["--cache-ram", self.cache_ram])
+        if self.override_kv:
+            server_args.extend(["--override-kv", self.override_kv])
+        if self.no_cache_idle_slots:
+            server_args.append("--no-cache-idle-slots")
+        if self.no_prefix_share:
+            server_args.append("--no-prefix-share")
+        if self.ui_mcp_proxy:
+            server_args.append("--ui-mcp-proxy")
+        if self.server_tools:
+            server_args.extend(["--tools", self.server_tools])
+        if self.server_tools_runtime:
+            server_args.extend(["--tools-runtime", self.server_tools_runtime])
+        if self.mcp_servers_config:
+            server_args.extend(["--mcp-servers-config", self.mcp_servers_config])
+        if self.mcp_servers_json:
+            server_args.extend(["--mcp-servers-json", self.mcp_servers_json])
+        if self.backend_sampling:
+            server_args.append("--backend_sampling")
+        if self.gcp_compat:
+            env["AIP_MODE"] = "PREDICTION"
+            env["AIP_HTTP_PORT"] = str(self.server_port)
+
+        args = [str(arg) for arg in [server_path, *server_args]]
+        print(f"tests: starting server with: {' '.join(args)}")
+
+        flags = 0
+        if os.name == "nt":
+            flags |= subprocess.DETACHED_PROCESS
+            flags |= subprocess.CREATE_NEW_PROCESS_GROUP
+            flags |= subprocess.CREATE_NO_WINDOW
+
+        if self.log_path:
+            self._log = pathlib.Path(self.log_path).open("w", encoding="utf-8")
+        else:
+            self._log = sys.stdout
+
+        self.process = subprocess.Popen(
+            args,
+            creationflags=flags,
+            stdout=self._log,
+            stderr=self._log if self._log != sys.stdout else sys.stdout,
+            env=env,
+        )
+        server_instances.add(self)
+
+        print(f"server pid={self.process.pid}, pytest pid={os.getpid()}")
+
+        # wait for server to start
+        start_time = time.time()
+        last_print_time = start_time
+        while time.time() - start_time < timeout_seconds:
+            try:
+                response = self.make_request(
+                    "GET", "/health", headers={"Authorization": f"Bearer {self.api_key}" if self.api_key else None}
+                )
+                if response.status_code == 200:
+                    self.ready = True
+                    return  # server is ready
+            except Exception:
+                pass
+            # Check if process died
+            if self.process.poll() is not None:
+                msg = f"Server process died with return code {self.process.returncode}"
+                raise RuntimeError(msg)
+
+            if time.time() - last_print_time >= 1.0:
+                print("Waiting for server to start...")
+                last_print_time = time.time()
+            time.sleep(0.01)
+        msg = f"Server did not start within {timeout_seconds} seconds"
+        raise TimeoutError(msg)
+
+    def stop(self) -> None:
+        if self.external_server:
+            print("[external_server]: Not stopping external server")
+            return
+        server_instances.discard(self)
+        if self.process:
+            print(f"Stopping server with pid={self.process.pid}")
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                print(f"Server pid={self.process.pid} did not terminate in time, killing")
+                self.process.kill()
+                self.process.wait(timeout=5)
+            except Exception as e:
+                print(f"Error waiting for server: {e}")
+            self.process = None
+        if hasattr(self, "_log") and self._log != sys.stdout:
+            self._log.close()
+
+    def make_request(
+        self,
+        method: str,
+        path: str,
+        data: dict | Any | None = None,
+        headers: dict | None = None,
+        timeout: float | None = DEFAULT_REQUEST_TIMEOUT,
+    ) -> ServerResponse:
+        url = f"http://{self.server_host}:{self.server_port}{path}"
+        parse_body = False
+        if method == "GET":
+            response = requests.get(url, headers=headers, timeout=timeout)
+            parse_body = True
+        elif method == "POST":
+            response = requests.post(url, headers=headers, json=data, timeout=timeout)
+            parse_body = True
+        elif method == "DELETE":
+            response = requests.delete(url, headers=headers, timeout=timeout)
+            parse_body = True
+        elif method == "OPTIONS":
+            response = requests.options(url, headers=headers, timeout=timeout)
+        else:
+            msg = f"Unimplemented method: {method}"
+            raise ValueError(msg)
+        result = ServerResponse()
+        result.headers = dict(response.headers)
+        result.status_code = response.status_code
+        if parse_body:
+            try:
+                result.body = response.json()
+            except (JSONDecodeError, requests.exceptions.JSONDecodeError):
+                result.body = response.text
+        else:
+            result.body = None
+        print("Response from server", json.dumps(result.body, indent=2))
+        return result
+
+    def make_stream_request(
+        self,
+        method: str,
+        path: str,
+        data: dict | None = None,
+        headers: dict | None = None,
+    ) -> Iterator[dict]:
+        url = f"http://{self.server_host}:{self.server_port}{path}"
+        if method == "POST":
+            response = requests.post(url, headers=headers, json=data, stream=True)
+        else:
+            msg = f"Unimplemented method: {method}"
+            raise ValueError(msg)
+        if response.status_code != 200:
+            raise ServerError(response.status_code, response.json())
+        for line_bytes in response.iter_lines():
+            line = line_bytes.decode("utf-8")
+            if "[DONE]" in line:
+                break
+            elif line.startswith("data: "):
+                data = json.loads(line[6:])
+                print("Partial response from server", json.dumps(data, indent=2))
+                yield data
+
+    def make_any_request(
+        self,
+        method: str,
+        path: str,
+        data: dict | None = None,
+        headers: dict | None = None,
+        timeout: float | None = DEFAULT_REQUEST_TIMEOUT,
+    ) -> dict:
+        stream = data.get("stream", False)
+        if stream:
+            content: list[str] = []
+            reasoning_content: list[str] = []
+            tool_calls: list[dict] = []
+            finish_reason: str | None = None
+
+            content_parts = 0
+            reasoning_content_parts = 0
+            tool_call_parts = 0
+            arguments_parts = 0
+
+            for chunk in self.make_stream_request(method, path, data, headers):
+                if chunk["choices"]:
+                    assert len(chunk["choices"]) == 1, f"Expected 1 choice, got {len(chunk['choices'])}"
+                    choice = chunk["choices"][0]
+                    if choice["delta"].get("content") is not None:
+                        assert len(choice["delta"]["content"]) > 0, "Expected non empty content delta!"
+                        content.append(choice["delta"]["content"])
+                        content_parts += 1
+                    if choice["delta"].get("reasoning_content") is not None:
+                        assert len(choice["delta"]["reasoning_content"]) > 0, (
+                            "Expected non empty reasoning_content delta!"
+                        )
+                        reasoning_content.append(choice["delta"]["reasoning_content"])
+                        reasoning_content_parts += 1
+                    if choice["delta"].get("finish_reason") is not None:
+                        finish_reason = choice["delta"]["finish_reason"]
+                    for tc in choice["delta"].get("tool_calls", []):
+                        if "function" not in tc:
+                            msg = f"Expected function type, got {tc['type']}"
+                            raise ValueError(msg)
+                        if tc["index"] >= len(tool_calls):
+                            assert "id" in tc
+                            assert tc.get("type") == "function"
+                            assert "function" in tc and "name" in tc["function"] and len(tc["function"]["name"]) > 0, (
+                                f"Expected function call with name, got {tc.get('function')}"
+                            )
+                            tool_calls.append(
+                                {
+                                    "id": "",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "",
+                                        "arguments": "",
+                                    },
+                                }
+                            )
+                        tool_call = tool_calls[tc["index"]]
+                        if tc.get("id") is not None:
+                            tool_call["id"] = tc["id"]
+                        fct = tc["function"]
+                        assert "id" not in fct, f"Function call should not have id: {fct}"
+                        if fct.get("name") is not None:
+                            tool_call["function"]["name"] = tool_call["function"].get("name", "") + fct["name"]
+                        if fct.get("arguments") is not None:
+                            tool_call["function"]["arguments"] += fct["arguments"]
+                            arguments_parts += 1
+                        tool_call_parts += 1
+                else:
+                    # When `include_usage` is True (the default), we expect the last chunk of the stream
+                    # immediately preceding the `data: [DONE]` message to contain a `choices` field with an empty array
+                    # and a `usage` field containing the usage statistics (n.b., local-inference-server also returns `timings` in
+                    # the last chunk)
+                    assert "usage" in chunk, f"Expected finish_reason in chunk: {chunk}"
+                    assert "timings" in chunk, f"Expected finish_reason in chunk: {chunk}"
+            print(
+                f"Streamed response had {content_parts} content parts, {reasoning_content_parts} reasoning_content parts, "
+                f"{tool_call_parts} tool call parts incl. {arguments_parts} arguments parts"
+            )
+            result = {
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": finish_reason,
+                        "message": {
+                            "role": "assistant",
+                            "content": "".join(content) if content else None,
+                            "reasoning_content": "".join(reasoning_content) if reasoning_content else None,
+                            "tool_calls": tool_calls or None,
+                        },
+                    }
+                ],
+            }
+            print("Final response from server", json.dumps(result, indent=2))
+            return result
+        response = self.make_request(method, path, data, headers, timeout=timeout)
+        assert response.status_code == 200, f"Server returned error: {response.status_code}"
+        return response.body
+
+
+server_instances: set[ServerProcess] = set()
+
+
+IMG_URL_TRUCK = "https://huggingface.co/ggml-org/tinygemma3-GGUF/resolve/main/test/11_truck.png"
+IMG_URL_CAT = "https://huggingface.co/ggml-org/tinygemma3-GGUF/resolve/main/test/91_cat.png"
+LORA_FILE_URL = "https://huggingface.co/ggml-org/stories15M_MOE/resolve/main/moe_shakespeare15M.gguf"
+MODEL_DRAFT_FILE_URL = "https://huggingface.co/ggml-org/tiny-llamas/resolve/main/stories15M-q4_0.gguf"
+# the DFlash draft of ServerPreset.qwen3_4b
+DFLASH_DRAFT_FILE_URL = "https://huggingface.co/AtomicChat/Qwen3-4B-DFlash-GGUF/resolve/main/Qwen3-4B-DFlash.Q8_0.gguf"
+# the EAGLE3 draft of ServerPreset.qwen3_4b: no GGUF of it is published, it is converted once into the cache, from the
+# tests/server directory, with EAGLE3_DRAFT_CONVERT (the target lends its config and tokenizer, not its weights)
+EAGLE3_DRAFT_FILE = "./tmp/Qwen3-4B_eagle3.gguf"
+EAGLE3_DRAFT_CONVERT = """\
+uv run --extra convert hf download AngelSlim/Qwen3-4B_eagle3 --local-dir tmp/hf/Qwen3-4B_eagle3
+uv run --extra convert hf download Qwen/Qwen3-4B config.json tokenizer.json tokenizer_config.json vocab.json merges.txt \\
+    --local-dir tmp/hf/Qwen3-4B
+uv run --extra convert ../../scripts/convert_hf_to_gguf.py tmp/hf/Qwen3-4B_eagle3 --target-model-dir tmp/hf/Qwen3-4B \\
+    --outtype bf16 --outfile tmp/Qwen3-4B_eagle3.gguf"""
+
+TEST_FILE_URLS = [IMG_URL_TRUCK, IMG_URL_CAT, LORA_FILE_URL, MODEL_DRAFT_FILE_URL, DFLASH_DRAFT_FILE_URL]
+
+
+class ServerPreset:
+    @staticmethod
+    def load_all() -> None:
+        """Downloads the models and files of the tests, once: a stamp in the cache lists what is already there."""
+        servers: list[ServerProcess] = [
+            method() for name, method in ServerPreset.__dict__.items() if callable(method) and name != "load_all"
+        ]
+        servers = [server for server in servers if server.model_hf_repo]
+
+        wanted = sorted({f"{server.model_hf_repo}/{server.model_hf_file}" for server in servers}) + TEST_FILE_URLS
+
+        cache = os.environ.get("LOCAL_INFERENCE_CACHE", TMP_DIR)
+        stamp = os.path.join(cache, "test_files.json")
+        try:
+            with pathlib.Path(stamp).open(encoding="utf-8") as f:
+                if json.load(f) == wanted:
+                    return
+        except (OSError, JSONDecodeError):
+            pass
+
+        pathlib.Path(cache).mkdir(exist_ok=True, parents=True)
+
+        # no network is no reason to stop the session: only the tests of what is missing fail, and the next session retries
+        try:
+            for url in TEST_FILE_URLS:
+                download_file(url)
+
+            for server in servers:
+                server.offline = True
+                try:
+                    server.start()
+                except (RuntimeError, TimeoutError):
+                    server.stop()
+                    server.offline = False
+                    # the download is part of the start: a model of a few GB takes minutes
+                    server.start(timeout_seconds=1800)
+                server.stop()
+        except (OSError, RuntimeError) as e:
+            print(f"Not all test files are available: {e}")
+            for server in servers:
+                server.stop()
+            return
+
+        with pathlib.Path(stamp).open("w", encoding="utf-8") as f:
+            json.dump(wanted, f)
+
+    @staticmethod
+    def tinyllama2() -> ServerProcess:
+        server = ServerProcess()
+        server.offline = True  # will be downloaded by load_all()
+        server.model_hf_repo = "ggml-org/test-model-stories260K"
+        server.model_hf_file = None
+        server.model_alias = "tinyllama-2"
+        server.n_ctx = 512
+        server.n_batch = 32
+        server.n_predict = 64
+        server.seed = 42
+        return server
+
+    @staticmethod
+    def bert_bge_small() -> ServerProcess:
+        server = ServerProcess()
+        server.offline = True  # will be downloaded by load_all()
+        server.model_hf_repo = "ggml-org/models"
+        server.model_hf_file = "bert-bge-small/ggml-model-f16.gguf"
+        server.model_alias = "bert-bge-small"
+        server.n_ctx = 512
+        server.n_batch = 128
+        server.n_ubatch = 128
+        server.seed = 42
+        server.server_embeddings = True
+        return server
+
+    @staticmethod
+    def bert_bge_small_with_fa() -> ServerProcess:
+        server = ServerProcess()
+        server.offline = True  # will be downloaded by load_all()
+        server.model_hf_repo = "ggml-org/models"
+        server.model_hf_file = "bert-bge-small/ggml-model-f16.gguf"
+        server.model_alias = "bert-bge-small"
+        server.n_ctx = 1024
+        server.n_batch = 300
+        server.n_ubatch = 300
+        server.seed = 42
+        server.server_embeddings = True
+        return server
+
+    @staticmethod
+    def tinyllama_split() -> ServerProcess:
+        server = ServerPreset.tinyllama2()
+        server.model_hf_repo = "ggml-org/models"
+        server.model_hf_file = "tinyllamas/split/stories15M-q8_0-00001-of-00003.gguf"
+        server.model_alias = "tinyllama-split"
+        return server
+
+    @staticmethod
+    def tinyllama_infill() -> ServerProcess:
+        server = ServerProcess()
+        server.offline = True  # will be downloaded by load_all()
+        server.model_hf_repo = "ggml-org/test-model-stories260K-infill"
+        server.model_hf_file = None
+        server.model_alias = "tinyllama-infill"
+        server.n_ctx = 2048
+        server.n_batch = 1024
+        server.n_predict = 64
+        server.temperature = 0.0
+        server.seed = 42
+        return server
+
+    @staticmethod
+    def stories15m_moe() -> ServerProcess:
+        server = ServerProcess()
+        server.offline = True  # will be downloaded by load_all()
+        server.model_hf_repo = "ggml-org/stories15M_MOE"
+        server.model_hf_file = "stories15M_MOE-F16.gguf"
+        server.model_alias = "stories15m-moe"
+        server.n_ctx = 2048
+        server.n_batch = 1024
+        server.n_predict = 64
+        server.temperature = 0.0
+        server.seed = 42
+        return server
+
+    @staticmethod
+    def qwen3_4b() -> ServerProcess:
+        # the target of the DFlash draft of DFLASH_DRAFT_FILE_URL
+        server = ServerProcess()
+        server.offline = True  # will be downloaded by load_all()
+        server.model_hf_repo = "ggml-org/Qwen3-4B-GGUF"
+        server.model_hf_file = "Qwen3-4B-Q4_K_M.gguf"
+        server.model_alias = "qwen3-4b"
+        server.n_ctx = 2048
+        server.n_batch = 512
+        server.n_predict = 64
+        server.temperature = 0.0
+        server.seed = 42
+        server.vram_budget = "6G"
+        return server
+
+    @staticmethod
+    def jina_reranker_tiny() -> ServerProcess:
+        server = ServerProcess()
+        server.offline = True  # will be downloaded by load_all()
+        server.model_hf_repo = "ggml-org/models"
+        server.model_hf_file = "jina-reranker-v1-tiny-en/ggml-model-f16.gguf"
+        server.model_alias = "jina-reranker"
+        server.n_ctx = 512
+        server.n_batch = 512
+        server.seed = 42
+        server.server_reranking = True
+        return server
+
+    @staticmethod
+    def tinygemma3() -> ServerProcess:
+        server = ServerProcess()
+        server.offline = True  # will be downloaded by load_all()
+        # mmproj is already provided by HF registry API
+        server.model_hf_file = None
+        server.model_hf_repo = "ggml-org/tinygemma3-GGUF:Q8_0"
+        server.model_alias = "tinygemma3"
+        server.n_ctx = 1024
+        server.n_batch = 512
+        server.n_predict = 4
+        server.seed = 42
+        return server
+
+    @staticmethod
+    def router() -> ServerProcess:
+        server = ServerProcess()
+        server.offline = True  # will be downloaded by load_all()
+        # router server has no models
+        server.model_file = None
+        server.model_alias = None
+        server.model_hf_repo = None
+        server.model_hf_file = None
+        server.n_ctx = 1024
+        server.n_batch = 16
+        server.n_predict = 16
+        server.seed = 42
+        return server
+
+
+def is_build_info(value: str | None) -> bool:
+    """the version and commit the server reports as build info, e.g. 0.1.0-dev-46cafc393"""
+    return (
+        value is not None
+        and re.fullmatch(r"\d+\.\d+\.\d+(-dev)?-[0-9a-f]+|\d+\.\d+\.\d+(-dev)?-unknown", value) is not None
+    )
+
+
+def parallel_function_calls(function_list: list[tuple[Callable[..., Any], tuple[Any, ...]]]) -> list[Any]:
+    """
+    Run multiple functions in parallel and return results in the same order as calls. Equivalent to Promise.all in JS.
+
+    Example usage:
+
+    results = parallel_function_calls([
+        (func1, (arg1, arg2)),
+        (func2, (arg3, arg4)),
+    ])
+    """
+    results = [None] * len(function_list)
+    exceptions = []
+
+    def worker(index, func, args):
+        try:
+            result = func(*args)
+            results[index] = result
+        except Exception as e:
+            exceptions.append((index, str(e)))
+
+    with ThreadPoolExecutor() as executor:
+        futures = []
+        for i, (func, args) in enumerate(function_list):
+            future = executor.submit(worker, i, func, args)
+            futures.append(future)
+
+        # Wait for all futures to complete
+        for future in as_completed(futures):
+            pass
+
+    # Check if there were any exceptions
+    if exceptions:
+        print("Exceptions occurred:")
+        for index, error in exceptions:
+            print(f"Function at index {index}: {error}")
+
+    return results
+
+
+def match_regex(regex: str, text: str) -> bool:
+    return (
+        re.compile(regex, flags=RegexFlag.IGNORECASE | RegexFlag.MULTILINE | RegexFlag.DOTALL).search(text) is not None
+    )
+
+
+def download_file(url: str, output_file_path: str | None = None) -> str:
+    """
+    Download a file from a URL to a local path. If the file already exists, it will not be downloaded again.
+
+    output_file_path is the local path to save the downloaded file. If not provided, the file will be saved in the root directory.
+
+    Returns the local path of the downloaded file.
+    """
+    file_name = url.split("/").pop()
+    output_file = f"./tmp/{file_name}" if output_file_path is None else output_file_path
+    if not pathlib.Path(output_file).exists():
+        print(f"Downloading {url} to {output_file}")
+        # a partial file never takes the final name: the workers of a run share the directory
+        partial_file = f"{output_file}.{os.getpid()}.part"
+        wget.download(url, out=partial_file)
+        pathlib.Path(partial_file).replace(output_file)
+        print(f"Done downloading to {output_file}")
+    else:
+        print(f"File already exists at {output_file}")
+    return output_file
+
+
+def cached_file_bytes(url: str) -> bytes:
+    """The content of a file of TEST_FILE_URLS, from the cache."""
+    with pathlib.Path(download_file(url)).open("rb") as f:
+        return f.read()
+
+
+local_files_port: int | None = None
+
+
+def local_file_url(path: str) -> str:
+    """A URL on this machine for a path below the tests directory, for what a test sends the server to fetch."""
+    global local_files_port
+    if local_files_port is None:
+
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), QuietHandler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        local_files_port = httpd.server_address[1]
+    return f"http://127.0.0.1:{local_files_port}/{path}"
+
+
+def is_slow_test_allowed():
+    return os.environ.get("SLOW_TESTS") == "1" or os.environ.get("SLOW_TESTS") == "ON"

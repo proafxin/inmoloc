@@ -22,7 +22,10 @@ tools/ui/node_modules/
 tools/ui/dist/
 
 # models the server tests download
-tools/server/tests/tmp/
+tests/server/tmp/
+# core dumps of crashed test servers
+core.*
+**/core.*
 
 models/*
 

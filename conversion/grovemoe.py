@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
+from conversion.base import ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register("GroveMoeForCausalLM", "modeling_grove_moe.GroveMoeForCausalLM")
@@ -15,7 +17,7 @@ from .base import ModelBase, TextModel, gguf, logger
 class GroveMoeModel(TextModel):
     model_arch = gguf.MODEL_ARCH.GROVEMOE
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         if (moe_intermediate_size := self.hparams.get("moe_intermediate_size")) is not None:
             self.gguf_writer.add_expert_feed_forward_length(moe_intermediate_size)
@@ -37,7 +39,7 @@ class GroveMoeModel(TextModel):
 
         # process the experts separately
         if name.find("chunk_experts") != -1:
-            n_experts = self.find_hparam(["num_local_experts", "num_experts"]) // 2 # see add_experts_per_group
+            n_experts = self.find_hparam(["num_local_experts", "num_experts"]) // 2  # see add_experts_per_group
             assert bid is not None
 
             if self._chunk_experts is None:
@@ -93,17 +95,19 @@ class GroveMoeModel(TextModel):
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
 
         if self._chunk_experts is not None:
             # flatten `list[dict[str, Tensor]]` into `list[str]`
-            chunk_experts = [k for d in self._chunk_experts for k in d.keys()]
+            chunk_experts = [k for d in self._chunk_experts for k in d]
             if len(chunk_experts) > 0:
-                raise ValueError(f"Unprocessed adjugate experts: {chunk_experts}")
+                msg = f"Unprocessed adjugate experts: {chunk_experts}"
+                raise ValueError(msg)
 
         if self._experts is not None:
             # flatten `list[dict[str, Tensor]]` into `list[str]`
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)

@@ -19,7 +19,7 @@ Also, it is important to check that the examples and main ggml backends (CUDA, M
 ### 1. Convert the model to GGUF
 
 This step is done in python with a `convert` script using the [gguf](https://pypi.org/project/gguf/) library.
-Depending on the model architecture, you can use either [convert_hf_to_gguf.py](/convert_hf_to_gguf.py) or [examples/convert_legacy_llama.py](/examples/convert_legacy_llama.py) (for `llama/llama2` models in `.pth` format).
+Depending on the model architecture, you can use either [scripts/convert_hf_to_gguf.py](/scripts/convert_hf_to_gguf.py) or [examples/convert_legacy_llama.py](/examples/convert_legacy_llama.py) (for `llama/llama2` models in `.pth` format).
 
 The convert script reads the model configuration, tokenizer, tensor names+data and converts them to GGUF metadata and tensors.
 
@@ -45,7 +45,7 @@ class MyModel(MmprojModel):
 
 The `example` should point to a valid Hugging Face model that will be used for testing. You can add multiple models if necessary. Prefer a non-gated model, or tiny random weights if no such model exists.
 
-2. Define the layout of the GGUF tensors in [constants.py](/gguf-py/gguf/constants.py)
+2. Define the layout of the GGUF tensors in [constants.py](/gguf/constants.py)
 
 Add an enum entry in `MODEL_ARCH`, the model human friendly name in `MODEL_ARCH_NAMES` and the GGUF tensor names in `MODEL_TENSORS`.
 
@@ -70,7 +70,7 @@ Example for `falcon` model:
 
 As a general rule, before adding a new tensor name to GGUF, be sure the equivalent naming does not already exist.
 
-Once you have found the GGUF tensor name equivalent, add it to the [tensor_mapping.py](/gguf-py/gguf/tensor_mapping.py) file.
+Once you have found the GGUF tensor name equivalent, add it to the [tensor_mapping.py](/gguf/tensor_mapping.py) file.
 
 If the tensor name is part of a repetitive layer/block, the key word `bid` substitutes it.
 
@@ -78,13 +78,13 @@ Example for the normalization tensor in attention layers:
 
 ```python
 block_mappings_cfg: dict[MODEL_TENSOR, tuple[str, ...]] = {
-        # Attention norm
-        MODEL_TENSOR.ATTN_NORM: (
-            "gpt_neox.layers.{bid}.input_layernorm",                # gptneox
-            "transformer.h.{bid}.ln_1",                             # gpt2 gpt-j refact qwen
-            "transformer.blocks.{bid}.norm_1",                      # mpt
-            ...
-        )
+    # Attention norm
+    MODEL_TENSOR.ATTN_NORM: (
+        "gpt_neox.layers.{bid}.input_layernorm",  # gptneox
+        "transformer.h.{bid}.ln_1",  # gpt2 gpt-j refact qwen
+        "transformer.blocks.{bid}.norm_1",  # mpt
+        ...,
+    )
 }
 ```
 

@@ -14,6 +14,8 @@ class llama_batch_allocr;
 class llama_io_write_i;
 class llama_io_read_i;
 
+class llama_box;
+
 struct llama_memory_params {
     // kv cache
     ggml_type type_k;
@@ -25,6 +27,9 @@ struct llama_memory_params {
     llama_context_type ctx_type;
 
     llama_memory_t mem_other;
+
+    // the elastic memory of the target context of a draft context, see llama_box
+    std::shared_ptr<llama_box> box;
 };
 
 enum llama_memory_status {
@@ -117,6 +122,20 @@ struct llama_memory_i {
     virtual llama_pos seq_pos_max(llama_seq_id seq_id) const = 0;
 
     virtual std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const = 0;
+
+    //
+    // elastic memory, see llama_box
+    //
+
+    // the box this memory owns, nullptr when it has none
+    virtual std::shared_ptr<llama_box> get_box_shared() const { return nullptr; }
+
+    // admission of a request: its state and its input, and the output it may generate, see llama_box::reserve()
+    virtual bool box_reserve(llama_seq_id /*seq_id*/, uint32_t /*n_input*/, uint32_t /*n_output*/) { return false; }
+    virtual void box_reserve_drop(llama_seq_id /*seq_id*/) {}
+
+    // the box has its final size: the cells follow it
+    virtual void box_finalized() {}
 
     //
     // state write/read

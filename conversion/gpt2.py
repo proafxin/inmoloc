@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
+from conversion.base import ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register("GPT2LMHeadModel")
@@ -15,7 +17,7 @@ from .base import ModelBase, TextModel, gguf, logger
 class GPT2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.GPT2
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         self.gguf_writer.add_block_count(self.block_count)
         self.gguf_writer.add_context_length(self.hparams["n_ctx"])
         self.gguf_writer.add_embedding_length(self.hparams["n_embd"])
@@ -70,11 +72,12 @@ class RuGPT3XLModel(TextModel):
 
         yield from super().modify_tensors(data_torch, name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
 
         if self._qkv_parts is not None:
             # flatten `list[dict[str, Tensor]]` into `list[str]`
-            parts = [f"({i}){k}" for i, d in enumerate(self._qkv_parts) for k in d.keys()]
+            parts = [f"({i}){k}" for i, d in enumerate(self._qkv_parts) for k in d]
             if len(parts) > 0:
-                raise ValueError(f"Unprocessed Q/K/V parts: {parts}")
+                msg = f"Unprocessed Q/K/V parts: {parts}"
+                raise ValueError(msg)

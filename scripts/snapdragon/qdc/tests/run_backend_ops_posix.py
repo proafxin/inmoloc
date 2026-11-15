@@ -7,10 +7,10 @@ On Linux: runs test-backend-ops directly via run_linux.sh (BASH framework).
 """
 
 import os
+import pathlib
 import sys
 
 import pytest
-
 from utils import (
     BIN_PATH,
     push_bundle_if_needed,
@@ -20,29 +20,24 @@ from utils import (
 
 
 @pytest.fixture(scope="session", autouse=True)
-def install(driver):
+def install(driver) -> None:
     push_bundle_if_needed(f"{BIN_PATH}/test-backend-ops")
 
 
 @pytest.mark.parametrize("type_a", ["mxfp4", "fp16", "q4_0"])
-def test_backend_ops_htp0(type_a):
-    if type_a == "q4_0":
-        pattern = r'^(?=.*type_a=q4_0)(?!.*type_b=f32,m=576,n=512,k=576).*$'
-    else:
-        pattern = f"type_a={type_a}"
+def test_backend_ops_htp0(type_a) -> None:
+    pattern = r"^(?=.*type_a=q4_0)(?!.*type_b=f32,m=576,n=512,k=576).*$" if type_a == "q4_0" else f"type_a={type_a}"
 
     result = run_snapdragon(
         ["test-backend-ops", "-b", "HTP0", "-o", "MUL_MAT", "-p", pattern],
     )
     write_qdc_log(f"backend_ops_{type_a}.log", result.stdout or "")
-    assert result.returncode == 0, (
-        f"test-backend-ops type_a={type_a} failed (exit {result.returncode})"
-    )
+    assert result.returncode == 0, f"test-backend-ops type_a={type_a} failed (exit {result.returncode})"
 
 
 if __name__ == "__main__":
     ret = pytest.main(["-s", "--junitxml=results.xml", os.path.realpath(__file__)])
-    if os.path.exists("results.xml"):
-        with open("results.xml") as f:
+    if pathlib.Path("results.xml").exists():
+        with pathlib.Path("results.xml").open(encoding="utf-8") as f:
             write_qdc_log("results.xml", f.read())
     sys.exit(ret)

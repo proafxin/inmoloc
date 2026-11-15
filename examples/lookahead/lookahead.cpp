@@ -56,9 +56,6 @@ int main(int argc, char ** argv) {
     // lookahead requires W + G + 1 sequences for parallel Jacobi decoding
     params.n_parallel = W + G + 1;
 
-    // unified KV cache is required for coupled sequences in batch splitting
-    params.kv_unified = true;
-
     // init llama.cpp
     llama_backend_init();
     llama_numa_init(params.numa);

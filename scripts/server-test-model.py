@@ -5,8 +5,8 @@ import logging
 import sys
 
 handler = logging.StreamHandler(sys.stdout)
-handler.terminator = ""   # ← no newline
-logging.basicConfig(level=logging.INFO, format='%(message)s', handlers=[handler])
+handler.terminator = ""  # ← no newline
+logging.basicConfig(level=logging.INFO, format="%(message)s", handlers=[handler])
 logger = logging.getLogger("server-test-model")
 
 
@@ -59,7 +59,7 @@ def run_query(url, messages, tools=None, stream=False, tool_choice=None):
                             reasoning_chunk = delta.get("reasoning_content", "")
                             if reasoning_chunk:
                                 reasoning_content += reasoning_chunk
-                                logger.info(f"\x1B[3m{reasoning_chunk}\x1B[0m")
+                                logger.info(f"\x1b[3m{reasoning_chunk}\x1b[0m")
 
                             # Tool calls
                             if "tool_calls" in delta:
@@ -83,13 +83,11 @@ def run_query(url, messages, tools=None, stream=False, tool_choice=None):
                                             tool_calls[index]["id"] += tc["id"]
                                         if "function" in tc:
                                             if "name" in tc["function"]:
-                                                tool_calls[index]["function"][
-                                                    "name"
-                                                ] += tc["function"]["name"]
+                                                tool_calls[index]["function"]["name"] += tc["function"]["name"]
                                             if "arguments" in tc["function"]:
-                                                tool_calls[index]["function"][
+                                                tool_calls[index]["function"]["arguments"] += tc["function"][
                                                     "arguments"
-                                                ] += tc["function"]["arguments"]
+                                                ]
 
                     except json.JSONDecodeError:
                         logger.info(f"Failed to decode JSON: {data_str}\n")

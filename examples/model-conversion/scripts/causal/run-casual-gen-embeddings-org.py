@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 
 import argparse
-import os
-import sys
 import importlib
+import os
+import pathlib
+import sys
+
 import torch
-import numpy as np
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM
+sys.path.insert(0, os.path.join(pathlib.Path(__file__).parent, ".."))
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from utils.common import save_output_data
 
-unreleased_model_name = os.getenv('UNRELEASED_MODEL_NAME')
+unreleased_model_name = os.getenv("UNRELEASED_MODEL_NAME")
 
-parser = argparse.ArgumentParser(description='Process model with specified path')
-parser.add_argument('--model-path', '-m', help='Path to the model')
+parser = argparse.ArgumentParser(description="Process model with specified path")
+parser.add_argument("--model-path", "-m", help="Path to the model")
 args = parser.parse_args()
 
-model_path = os.environ.get('MODEL_PATH', args.model_path)
+model_path = os.environ.get("MODEL_PATH", args.model_path)
 if model_path is None:
     parser.error("Model path must be specified either via --model-path argument or MODEL_PATH environment variable")
 
@@ -49,17 +50,16 @@ if unreleased_model_name:
         model = AutoModelForCausalLM.from_pretrained(model_path)
 else:
     model = AutoModelForCausalLM.from_pretrained(model_path)
-print(f"Model class: {type(model)}")
-#print(f"Model file: {type(model).__module__}")
+# print(f"Model file: {type(model).__module__}")
 
-model_name = os.path.basename(model_path)
+model_name = pathlib.Path(model_path).name
 print(f"Model name: {model_name}")
 
 prompt = "Hello world today"
 input_ids = tokenizer(prompt, return_tensors="pt").input_ids  # ty: ignore[call-non-callable]
 token_ids = input_ids[0].cpu().tolist()
 print(f"Input tokens: {input_ids}")
-print(f"Input text: {repr(prompt)}")
+print(f"Input text: {prompt!r}")
 print(f"Tokenized: {tokenizer.convert_ids_to_tokens(input_ids[0])}")  # ty: ignore[unresolved-attribute]
 
 with torch.no_grad():
@@ -97,7 +97,6 @@ with torch.no_grad():
             print(f"embedding {i}: {vals}")
 
     # Also show token info for reference
-    print(f"\nToken reference:")
+    print("\nToken reference:")
     for i, token in enumerate(tokens):
-        print(f"  Token {i}: {repr(token)}")
-
+        print(f"  Token {i}: {token!r}")

@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
-
-from .llama import LlamaModel
+from conversion.base import ModelBase, TextModel, gguf
+from conversion.llama import LlamaModel
 
 
 @ModelBase.register("OlmoForCausalLM")
@@ -18,7 +19,7 @@ from .llama import LlamaModel
 class OlmoModel(TextModel):
     model_arch = gguf.MODEL_ARCH.OLMO
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_layer_norm_eps(1e-5)
         clip_qkv = self.hparams.get("clip_qkv")
@@ -51,7 +52,7 @@ class SeedOssModel(TextModel):
 class Olmo2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.OLMO2
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         if "sliding_window" in self.hparams:
@@ -74,7 +75,7 @@ class Olmo2Model(TextModel):
 class OlmoeModel(TextModel):
     model_arch = gguf.MODEL_ARCH.OLMOE
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_layer_norm_rms_eps(1e-5)
 
@@ -114,11 +115,12 @@ class OlmoeModel(TextModel):
         yield from super().modify_tensors(data_torch, name, bid)
 
     # Copied from: Qwen2MoeModel
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
 
         if self._experts is not None:
             # flatten `list[dict[str, Tensor]]` into `list[str]`
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)

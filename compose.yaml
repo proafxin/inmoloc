@@ -1,5 +1,7 @@
+# MODEL_ROOTDIR is the host directory containing all model files/folders.
+# It is mounted read-only into containers as /models, so container paths stay stable.
 x-models: &models
-  - ${MODELS_DIR:-/home/masterkenway/Projects/citadel/data/gguf_models}:/models:ro
+  - ${MODEL_ROOTDIR:-/home/masterkenway/models}:/models:ro
 
 x-gpu: &gpu
   resources:
@@ -10,16 +12,61 @@ x-gpu: &gpu
           capabilities: [gpu]
 
 services:
-  ocrbench-llamacpp:
-    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
-    container_name: ocrbench-llamacpp
-    restart: "no"
+  qwen:
+    image: inmoloc:latest
+    container_name: qwen
+    restart: unless-stopped
     ipc: host
     command:
       - --model
-      - /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-Q8_0.gguf
+      - /models/Kvark-Sparkle-1.0-27B-Q4_K_M.gguf
+      - -ngl
+      - "999"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8100"
+      - --vram-budget
+      - ${TEXT_BUDGET:-22G}
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "2"
+      - --rs-rollback
+      - replay
+      - --max-output-tokens
+      - "512"
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --metrics
+      - --alias
+      - qwen
+    ports:
+      - "8100:8100"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8100/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 300s
+      retries: 3
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  paddleocr:
+    image: inmoloc:latest
+    container_name: paddleocr
+    restart: unless-stopped
+    ipc: host
+    command:
+      - --model
+      - /models/PaddleOCR-VL-1.6-GGUF.gguf
       - --mmproj
-      - /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-GGUF-mmproj.gguf
+      - /models/PaddleOCR-VL-1.6-GGUF-mmproj.gguf
       - --chat-template-file
       - /models/PaddleOCR-VL-1.6/chat_template.jinja
       - -ngl
@@ -28,19 +75,17 @@ services:
       - 0.0.0.0
       - --port
       - "8110"
-      - -c
-      - "${OCR_CTX:-184320}"
-      - --parallel
-      - "${OCR_PARALLEL:-45}"
+      - --max-output-tokens
+      - "1024"
+      - --vram-budget
+      - ${OCR_BUDGET:-2.2G}
       - --cache-ram
-      - "4096"
-      - --metrics
+      - "0"
       - --cache-type-k
       - bf16
       - --cache-type-v
       - bf16
-      - --flash-attn
-      - "on"
+      - --metrics
       - --alias
       - ocrt
     ports:
@@ -57,16 +102,109 @@ services:
     volumes: *models
     deploy: *gpu
 
-  ocrbench-inmoloc:
-    image: ${INMOLOC_IMAGE:-inmoloc:sched6}
-    container_name: ocrbench-inmoloc
+  embedding:
+    image: inmoloc:latest
+    container_name: embedding
+    restart: unless-stopped
+    ipc: host
+    command:
+      - --model
+      - /models/harrier-oss-v1-0.6b-BF16.gguf
+      - --embedding
+      - --pooling
+      - last
+      - -ngl
+      - "999"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8101"
+      - --batch-size
+      - "2048"
+      - --ubatch-size
+      - "2048"
+      - --vram-budget
+      - 1.8G
+      - --metrics
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --alias
+      - harrier
+    ports:
+      - "8101:8101"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8101/v1/models"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  qwen-llamacpp:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    container_name: qwen-llamacpp
     restart: "no"
     ipc: host
     command:
       - --model
-      - /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-Q8_0.gguf
+      - /models/Kvark-Sparkle-1.0-27B-Q4_K_M.gguf
+      - -ngl
+      - "999"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8120"
+      - -c
+      - "${TEXT_CTX:-8192}"
+      - --parallel
+      - "${TEXT_PARALLEL:-8}"
+      - --spec-type
+      - draft-mtp
+      - --spec-draft-n-max
+      - "2"
+      - --n-predict
+      - "512"
+      - --cache-ram
+      - "0"
+      - --metrics
+      - --cache-type-k
+      - q8_0
+      - --cache-type-v
+      - q8_0
+      - --flash-attn
+      - "on"
+      - --alias
+      - qwen
+    ports:
+      - "8120:8120"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8120/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 300s
+      retries: 3
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes: *models
+    deploy: *gpu
+
+  paddleocr-llamacpp:
+    image: ${LLAMACPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    container_name: paddleocr-llamacpp
+    restart: "no"
+    ipc: host
+    command:
+      - --model
+      - /models/PaddleOCR-VL-1.6-GGUF.gguf
       - --mmproj
-      - /models/PaddleOCR-VL-1.6/PaddleOCR-VL-1.6-GGUF-mmproj.gguf
+      - /models/PaddleOCR-VL-1.6-GGUF-mmproj.gguf
       - --chat-template-file
       - /models/PaddleOCR-VL-1.6/chat_template.jinja
       - -ngl
@@ -75,10 +213,14 @@ services:
       - 0.0.0.0
       - --port
       - "8111"
-      - --vram-budget
-      - ${OCR_BUDGET:-5G}
+      - -c
+      - "${OCR_CTX:-24576}"
+      - --parallel
+      - "${OCR_PARALLEL:-6}"
       - --cache-ram
-      - "4096"
+      - "0"
+      - --n-predict
+      - "1024"
       - --metrics
       - --cache-type-k
       - bf16
@@ -88,9 +230,6 @@ services:
       - "on"
       - --alias
       - ocrt
-      # diagnostics: log a time breakdown of every main-loop iteration slower than 30 ms
-      - --slow-loop-ms
-      - "30"
     ports:
       - "8111:8111"
     healthcheck:

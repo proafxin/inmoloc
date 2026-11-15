@@ -1,26 +1,30 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, gguf, logger
+import operator
 
-from .llama import LlamaModel
-from .mamba import Mamba2Model
+from conversion.base import MmprojModel, ModelBase, gguf, logger
+from conversion.llama import LlamaModel
+from conversion.mamba import Mamba2Model
 
 
 @ModelBase.register("GraniteForCausalLM")
 @ModelBase.example("ibm-granite/granite-3.3-2b-instruct")
 class GraniteModel(LlamaModel):
     """Conversion for IBM's GraniteForCausalLM"""
+
     model_arch = gguf.MODEL_ARCH.GRANITE
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         """Granite uses standard llama parameters with the following differences:
 
         - No head_dim support
@@ -51,7 +55,7 @@ class GraniteModel(LlamaModel):
         # If being used as the base for Granite4 Vision, add deepstack_layer_arr
         if self.hparams.get("spatial_target_layers") or self.hparams.get("deepstack_layer_map"):
             normalized_projector_map = Granite4VisionMmprojModel.get_normalized_projector_map(self.hparams)
-            deepstack_mapping_arr = [-1 for _ in range(self.block_count)] # Populate with -1 sentinels
+            deepstack_mapping_arr = [-1 for _ in range(self.block_count)]  # Populate with -1 sentinels
             for proj_idx, (_, llm_layer, _, _) in enumerate(normalized_projector_map):
                 # Skip the first projector which is handled as the base embedding
                 # stream like normal
@@ -62,21 +66,22 @@ class GraniteModel(LlamaModel):
 
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
+        name, _gen = item
         # Skip multimodal tensors
         if (
-            name.startswith(("encoder."))
+            name.startswith("encoder.")
             or "image_" in name
             or "layerwise_projectors" in name
             or "spatial_projectors" in name
         ):
-            return
+            return None
         return super().filter_tensors(item)
 
 
 @ModelBase.register("GraniteSWAForCausalLM")
 class GraniteSWAModel(GraniteModel):
     """Conversion for IBM's GraniteSWAForCausalLM (interleaved sliding window attention)"""
+
     model_arch = gguf.MODEL_ARCH.GRANITE_SWA
 
     @classmethod
@@ -88,7 +93,7 @@ class GraniteSWAModel(GraniteModel):
 
         return super().filter_tensors((name, gen))
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         """GraniteSWA uses Granite parameters plus sliding window configuration."""
         super().set_gguf_parameters()
 
@@ -101,32 +106,38 @@ class GraniteSWAModel(GraniteModel):
         if layer_types := self.hparams.get("layer_types"):
             is_swa = [t == "sliding_attention" for t in layer_types]
             self.gguf_writer.add_sliding_window_pattern(is_swa)
-            logger.info("gguf: (granite_swa) sliding_window_pattern = %d SWA layers / %d total",
-                        sum(is_swa), len(is_swa))
+            logger.info(
+                "gguf: (granite_swa) sliding_window_pattern = %d SWA layers / %d total", sum(is_swa), len(is_swa)
+            )
         else:
             # Fall back to period-based pattern: i % 4 != 0
             # This matches the transformers default pattern
             n_layers = self.block_count
             is_swa = [i % 4 != 0 for i in range(n_layers)]
             self.gguf_writer.add_sliding_window_pattern(is_swa)
-            logger.info("gguf: (granite_swa) sliding_window_pattern (inferred) = %d SWA layers / %d total",
-                        sum(is_swa), n_layers)
+            logger.info(
+                "gguf: (granite_swa) sliding_window_pattern (inferred) = %d SWA layers / %d total",
+                sum(is_swa),
+                n_layers,
+            )
 
         # Add rope_pattern from no_rope_layers
         if no_rope_layers := self.hparams.get("no_rope_layers"):
             # Convert 1/0 to bool (1 = use RoPE, 0 = NoPE)
             rope_pattern = [bool(x) for x in no_rope_layers]
             self.gguf_writer.add_rope_pattern(rope_pattern)
-            logger.info("gguf: (granite_swa) rope_pattern = %d RoPE layers / %d total",
-                        sum(rope_pattern), len(rope_pattern))
+            logger.info(
+                "gguf: (granite_swa) rope_pattern = %d RoPE layers / %d total", sum(rope_pattern), len(rope_pattern)
+            )
 
 
 @ModelBase.register("GraniteMoeSWAForCausalLM")
 class GraniteMoeSWAModel(GraniteSWAModel):
     """Conversion for IBM's GraniteMoeSWAForCausalLM (unified dense + MoE with iSWA)"""
+
     model_arch = gguf.MODEL_ARCH.GRANITE_SWA
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         if shared_intermediate_size := self.hparams.get("shared_intermediate_size"):
             self.gguf_writer.add_expert_shared_feed_forward_length(shared_intermediate_size)
@@ -140,13 +151,19 @@ class GraniteMoeSWAModel(GraniteSWAModel):
         # tensor for the routed experts.
         if name.endswith("block_sparse_moe.experts.gate_up_proj"):
             ffn_dim = self.hparams["intermediate_size"]
-            assert data_torch.shape[-2] == 2 * ffn_dim, f"Merged FFN tensor size must be 2 * intermediate_size, got {data_torch.shape[-2]}"
-            yield from ModelBase.modify_tensors(self, data_torch, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE_UP_EXP, bid), bid)
+            assert data_torch.shape[-2] == 2 * ffn_dim, (
+                f"Merged FFN tensor size must be 2 * intermediate_size, got {data_torch.shape[-2]}"
+            )
+            yield from ModelBase.modify_tensors(
+                self, data_torch, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE_UP_EXP, bid), bid
+            )
             return
 
         # Handle expert FFN down projection - swash format: experts.down_proj
         if name.endswith("block_sparse_moe.experts.down_proj"):
-            yield from ModelBase.modify_tensors(self, data_torch, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN_EXP, bid), bid)
+            yield from ModelBase.modify_tensors(
+                self, data_torch, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN_EXP, bid), bid
+            )
             return
 
         # Handle expert FFN tensors (merged gate+up) - standard granite format: input_linear.weight
@@ -155,7 +172,9 @@ class GraniteMoeSWAModel(GraniteSWAModel):
         if name.endswith("block_sparse_moe.input_linear.weight"):
             ffn_dim = self.hparams["intermediate_size"]
             assert data_torch.shape[-2] == 2 * ffn_dim, "Merged FFN tensor size must be 2 * intermediate_size"
-            yield from ModelBase.modify_tensors(self, data_torch, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE_UP_EXP, bid), bid)
+            yield from ModelBase.modify_tensors(
+                self, data_torch, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE_UP_EXP, bid), bid
+            )
             return
 
         # Handle shared expert FFN tensors (if present) - kept fused since
@@ -164,12 +183,16 @@ class GraniteMoeSWAModel(GraniteSWAModel):
         if name.endswith("shared_mlp.input_linear.weight"):
             ffn_dim = self.hparams.get("shared_intermediate_size", self.hparams["intermediate_size"])
             assert data_torch.shape[-2] == 2 * ffn_dim, "Merged FFN tensor size must be 2 * shared_intermediate_size"
-            yield from ModelBase.modify_tensors(self, data_torch, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_UP_SHEXP, bid), bid)
+            yield from ModelBase.modify_tensors(
+                self, data_torch, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_UP_SHEXP, bid), bid
+            )
             return
 
         # Handle shared expert output (if present)
         if name.endswith("shared_mlp.output_linear.weight"):
-            yield from ModelBase.modify_tensors(self, data_torch, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN_SHEXP, bid), bid)
+            yield from ModelBase.modify_tensors(
+                self, data_torch, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN_SHEXP, bid), bid
+            )
             return
 
         # Pass through to parent for all other tensors (including sinks)
@@ -180,9 +203,10 @@ class GraniteMoeSWAModel(GraniteSWAModel):
 @ModelBase.example("ibm-granite/granite-3.1-3b-a800m-instruct")
 class GraniteMoeModel(GraniteModel):
     """Conversion for IBM's GraniteMoeForCausalLM"""
+
     model_arch = gguf.MODEL_ARCH.GRANITE_MOE
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         """GraniteMoeShared uses GraniteMoe parameters plus the following:
         - shared_intermediate_size
         """
@@ -202,26 +226,38 @@ class GraniteMoeModel(GraniteModel):
             ffn_dim = self.hparams["intermediate_size"]
             assert data_torch.shape[-2] == 2 * ffn_dim, "Merged FFN tensor size must be 2 * intermediate_size"
             gate, up = data_torch.split(ffn_dim, dim=-2)
-            yield from ModelBase.modify_tensors(self, gate, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE_EXP, bid), bid)
-            yield from ModelBase.modify_tensors(self, up, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_UP_EXP, bid), bid)
+            yield from ModelBase.modify_tensors(
+                self, gate, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE_EXP, bid), bid
+            )
+            yield from ModelBase.modify_tensors(
+                self, up, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_UP_EXP, bid), bid
+            )
             return
 
-        has_experts = bool(self.hparams.get('num_local_experts'))
+        has_experts = bool(self.hparams.get("num_local_experts"))
 
         if name.endswith("shared_mlp.input_linear.weight"):
             ffn_dim = self.hparams["shared_intermediate_size"]
             assert data_torch.shape[-2] == 2 * ffn_dim, "Merged FFN tensor size must be 2 * shared_intermediate_size"
             gate, up = data_torch.split(ffn_dim, dim=-2)
             if has_experts:
-                yield from ModelBase.modify_tensors(self, gate,self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE_SHEXP, bid), bid)
-                yield from ModelBase.modify_tensors(self, up, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_UP_SHEXP, bid), bid)
+                yield from ModelBase.modify_tensors(
+                    self, gate, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE_SHEXP, bid), bid
+                )
+                yield from ModelBase.modify_tensors(
+                    self, up, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_UP_SHEXP, bid), bid
+                )
                 return
-            yield from ModelBase.modify_tensors(self, gate, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE, bid), bid)
+            yield from ModelBase.modify_tensors(
+                self, gate, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_GATE, bid), bid
+            )
             yield from ModelBase.modify_tensors(self, up, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_UP, bid), bid)
             return
 
         if not has_experts and name.endswith("shared_mlp.output_linear.weight"):
-            yield from ModelBase.modify_tensors(self, data_torch, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN, bid), bid)
+            yield from ModelBase.modify_tensors(
+                self, data_torch, self.format_tensor_name(gguf.MODEL_TENSOR.FFN_DOWN, bid), bid
+            )
             return
 
         yield from super().modify_tensors(data_torch, name, bid)
@@ -232,15 +268,16 @@ class GraniteMoeModel(GraniteModel):
 class GraniteSwitchModel(GraniteMoeModel):
     """Dense, all-attention Granite with N per-token embedded LoRA adapters, stacked
     over the adapter dim with a zero adapter at slot 0 (N = num_adapters + 1)."""
+
     model_arch = gguf.MODEL_ARCH.GRANITE_SWITCH
 
     # permute q/k per-slice below (NORM-rope layout), not via the parent's auto-permute
     undo_permute = False
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # the weightless switch reserves one cache slot: one fewer block than num_hidden_layers
-        self.block_count = self.block_count - 1
+        self.block_count -= 1
         self.tensor_map = gguf.get_tensor_name_map(self.model_arch, self.block_count)
 
         self._n_adapters = int(self.hparams["num_adapters"])
@@ -260,7 +297,7 @@ class GraniteSwitchModel(GraniteMoeModel):
         self._q_size = n_head * self._head_dim
         self._kv_size = n_kv_head * self._head_dim
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         # dense: pin expert_used_count to 0 (config carries a leftover num_experts_per_tok)
@@ -273,7 +310,13 @@ class GraniteSwitchModel(GraniteMoeModel):
         self.gguf_writer.add_adapter_token_ids_substitute(self.hparams["adapter_substitute_token_ids"])
         router_gain = float(self.hparams.get("control_token_gain", 15.0))
         self.gguf_writer.add_adapter_router_gain(router_gain)
-        logger.info("gguf: (graniteswitch) num_adapters=%s max_lora_rank=%s n_slots=%s router_gain=%s", self._n_adapters, self._max_lora_rank, self._n_slots, router_gain)
+        logger.info(
+            "gguf: (graniteswitch) num_adapters=%s max_lora_rank=%s n_slots=%s router_gain=%s",
+            self._n_adapters,
+            self._max_lora_rank,
+            self._n_slots,
+            router_gain,
+        )
 
     def _lora_a(self, data: Tensor) -> Tensor:
         # on-disk A: [n_adapters, 1, max_rank, in] -> [n_adapters+1, max_rank, in]
@@ -294,11 +337,8 @@ class GraniteSwitchModel(GraniteMoeModel):
         T = gguf.MODEL_TENSOR
 
         # skip the weightless switch + control-token buffers (rebuilt at load time)
-        bare = name.split(".")[-1]
-        if (
-            name.startswith("model.switch.") or name.startswith("switch.")
-            or bare in ("adapter_token_ids", "control_to_substitute_lut")
-        ):
+        bare = name.rsplit(".", maxsplit=1)[-1]
+        if name.startswith(("model.switch.", "switch.")) or bare in {"adapter_token_ids", "control_to_substitute_lut"}:
             return
 
         if "self_attn.qkv_proj" in name:
@@ -324,7 +364,8 @@ class GraniteSwitchModel(GraniteMoeModel):
                 }[slot]
                 yield (self.format_tensor_name(key, bid, suffix=".lora_b"), self._lora_b(data_torch, ph))
                 return
-            raise ValueError(f"Unexpected qkv_proj tensor: {name}")
+            msg = f"Unexpected qkv_proj tensor: {name}"
+            raise ValueError(msg)
 
         if "self_attn.o_proj" in name:
             if name.endswith("base_layer.weight"):
@@ -336,7 +377,8 @@ class GraniteSwitchModel(GraniteMoeModel):
             if name.endswith("lora_B"):
                 yield (self.format_tensor_name(T.ATTN_OUT, bid, suffix=".lora_b"), self._lora_b(data_torch))
                 return
-            raise ValueError(f"Unexpected o_proj tensor: {name}")
+            msg = f"Unexpected o_proj tensor: {name}"
+            raise ValueError(msg)
 
         if "shared_mlp.input_linear" in name:
             ffn = self.hparams["shared_intermediate_size"]
@@ -355,7 +397,8 @@ class GraniteSwitchModel(GraniteMoeModel):
                 key = {0: T.FFN_GATE, 1: T.FFN_UP}[slot]
                 yield (self.format_tensor_name(key, bid, suffix=".lora_b"), self._lora_b(data_torch))
                 return
-            raise ValueError(f"Unexpected shared_mlp.input_linear tensor: {name}")
+            msg = f"Unexpected shared_mlp.input_linear tensor: {name}"
+            raise ValueError(msg)
 
         if "shared_mlp.output_linear" in name:
             if name.endswith("base_layer.weight"):
@@ -367,25 +410,25 @@ class GraniteSwitchModel(GraniteMoeModel):
             if name.endswith("lora_B"):
                 yield (self.format_tensor_name(T.FFN_DOWN, bid, suffix=".lora_b"), self._lora_b(data_torch))
                 return
-            raise ValueError(f"Unexpected shared_mlp.output_linear tensor: {name}")
+            msg = f"Unexpected shared_mlp.output_linear tensor: {name}"
+            raise ValueError(msg)
 
-        if bid is not None and ".layers." in name and (
-            "input_layernorm" in name or "post_attention_layernorm" in name
-        ):
+        if bid is not None and ".layers." in name and ("input_layernorm" in name or "post_attention_layernorm" in name):
             key = T.ATTN_NORM if "input_layernorm" in name else T.FFN_NORM
             yield (self.format_tensor_name(key, bid), data_torch)
             return
 
-        if name in ("model.embed_tokens.weight", "embed_tokens.weight"):
+        if name in {"model.embed_tokens.weight", "embed_tokens.weight"}:
             yield (self.format_tensor_name(T.TOKEN_EMBD), data_torch)
             return
-        if name in ("model.norm.weight", "norm.weight"):
+        if name in {"model.norm.weight", "norm.weight"}:
             yield (self.format_tensor_name(T.OUTPUT_NORM), data_torch)
             return
         if name == "lm_head.weight":
             return  # tied to token_embd
 
-        raise ValueError(f"graniteswitch: unhandled tensor {name!r} (bid={bid})")
+        msg = f"graniteswitch: unhandled tensor {name!r} (bid={bid})"
+        raise ValueError(msg)
 
 
 @ModelBase.register("GraniteMoeHybridForCausalLM", "BambaForCausalLM")
@@ -393,10 +436,11 @@ class GraniteSwitchModel(GraniteMoeModel):
 class GraniteHybridModel(Mamba2Model, GraniteMoeModel):
     """GraniteHybrid is a hybrid SSM + Attention model that uses Mamba2 SSM
     layers and optionally uses MoE w/ a shared expert"""
+
     model_arch = gguf.MODEL_ARCH.GRANITE_HYBRID
     undo_permute = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
 
         # Hybrid mamba models use a prefix for the mamba-specific params.
         # TODO: Extend this if the prefix(es) need to be configurable
@@ -406,10 +450,7 @@ class GraniteHybridModel(Mamba2Model, GraniteMoeModel):
 
         # Lists of which layers use ssm vs attention
         self._attn_layers = self.get_attn_layers()
-        self._ssm_layers = [
-            i for i in range(self.block_count)
-            if i not in self._attn_layers
-        ]
+        self._ssm_layers = [i for i in range(self.block_count) if i not in self._attn_layers]
 
         # There are some models in this family that are non-hybrid, but keep the
         # same parent class by setting all layers to "attention." If this is the
@@ -417,11 +458,7 @@ class GraniteHybridModel(Mamba2Model, GraniteMoeModel):
         # "granite" or "granitemoe" model
         if not self._ssm_layers:
             has_experts = self.find_hparam(["num_experts_per_tok", "num_experts_per_token"], optional=True)
-            new_arch = (
-                gguf.MODEL_ARCH.GRANITE_MOE
-                if has_experts else
-                gguf.MODEL_ARCH.GRANITE
-            )
+            new_arch = gguf.MODEL_ARCH.GRANITE_MOE if has_experts else gguf.MODEL_ARCH.GRANITE
             self.model_arch = new_arch
             self.gguf_writer.arch = gguf.MODEL_ARCH_NAMES[new_arch]
             self.gguf_writer.add_architecture()
@@ -438,10 +475,7 @@ class GraniteHybridModel(Mamba2Model, GraniteMoeModel):
     def get_attn_layers(self):
         # Explicit list of layer type names
         if layer_types := self.hparams.get("layer_types"):
-            return [
-                i for i, typ in enumerate(layer_types)
-                if typ == "attention"
-            ]
+            return [i for i, typ in enumerate(layer_types) if typ == "attention"]
 
         # Layer types indicated by index or period
         attn_layers = self.hparams.get("attn_layer_indices", [])
@@ -450,27 +484,18 @@ class GraniteHybridModel(Mamba2Model, GraniteMoeModel):
             assert attn_period, "Didn't find attn_layer_indices or attn_layer_period"
             attn_offset = self.hparams.get("attn_layer_offset")
             assert attn_offset is not None, "No attention layer offset set with attn_layer_period"
-            attn_layers = [
-                i for i in range(self.block_count)
-                if i % attn_period == attn_offset
-            ]
+            attn_layers = [i for i in range(self.block_count) if i % attn_period == attn_offset]
         return attn_layers
 
     def find_hparam(self, keys: Iterable[str], *args, **kwargs) -> Any:
         prefixed = []
         for pfx in self.hparam_prefixes:
-            prefixed.extend(
-                "_".join([pfx, k])
-                for k in keys
-            )
+            prefixed.extend(f"{pfx}_{k}" for k in keys)
         keys = list(keys) + prefixed
         return Mamba2Model.find_hparam(self, keys, *args, **kwargs)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        if (
-            name.endswith("block_sparse_moe.input_linear.weight")
-            or "shared_mlp" in name
-        ):
+        if name.endswith("block_sparse_moe.input_linear.weight") or "shared_mlp" in name:
             yield from GraniteMoeModel.modify_tensors(self, data_torch, name, bid)
             return
 
@@ -483,7 +508,7 @@ class GraniteHybridModel(Mamba2Model, GraniteMoeModel):
             return
         yield from ModelBase.modify_tensors(self, data_torch, name, bid)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         """This method merges params from both parents and some that are
         specific to this model. The result is some duplication of how the params
         get set. The following warnings are expected during conversion:
@@ -493,7 +518,7 @@ class GraniteHybridModel(Mamba2Model, GraniteMoeModel):
         """
         GraniteMoeModel.set_gguf_parameters(self)
 
-        ## Mamba mixer params ##
+        # Mamba mixer params ##
         self.gguf_writer.add_ssm_conv_kernel(self.find_hparam(["conv_kernel", "d_conv"]))
         self.gguf_writer.add_ssm_state_size(self.find_hparam(["state_size", "d_state", "state_dim", "ssm_state_size"]))
         self.gguf_writer.add_ssm_group_count(self.n_group)
@@ -502,30 +527,25 @@ class GraniteHybridModel(Mamba2Model, GraniteMoeModel):
         #   in llama.cpp
         self.gguf_writer.add_ssm_time_step_rank(self.find_hparam(["n_heads", "num_heads"]))
 
-        ## Attention params ##
+        # Attention params ##
         head_count_kv = self.find_hparam(["num_key_value_heads", "n_head_kv"])
-        head_count_kv_vec = [
-            head_count_kv if i in self._attn_layers else 0 for i in range(self.block_count)
-        ]
+        head_count_kv_vec = [head_count_kv if i in self._attn_layers else 0 for i in range(self.block_count)]
         if rope_dim := self.hparams.get("attn_rotary_emb"):
             self.gguf_writer.add_rope_dimension_count(rope_dim)
         self.gguf_writer.add_head_count_kv(head_count_kv_vec)
 
-        ## If Bamba or non-hybrid, use rope, otherwise don't
-        use_rope = (
-            "BambaForCausalLM" in self.hparams["architectures"]
-            or not self._ssm_layers
-        )
+        # If Bamba or non-hybrid, use rope, otherwise don't
+        use_rope = "BambaForCausalLM" in self.hparams["architectures"] or not self._ssm_layers
         self.gguf_writer.add_rope_scaling_finetuned(use_rope)
         if not use_rope:
             self.gguf_writer.add_context_length(2**20)
 
-        ## Validation ##
+        # Validation ##
         d_head = self.find_hparam(["d_head"], optional=True) or 64
-        assert self.hparams.get("hidden_act") in [None, "silu"], "Only SILU activation supported"
+        assert self.hparams.get("hidden_act") in {None, "silu"}, "Only SILU activation supported"
         assert self.d_inner % d_head == 0, f"SSM inner size {self.d_inner} not a multiple of head dim {d_head}"
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         # For models with no ssm layers, don't pad for mamba2
         self.hparams["pad_vocab_size_multiple"] = 8 if self._ssm_layers else 1
         Mamba2Model.set_vocab(self)
@@ -542,7 +562,7 @@ class GraniteSpeechMmprojModel(MmprojModel):
     def get_audio_config(self) -> dict[str, Any] | None:
         return self.global_config.get("encoder_config")
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         assert self.hparams_audio is not None
         a = self.hparams_audio
         a["hidden_size"] = a["hidden_dim"]
@@ -565,14 +585,13 @@ class GraniteSpeechMmprojModel(MmprojModel):
         self.gguf_writer.add_audio_projector_head_count(p["projector_config"]["num_attention_heads"])
 
     def tensor_force_quant(self, name, new_name, bid, n_dims):
-        if "encoder" in name or "projector" in name:
-            if ".conv" in name and ".weight" in name:
-                return gguf.GGMLQuantizationType.F32
+        if ("encoder" in name or "projector" in name) and ".conv" in name and ".weight" in name:
+            return gguf.GGMLQuantizationType.F32
         return super().tensor_force_quant(name, new_name, bid, n_dims)
 
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
+        name, _gen = item
         if "attention_dists" in name or "num_batches_tracked" in name:
             return None
         return super().filter_tensors(item)
@@ -619,10 +638,11 @@ class GraniteSpeechMmprojModel(MmprojModel):
 @ModelBase.example("ibm-granite/granite-speech-4.1-2b-plus")
 class GraniteSpeechPlusMmprojModel(GraniteSpeechMmprojModel):
     """Conversion for GraniteSpeechPlus - extends GraniteSpeech with feature layer concatenation"""
+
     has_vision_encoder = False
     has_audio_encoder = True
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         assert self.hparams_audio is not None
         super().set_gguf_parameters()
 
@@ -637,11 +657,12 @@ class GraniteSpeechPlusMmprojModel(GraniteSpeechMmprojModel):
             projector_dim = self.global_config["projector_config"]["encoder_hidden_size"]
 
             if projector_dim != expected_dim:
-                raise ValueError(
+                msg = (
                     f"Projector encoder_hidden_size ({projector_dim}) does not match "
                     f"expected concatenated dimension ({expected_dim}). "
                     f"Expected: hidden_dim ({hidden_dim}) * (len(feature_layers) + 1) = {expected_dim}"
                 )
+                raise ValueError(msg)
 
 
 @ModelBase.register("Granite4VisionForConditionalGeneration")
@@ -686,9 +707,9 @@ class Granite4VisionMmprojModel(MmprojModel):
                 spatial_vision_layer = n_vision_layers + spatial_vision_layer
             for spatial_idx, llm_layer in enumerate(spatial_layers):
                 normalized_projector_map.append((spatial_vision_layer, llm_layer, "spatial", spatial_idx))
-        return list(sorted(normalized_projector_map, key=(lambda entry: entry[1])))
+        return sorted(normalized_projector_map, key=(operator.itemgetter(1)))
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         normalized_projector_map = self.get_normalized_projector_map(self.global_config)
         self._n_proj = len(normalized_projector_map)
@@ -699,11 +720,10 @@ class Granite4VisionMmprojModel(MmprojModel):
         }
         self._vision_feature_layers = [vision_layer for vision_layer, _, _, _ in normalized_projector_map]
         self._spatial_offsets = [
-            type_idx if proj_type == "spatial" else -1
-            for _, _, proj_type, type_idx in normalized_projector_map
+            type_idx if proj_type == "spatial" else -1 for _, _, proj_type, type_idx in normalized_projector_map
         ]
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         assert self.hparams_vision is not None
         super().set_gguf_parameters()
 
@@ -739,7 +759,7 @@ class Granite4VisionMmprojModel(MmprojModel):
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
         name, _ = item
-        if ("vision_model.head" in name or name.startswith("lm_head")):
+        if "vision_model.head" in name or name.startswith("lm_head"):
             return None
         return super().filter_tensors(item)
 
@@ -766,10 +786,15 @@ class Granite4VisionMmprojModel(MmprojModel):
             # If not layer id, just use the projector index
             new_bid = projector_idx
             if len(all_ids) == 1:
-                new_name = name[:id_matches[0].span(1)[0]] + str(new_bid) + name[id_matches[0].span(1)[1]:]
-            else: # len(all_ids) == 2
-                new_bid = projector_idx # + all_ids[1]
-                new_name = name[:id_matches[0].span(0)[0]] + name[id_matches[0].span(1)[1]:id_matches[1].span(1)[0]] + str(new_bid) + name[id_matches[1].span(1)[1]:]
+                new_name = name[: id_matches[0].span(1)[0]] + str(new_bid) + name[id_matches[0].span(1)[1] :]
+            else:  # len(all_ids) == 2
+                new_bid = projector_idx  # + all_ids[1]
+                new_name = (
+                    name[: id_matches[0].span(0)[0]]
+                    + name[id_matches[0].span(1)[1] : id_matches[1].span(1)[0]]
+                    + str(new_bid)
+                    + name[id_matches[1].span(1)[1] :]
+                )
             yield from super().modify_tensors(data_torch, new_name, new_bid)
             return
         yield from super().modify_tensors(data_torch, name, bid)

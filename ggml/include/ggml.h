@@ -585,6 +585,7 @@ extern "C" {
         GGML_OP_DSV4_HC_COMB,
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
+        GGML_OP_ARGSORT_OFF,
 
         GGML_OP_UNARY,
 
@@ -1723,6 +1724,8 @@ extern "C" {
     // b I32 [n_rows, ne2, ne3, 1]
     //
     // return [n_embd, n_rows, ne2, ne3]
+    //
+    // a row index of -1 gives a row of zeros (CUDA; CPU for F32 and I32)
     GGML_API struct ggml_tensor * ggml_get_rows(
             struct ggml_context * ctx,
             struct ggml_tensor  * a,  // data
@@ -2460,6 +2463,17 @@ extern "C" {
             struct ggml_tensor  * a,
             int                   k);
 
+    // ggml_argsort_top_k with each index plus the offset of its row: for the windows of a list (see
+    // ggml_lightning_indexer_rows()), the indices are entries of the list
+    //
+    // a:   F32 [ne0, ne1, ne2, ne3]
+    // off: I32 [1, ne1/r1, ne2/r2, ne3/r3], broadcast over the rows of a
+    GGML_API struct ggml_tensor * ggml_argsort_top_k_off(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int                   k,
+            struct ggml_tensor  * off);
+
     // top k elements per row
     // note: the resulting top k indices are in no particular order
     GGML_API struct ggml_tensor * ggml_top_k(
@@ -2513,8 +2527,8 @@ extern "C" {
             struct ggml_tensor * sinks);
 
     // Attend every query to the K/V rows listed in rows, in that order, instead of all of them: the rows of one
-    // sequence in a cache shared by several, read in place. The mask keeps the layout of the K/V rows (ne[0] == k->ne[1])
-    // and is read at the listed rows; a row of -1 is padding and is left out.
+    // sequence in a cache shared by several, read in place. The mask is laid out like the list (ne[0] <= rows->ne[0]):
+    // column i masks the row rows[i]; a row of -1 is padding and is left out.
     //
     // rows: I32 [n_rows, 1, 1, 1]
     // q, k and v must have ne[3] == 1
@@ -2525,14 +2539,28 @@ extern "C" {
             struct ggml_tensor * a,
             struct ggml_tensor * rows);
 
+    // The same list of rows, without a mask: query i attends to the entries rows[0..hi[i]) of the list, so a list
+    // sorted by position makes causal attention over the rows of one sequence. The op must have been created without a
+    // mask, without max_bias (ALiBi) and without logit softcap.
+    //
+    // rows: I32 [n_rows, 1, 1, 1]
+    // hi:   I32 [n_q, 1, 1, 1], n_q >= q->ne[1], hi[i] <= n_rows
+    GGML_API void ggml_flash_attn_ext_set_kv_rows_hi(
+            struct ggml_tensor * a,
+            struct ggml_tensor * rows,
+            struct ggml_tensor * hi);
+
     // Attend each query to a range of an index list instead of all K/V rows with a mask.
-    // The op must have been created without a mask and without max_bias (ALiBi).
+    // The op must have been created without a mask.
     //
     // kv_idx: I32 [n_kv_max, n_group, 1, 1] - per group, indices into the K/V rows (dimension 1 of k and v)
+    //         I32 [n_kv_max, n_group, 2, 1] with max_bias (ALiBi): plane 1 holds the positions of the rows of plane 0
     // q_rng:  I32 [3, n_q, 1, 1], n_q >= q->ne[1] - per query row: group, lo, hi
     //
     // query row i attends to the K/V rows kv_idx[lo..hi) of its group, in that order; with the indices of a group
     // sorted by position, causal, sliding window and non-causal attention are each a single range
+    // ALiBi biases a row by its distance to the last row of the range, pos[j] - pos[hi - 1]: the distance to the
+    // query differs from it by a constant of the query, which the softmax cancels
     // q, k and v must have ne[3] == 1
     //
     // backends declare support with the proc address "ggml_backend_flash_attn_ext_kv_idx" of their registry,
@@ -2541,6 +2569,15 @@ extern "C" {
             struct ggml_tensor * a,
             struct ggml_tensor * kv_idx,
             struct ggml_tensor * q_rng);
+
+    // A relative position bias by distance (T5) over the ranges of ggml_flash_attn_ext_set_kv_idx(), whose lists must
+    // hold the positions of the rows: row j of the range of a query is biased by rel_bias[min(d, n_dist - 1), head],
+    // d = pos[hi - 1] - pos[j], the distance to the last row of the range, the query itself in causal attention
+    //
+    // rel_bias: F32 [n_dist, n_head_q, 1, 1]
+    GGML_API void ggml_flash_attn_ext_set_rel_bias(
+            struct ggml_tensor * a,
+            struct ggml_tensor * rel_bias);
 
     // TODO: needs to be adapted to ggml_flash_attn_ext
     GGML_API struct ggml_tensor * ggml_flash_attn_back(
@@ -2679,6 +2716,7 @@ extern "C" {
     // the output packs the attention scores [S_v, H_v, n_tokens, n_seqs] followed by K state
     // snapshots, most-recent first (slot 0 = final state, slot s = state s tokens back). K == 1
     // keeps only the final state; when n_tokens < K only slots 0..n_tokens-1 are written.
+    // when n_tokens > K only slot 0 is guaranteed; backends may leave slots 1..K-1 unwritten.
     GGML_API struct ggml_tensor * ggml_gated_delta_net(
             struct ggml_context * ctx,
             struct ggml_tensor  * q,
@@ -2688,6 +2726,25 @@ extern "C" {
             struct ggml_tensor  * beta,
             struct ggml_tensor  * state,
             int64_t               K);
+
+    // the same scan, with the states read and written in place in rows of a larger tensor (K == 1):
+    //   state    : [S_v*S_v*H, n_rows] -- the rows may be strided by less than a row (overlapping views)
+    //   rows_in  : I32 [n_seqs] -- the row of the initial state of each sequence, -1 for a zero state
+    //   rows_out : I32 [n_seqs] -- the row the final state of each sequence is written to, -1 not written; NULL: none
+    //   after    : NULL, or a tensor computed before this op (e.g. the scan that writes the rows this one reads)
+    // the result holds the attention scores alone: [S_v*H, n_tokens*n_seqs]
+    // a row must not be written by one sequence while another sequence reads it
+    GGML_API struct ggml_tensor * ggml_gated_delta_net_rows(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * g,
+            struct ggml_tensor  * beta,
+            struct ggml_tensor  * state,
+            struct ggml_tensor  * rows_in,
+            struct ggml_tensor  * rows_out,
+            struct ggml_tensor  * after);
 
     // DSA lightning indexer
     //
@@ -2706,6 +2763,41 @@ extern "C" {
         struct ggml_tensor  * k,
         struct ggml_tensor  * weights,
         struct ggml_tensor  * mask);
+
+    // the same over the keys of a list of rows of k read in place, for keys that are not contiguous: each token scores a
+    // window of n_win entries of the list, entry w + j in column j of res, and only the entries lo .. hi-1 of it with a
+    // row (not -1), the others are -INFINITY; no mask
+    //
+    // q:       [n_embd_idx, n_head, n_tokens]
+    // k:       [n_embd_idx, 1, n_rows_k]
+    // weights: [n_head, n_tokens] !! prescaled !!
+    // rows:    I32 [n_list]
+    // rng:     I32 [3, n_tokens], (w, lo, hi) of each token, entries of the list
+    // res:     F32 [n_win, n_tokens]
+    GGML_API struct ggml_tensor * ggml_lightning_indexer_rows(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * weights,
+        struct ggml_tensor  * rows,
+        struct ggml_tensor  * rng,
+        int64_t               n_win);
+
+    // the keys scored against each head instead of summed over them: the dot products of q with the rows of k, over the
+    // windows of ggml_lightning_indexer_rows(), with no ReLU and no weights
+    //
+    // q:    [n_embd_idx, n_head, n_tokens]
+    // k:    [n_embd_idx, 1, n_rows_k]
+    // rows: I32 [n_list]
+    // rng:  I32 [3, n_tokens]
+    // res:  F32 [n_win, n_head, n_tokens]
+    GGML_API struct ggml_tensor * ggml_lightning_indexer_heads(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * rows,
+        struct ggml_tensor  * rng,
+        int64_t               n_win);
 
     // DeepSeek V4 hyper-connections (ref. https://arxiv.org/pdf/2512.24880)
     // In short these operations are replacements for the original residual connection (x = transformer(x) + x)

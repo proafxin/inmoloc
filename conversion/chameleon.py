@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
-
-from .llama import LlamaModel
+from conversion.base import ModelBase, TextModel, gguf
+from conversion.llama import LlamaModel
 
 
 @ModelBase.register("ChameleonForConditionalGeneration")
@@ -17,16 +18,16 @@ from .llama import LlamaModel
 class ChameleonModel(TextModel):
     model_arch = gguf.MODEL_ARCH.CHAMELEON
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_swin_norm(self.hparams.get("swin_norm", False))
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_gpt2()
 
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
+        name, _gen = item
 
         # ignore image tokenizer for now
         # TODO: image support for Chameleon
@@ -56,5 +57,4 @@ class ChameleonModel(TextModel):
     def _reverse_hf_permute(data_torch, n_heads, hidden_dim):
         head_dim = hidden_dim // n_heads
         data_torch = data_torch[0].view(2, head_dim // 2).t().reshape(1, -1)
-        data_torch = data_torch.repeat_interleave(n_heads, 0)
-        return data_torch
+        return data_torch.repeat_interleave(n_heads, 0)

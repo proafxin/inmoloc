@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("FalconForCausalLM", "RWForCausalLM")
@@ -15,7 +17,7 @@ from .base import ModelBase, TextModel, gguf
 class FalconModel(TextModel):
     model_arch = gguf.MODEL_ARCH.FALCON
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         n_head = self.hparams.get("num_attention_heads")
         if n_head is None:
             n_head = self.hparams["n_head"]  # old name

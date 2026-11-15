@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("DreamModel")
@@ -18,6 +20,7 @@ class DreamModel(TextModel):
         toktypes: list[int] = []
 
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
 
         vocab_dict = tokenizer.get_vocab()  # ty: ignore[unresolved-attribute]
@@ -36,7 +39,7 @@ class DreamModel(TextModel):
             elif reverse_vocab[i] in added_vocab:
                 tokens.append(reverse_vocab[i])
                 # Check if it's a special token - treat special tokens as CONTROL tokens
-                if hasattr(tokenizer, 'added_tokens_decoder') and i in tokenizer.added_tokens_decoder:
+                if hasattr(tokenizer, "added_tokens_decoder") and i in tokenizer.added_tokens_decoder:
                     if tokenizer.added_tokens_decoder[i].special:
                         toktypes.append(gguf.TokenType.CONTROL)
                     else:
@@ -50,13 +53,13 @@ class DreamModel(TextModel):
 
         return tokens, toktypes, tokpre
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         try:
             self._set_vocab_sentencepiece()
         except FileNotFoundError:
             self._set_vocab_gpt2()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self._try_set_pooling_type()
 

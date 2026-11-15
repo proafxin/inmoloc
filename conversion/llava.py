@@ -1,27 +1,29 @@
 from __future__ import annotations
 
 import json
-
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, gguf, logger
+import pathlib
 
-from .llama import LlamaModel
+from conversion.base import MmprojModel, ModelBase, gguf, logger
+from conversion.llama import LlamaModel
 
 
 @ModelBase.register(
-    "LlavaForConditionalGeneration", # pixtral
-    "Mistral3ForConditionalGeneration", # mistral small 3.1
+    "LlavaForConditionalGeneration",  # pixtral
+    "Mistral3ForConditionalGeneration",  # mistral small 3.1
 )
 @ModelBase.example("mistral-community/pixtral-12b", "mistralai/Mistral-Small-3.1-24B-Instruct-2503")
 class LlavaVisionModel(MmprojModel):
     img_break_tok_id = -1
     use_break_tok = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         if self.hparams.get("model_type") == "pixtral":
             # layer_norm_eps is not in config.json, it is hard-coded in modeling_pixtral.py
@@ -40,43 +42,46 @@ class LlavaVisionModel(MmprojModel):
                 if self.img_break_tok_id < 0:
                     self.img_break_tok_id = self.get_mistral_token_id("[IMG_BREAK]")
         else:
-            raise ValueError(f"Unsupported model type: {self.hparams['model_type']}")
+            msg = f"Unsupported model type: {self.hparams['model_type']}"
+            raise ValueError(msg)
         logger.info(f"Image break token id: {self.img_break_tok_id}")
 
     def get_token_id(self, token: str) -> int:
-        tokenizer_config_file = self.dir_model / 'tokenizer_config.json'
-        with open(tokenizer_config_file, "r", encoding="utf-8") as f:
-            added_tokens_decoder = json.load(f).get('added_tokens_decoder') or {}
+        tokenizer_config_file = self.dir_model / "tokenizer_config.json"
+        with pathlib.Path(tokenizer_config_file).open("r", encoding="utf-8") as f:
+            added_tokens_decoder = json.load(f).get("added_tokens_decoder") or {}
             for id_, token_data in added_tokens_decoder.items():
                 if token_data.get("content") == token:
                     return int(id_)
             # fallthrough to tokenizer.json
-        with open(self.dir_model / "tokenizer.json", "r", encoding="utf-8") as f:
+        with pathlib.Path(self.dir_model / "tokenizer.json").open("r", encoding="utf-8") as f:
             tokenizer_json = json.load(f)
             for token_data in tokenizer_json["added_tokens"]:
                 if token_data["content"] == token:
                     return int(token_data["id"])
-        raise ValueError(f"Token '{token}' not found in tokenizer config.")
+        msg = f"Token '{token}' not found in tokenizer config."
+        raise ValueError(msg)
 
     def get_mistral_token_id(self, token: str) -> int:
         # mistral native format ships tekken.json or a versioned spm tokenizer
         tekken_file = self.dir_model / "tekken.json"
         if tekken_file.is_file():
-            with open(tekken_file, "r", encoding="utf-8") as f:
+            with pathlib.Path(tekken_file).open("r", encoding="utf-8") as f:
                 data = json.load(f)
             for entry in data.get("special_tokens", []):
                 if entry.get("token_str") == token:
                     return int(entry["rank"])
         tokenizer_json_file = self.dir_model / "tokenizer.json"
         if tokenizer_json_file.is_file():
-            with open(tokenizer_json_file, "r", encoding="utf-8") as f:
+            with pathlib.Path(tokenizer_json_file).open("r", encoding="utf-8") as f:
                 data = json.load(f)
             for entry in data.get("added_tokens", []):
                 if entry.get("content") == token:
                     return int(entry["id"])
-        raise ValueError(f"Token '{token}' not found in mistral tokenizer files.")
+        msg = f"Token '{token}' not found in mistral tokenizer files."
+        raise ValueError(msg)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         hparams = self.hparams
         if hparams.get("model_type") == "pixtral":
@@ -89,7 +94,8 @@ class LlavaVisionModel(MmprojModel):
             elif hparams["hidden_act"] == "gelu":
                 self.gguf_writer.add_vision_use_gelu(True)
             else:
-                raise ValueError(f"Unsupported hidden_act: {hparams['hidden_act']}")
+                msg = f"Unsupported hidden_act: {hparams['hidden_act']}"
+                raise ValueError(msg)
 
             # spatial_merge_size
             if "spatial_merge_size" in self.global_config:
@@ -97,7 +103,9 @@ class LlavaVisionModel(MmprojModel):
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         n_head = (
-            self.hparams["num_attention_heads"] if not self.is_mistral_format else self.find_vparam(["num_attention_heads"])
+            self.hparams["num_attention_heads"]
+            if not self.is_mistral_format
+            else self.find_vparam(["num_attention_heads"])
         )
         n_kv_head = n_head
 
@@ -127,4 +135,4 @@ class LlavaVisionModel(MmprojModel):
             name = gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.V_TOK_EMBD_IMG_BREAK]
             yield from super().modify_tensors(img_break_embd, name, bid)
 
-        return # skip other tensors
+        return  # skip other tensors

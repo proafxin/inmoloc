@@ -24,7 +24,6 @@ Example of a `preset.ini`:
 [*]
 ctx-size             = 0
 mmap                 = 1
-kv-unified           = 1
 parallel             = 4
 spec-default         = 1
 

@@ -15,17 +15,16 @@ llama_kv_cache_dsa_iswa::llama_kv_cache_dsa_iswa(
         const llama_model & model,
                 ggml_type   type_k,
                 ggml_type   type_v,
-                     bool   v_trans,
                      bool   offload,
-                     bool   swa_full,
-                     bool   unified,
                  uint32_t   kv_size,
                  uint32_t   n_seq_max,
-                 uint32_t   n_ubatch,
                  uint32_t   n_pad,
     const layer_filter_cb & filter_mla,
     const layer_filter_cb & filter_lid,
-    const  layer_reuse_cb & reuse) : unified(unified) {
+    const  layer_reuse_cb & reuse,
+                   size_t   box_bytes,
+                     bool   box_deferred,
+                     const llama_box_draft & box_draft) {
 
     const auto & hparams = model.hparams;
 
@@ -46,33 +45,25 @@ llama_kv_cache_dsa_iswa::llama_kv_cache_dsa_iswa(
         return hparams.is_swa(il);
     };
 
-    const uint32_t size_dsa = kv_size;
-
-    // note: the SWA cache is always padded to 256 for performance
-    //       https://github.com/ggml-org/llama.cpp/issues/17037
-    uint32_t size_swa = GGML_PAD(std::min(size_dsa, hparams.n_swa*(unified ? n_seq_max : 1) + n_ubatch), 256);
-
-    // when using full-size SWA cache, we set the SWA cache size to be equal to the base cache size
-    if (swa_full) {
-        LLAMA_LOG_WARN("%s: using full-size SWA cache (ref: %s)\n",
-                __func__, "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
-
-        size_swa = size_dsa;
-    }
-
-    LLAMA_LOG_INFO("%s: creating DSA KV cache, size = %u cells\n", __func__, size_dsa);
+    LLAMA_LOG_INFO("%s: creating DSA KV cache, size = %u cells\n", __func__, kv_size);
 
     kv_dsa = std::make_unique<llama_kv_cache_dsa>(
             model, type_k, type_v,
-            v_trans, offload, unified, size_dsa, n_seq_max, n_pad,
-            0, LLAMA_SWA_TYPE_NONE, filter_dsa, filter_lid, reuse);
+            offload, kv_size, n_seq_max, n_pad,
+            0, LLAMA_SWA_TYPE_NONE, filter_dsa, filter_lid, reuse,
+            box_bytes, box_deferred, box_draft, true);
+
+    const auto box = kv_dsa->get_box_shared();
+
+    // a block holds the rows of every layer: the SWA cache has the cells of the box, with its own layers
+    const uint32_t size_swa = box->get_n_cells();
 
     LLAMA_LOG_INFO("%s: creating SWA KV cache, size = %u cells\n", __func__, size_swa);
 
     kv_swa = std::make_unique<llama_kv_cache>(
             model, hparams, type_k, type_v,
-            v_trans, offload, unified, size_swa, n_seq_max, n_pad,
-            hparams.n_swa, hparams.swa_type, nullptr, filter_swa, reuse, nullptr);
+            offload, size_swa, n_seq_max, n_pad,
+            hparams.n_swa, hparams.swa_type, nullptr, filter_swa, reuse, nullptr, "", nullptr, 0, nullptr, box);
 }
 
 void llama_kv_cache_dsa_iswa::clear(bool data) {
@@ -83,8 +74,8 @@ void llama_kv_cache_dsa_iswa::clear(bool data) {
 bool llama_kv_cache_dsa_iswa::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     bool res = true;
 
-    res = res & kv_dsa->seq_rm(seq_id, p0, p1);
     res = res & kv_swa->seq_rm(seq_id, p0, p1);
+    res = res & kv_dsa->seq_rm(seq_id, p0, p1);
 
     return res;
 }
@@ -120,6 +111,12 @@ llama_pos llama_kv_cache_dsa_iswa::seq_pos_max(llama_seq_id seq_id) const {
 
 std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_dsa_iswa::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> mb = kv_dsa->memory_breakdown();
+
+    // both caches count the one box
+    if (get_box_shared()) {
+        return mb;
+    }
+
     for (const auto & buft_size : kv_swa->memory_breakdown()) {
         mb[buft_size.first] += buft_size.second;
     }
@@ -129,18 +126,13 @@ std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_dsa_iswa::memory_bre
 llama_memory_context_ptr llama_kv_cache_dsa_iswa::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {
     GGML_UNUSED(embd_all);
 
-    // first try simple split
-    do {
-        if (!unified) {
-            // requires equal splits, so we skip the simple split
-            break;
-        }
-
+    // a simple split first, an equal split if it fails
+    for (const bool equal : { false, true }) {
         balloc.split_reset();
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = balloc.split_simple(n_ubatch);
+            auto ubatch = equal ? balloc.split_equal(n_ubatch, false, 0) : balloc.split_simple(n_ubatch);
 
             if (ubatch.n_tokens == 0) {
                 break;
@@ -151,70 +143,21 @@ llama_memory_context_ptr llama_kv_cache_dsa_iswa::init_batch(llama_batch_allocr 
 
         if (balloc.get_n_used() < balloc.get_n_tokens()) {
             // failed to find a suitable split
-            break;
+            continue;
         }
 
         auto sinfos_mla = kv_dsa->get_mla()->prepare(ubatches);
         if (sinfos_mla.empty()) {
-            break;
+            continue;
         }
 
-        auto sinfos_lid = kv_dsa->get_lid()->prepare(ubatches);
-        if (sinfos_lid.empty()) {
-            break;
-        }
-
-        auto sinfos_swa = kv_swa->prepare(ubatches);
-        if (sinfos_swa.empty()) {
-            break;
-        }
-
-        assert(sinfos_mla.size() == sinfos_swa.size());
+        // the rows of the elastic memory are read through one list, so the caches hold a token in the same cell
+        auto sinfos_lid = sinfos_mla;
+        auto sinfos_swa = sinfos_mla;
 
         return std::make_unique<llama_kv_cache_dsa_iswa_context>(
                 this, std::move(sinfos_mla), std::move(sinfos_lid), std::move(sinfos_swa), std::move(ubatches));
-    } while (false);
-
-    // if it fails, try equal split
-    do {
-        balloc.split_reset();
-
-        std::vector<llama_ubatch> ubatches;
-        while (true) {
-            auto ubatch = balloc.split_equal(n_ubatch, !unified, 0);
-
-            if (ubatch.n_tokens == 0) {
-                break;
-            }
-
-            ubatches.push_back(std::move(ubatch)); // NOLINT
-        }
-
-        if (balloc.get_n_used() < balloc.get_n_tokens()) {
-            // failed to find a suitable split
-            break;
-        }
-
-        auto sinfos_mla = kv_dsa->get_mla()->prepare(ubatches);
-        if (sinfos_mla.empty()) {
-            break;
-        }
-
-        auto sinfos_lid = kv_dsa->get_lid()->prepare(ubatches);
-        if (sinfos_lid.empty()) {
-            break;
-        }
-
-        auto sinfos_swa = kv_swa->prepare(ubatches);
-        if (sinfos_swa.empty()) {
-            break;
-        }
-
-        assert(sinfos_mla.size() == sinfos_swa.size());
-
-        return std::make_unique<llama_kv_cache_dsa_iswa_context>(
-                this, std::move(sinfos_mla), std::move(sinfos_lid), std::move(sinfos_swa), std::move(ubatches));
-    } while (false);
+    }
 
     return std::make_unique<llama_kv_cache_dsa_iswa_context>(LLAMA_MEMORY_STATUS_FAILED_PREPARE);
 }

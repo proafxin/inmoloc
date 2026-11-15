@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import MmprojModel, ModelBase, TextModel, gguf
+import pathlib
+
+from conversion.base import MmprojModel, ModelBase, TextModel, gguf
 
 
-def _unpermute_for_rope(tensor: "Tensor", n_heads: int) -> "Tensor":
+def _unpermute_for_rope(tensor: Tensor, n_heads: int) -> Tensor:
     """Invert transformers' `_permute_for_rope`: HF stores Q/K in rotate_half layout,
     llama.cpp consumes the interleaved (NORM) layout."""
     if tensor.ndim == 2:
@@ -20,7 +24,8 @@ def _unpermute_for_rope(tensor: "Tensor", n_heads: int) -> "Tensor":
     if tensor.ndim == 1:
         (dim1,) = tensor.shape
         return tensor.view(n_heads, 2, dim1 // n_heads // 2).transpose(1, 2).reshape(dim1)
-    raise ValueError(f"_unpermute_for_rope: unexpected shape {tuple(tensor.shape)}")
+    msg = f"_unpermute_for_rope: unexpected shape {tuple(tensor.shape)}"
+    raise ValueError(msg)
 
 
 @ModelBase.register("MuseGlimmerForConditionalGeneration")
@@ -32,16 +37,17 @@ class MuseGlimmerModel(TextModel):
         # All four layer norms use 1, the final norm uses 0.
         return 1.0 if name.endswith("layernorm.weight") else 0.0
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_gpt2()
 
         from transformers import AutoTokenizer
+
         tok = AutoTokenizer.from_pretrained(self.dir_model)
         eot_id = tok.convert_tokens_to_ids("<|eot|>")  # ty: ignore[unresolved-attribute]
         if isinstance(eot_id, int) and eot_id >= 0:
             self.gguf_writer.add_eot_token_id(eot_id)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         hparams = self.hparams
 
@@ -53,7 +59,7 @@ class MuseGlimmerModel(TextModel):
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         shift = self.norm_shift(name)
         if shift != 0.0:
-            data_torch = data_torch + shift
+            data_torch += shift
 
         # Invert transformers' `_permute_for_rope` on Q/K, we keep ggml's NORM (interleaved) rope
         if ".self_attn.q_proj." in name:
@@ -89,7 +95,7 @@ class MuseGlimmerVisionModel(MmprojModel):
         image_size = c["pos_emb_height"] * c["patch_size"] * c["merge_size"]
         return {**c, "image_size": image_size}
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         assert self.hparams_vision is not None
         c = self.hparams_vision  # enriched vision_config from get_vision_config()
@@ -110,7 +116,7 @@ class MuseGlimmerVisionModel(MmprojModel):
     _MM_MLP_MAP = {
         "model.vision_adapter.fc1": (gguf.MODEL_TENSOR.V_MMPROJ, 0),
         "model.vision_adapter.fc2": (gguf.MODEL_TENSOR.V_MMPROJ, 1),
-        "model.vision_projection":  (gguf.MODEL_TENSOR.V_MMPROJ, 2),
+        "model.vision_projection": (gguf.MODEL_TENSOR.V_MMPROJ, 2),
     }
 
     def modify_tensors(self, data_torch, name, bid):
@@ -137,7 +143,7 @@ class MuseGlimmerVisionModel(MmprojModel):
 class MuseGlimmerAssistantModel(TextModel):
     model_arch = gguf.MODEL_ARCH.DFLASH
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         if self.target_model_dir is None:
             raise ValueError(
                 "MuseGlimmerAssistant (DFlash drafter) requires --target-model-dir pointing to the "
@@ -147,8 +153,9 @@ class MuseGlimmerAssistantModel(TextModel):
         original_dir = self.dir_model
         self.dir_model = self.target_model_dir
 
-        from . import get_model_class
-        with open(self.target_model_dir / "config.json", "r", encoding="utf-8") as f:
+        from conversion.registry import get_model_class
+
+        with pathlib.Path(self.target_model_dir / "config.json").open("r", encoding="utf-8") as f:
             target_arch = json.load(f)["architectures"][0]
         target_cls = get_model_class(target_arch)
         if target_cls is not type(self):
@@ -162,7 +169,7 @@ class MuseGlimmerAssistantModel(TextModel):
         if mask_token_id is not None:
             self.gguf_writer.add_mask_token_id(int(mask_token_id))
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         h = self.hparams
 

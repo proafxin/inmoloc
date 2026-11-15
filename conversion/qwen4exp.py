@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from typing import Iterable, cast
+from typing import TYPE_CHECKING, cast
 
+import numpy as np
 import torch
 from torch import Tensor
 
 import gguf
-import numpy as np
+from conversion.base import ModelBase
+from conversion.qwen import _LinearAttentionVReorderBase, _Qwen35MRopeMixin
+from conversion.qwen3vl import Qwen3VLVisionModel
 
-from .base import ModelBase
-from .qwen import _LinearAttentionVReorderBase, _Qwen35MRopeMixin
-from .qwen3vl import Qwen3VLVisionModel
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 @ModelBase.register("Qwen4ExpForConditionalGeneration", "Qwen4ExpForCausalLM")
@@ -29,7 +31,7 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
     supports_mtp_export = False
     no_mtp = True
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # only the shard names, so the table itself is never held
         self._ple_shards: dict[int, str] = {}
@@ -48,9 +50,10 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
                 if t.dtype != torch.int64:
                     t = t.to(torch.int64)
                 return [int(x) for x in t.tolist()]
-        raise ValueError(f"PLE constant {suffix!r} missing from the checkpoint")
+        msg = f"PLE constant {suffix!r} missing from the checkpoint"
+        raise ValueError(msg)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         hp = self.hparams
 
@@ -79,18 +82,15 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
         self.gguf_writer.add_ple_eos_token_id(self._eos_token_id())
         # an image is decoded as an embeddings-only batch, so the graph has no placeholder
         # ids to hash; carry the id and let it stand in for those positions
-        _img = self._image_token_id()
-        if _img is not None:
-            self.gguf_writer.add_ple_image_token_id(int(_img))
+        img = self._image_token_id()
+        if img is not None:
+            self.gguf_writer.add_ple_image_token_id(int(img))
         if self._ple_row_dim is not None:
             self.gguf_writer.add_embedding_length_per_layer_input(self._ple_row_dim)
 
-        self.gguf_writer.add_ple_layer_multipliers(
-            self._read_hash_constants("ple_embedding.layer_multipliers"))
-        self.gguf_writer.add_ple_head_offsets(
-            self._read_hash_constants("ple_embedding.ngram_heads_offsets"))
-        self.gguf_writer.add_ple_head_vocab_sizes(
-            self._read_hash_constants("ple_embedding.ngram_heads_vocab_sizes"))
+        self.gguf_writer.add_ple_layer_multipliers(self._read_hash_constants("ple_embedding.layer_multipliers"))
+        self.gguf_writer.add_ple_head_offsets(self._read_hash_constants("ple_embedding.ngram_heads_offsets"))
+        self.gguf_writer.add_ple_head_vocab_sizes(self._read_hash_constants("ple_embedding.ngram_heads_vocab_sizes"))
 
     def _image_token_id(self) -> int | None:
         img = self.hparams.get("image_token_id")
@@ -131,8 +131,15 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
             ]
 
         # Gemma zero-centred gammas the inherited norm.weight rule misses
-        if name.endswith((".ple.norm_key.weight", ".ple.norm_query.weight", ".ple.norm_conv.weight",
-                          ".indexer.q_layernorm.weight", ".indexer.k_layernorm.weight")):
+        if name.endswith(
+            (
+                ".ple.norm_key.weight",
+                ".ple.norm_query.weight",
+                ".ple.norm_conv.weight",
+                ".indexer.q_layernorm.weight",
+                ".indexer.k_layernorm.weight",
+            )
+        ):
             return [(self.map_tensor_name(name), data_torch + 1)]
 
         if name.endswith(".ple.conv1d.weight"):
@@ -159,8 +166,8 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
         for shard in shards:
             shape = self.model_tensors[shard]().shape
             if int(shape[-1]) != self._ple_row_dim:
-                raise ValueError(
-                    f"PLE shard {shard} has row dim {int(shape[-1])}, expected {self._ple_row_dim}")
+                msg = f"PLE shard {shard} has row dim {int(shape[-1])}, expected {self._ple_row_dim}"
+                raise ValueError(msg)
             rows += int(shape[0])
 
         table = gguf.LazyChunkedTensor(
@@ -169,24 +176,24 @@ class Qwen4ExpTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
             dtype=np.float32,
         )
         gguf_name = gguf.TENSOR_NAMES[gguf.MODEL_TENSOR.PER_LAYER_TOKEN_EMBD]
-        return [(gguf_name + ".weight", cast(Tensor, table))]
+        return [(gguf_name + ".weight", cast("Tensor", table))]
 
     def _load_ple_shard(self, name: str):
         def load() -> np.ndarray:
-            from .base import LazyTorchTensor
+            from conversion.base import LazyTorchTensor
 
             # a fresh lazy tensor every call, or to_eager() memoizes every shard
             eager = LazyTorchTensor.to_eager(self.model_tensors[name]())
             return eager.to(torch.float32).contiguous().numpy()
+
         return load
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
         n_parts = self.hparams.get("split_ngram_parts", 0)
         if self._ple_shards and len(self._ple_shards) != n_parts:
-            raise ValueError(
-                f"got {len(self._ple_shards)} PLE embedding shards, expected {n_parts}"
-            )
+            msg = f"got {len(self._ple_shards)} PLE embedding shards, expected {n_parts}"
+            raise ValueError(msg)
 
 
 @ModelBase.register("Qwen4ExpForConditionalGeneration")

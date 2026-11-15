@@ -149,14 +149,7 @@ int llama_server(common_params & params, int argc, char ** argv) {
             params.n_batch = params.n_ubatch;
         }
 
-        // auto: as many requests at once as fit in the memory, which is computed at startup
-        if (params.n_parallel < 0) {
-            SRV_TRC("%s", "n_parallel is set to auto, it becomes the most requests that fit in the memory\n");
-
-            params.n_parallel = (int32_t) llama_max_parallel_sequences();
-        }
-
-        // the memory budget sizes the KV cache too, see --ctx-typical; --ctx-size is then the most it holds
+        // the memory budget sizes the KV cache too; --ctx-size is then the most it holds
         params.vram_budget_ctx = true;
     }
 

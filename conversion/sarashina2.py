@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch import Tensor
 
-from .base import ModelBase, gguf
-
-from .llama import LlamaModel
-from .qwenvl import Qwen2VLVisionModel
+from conversion.base import ModelBase, gguf
+from conversion.llama import LlamaModel
+from conversion.qwenvl import Qwen2VLVisionModel
 
 
 @ModelBase.register("Sarashina2VisionForCausalLM")
@@ -29,6 +30,6 @@ class Sarashina2VLTextModel(LlamaModel):
 @ModelBase.register("Sarashina2VisionForCausalLM")
 @ModelBase.example("sbintuitions/sarashina2.2-vision-3b")
 class Sarashina2VLVisionModel(Qwen2VLVisionModel):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.global_config['model_type'] = "qwen2_vl"
+        self.global_config["model_type"] = "qwen2_vl"

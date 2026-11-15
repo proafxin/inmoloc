@@ -11,8 +11,9 @@ Each test case contains:
 
 import argparse
 import json
-import requests
 import sys
+
+import requests
 
 # ---------------------------------------------------------------------------
 # Color / formatting helpers
@@ -35,42 +36,38 @@ def _print(text="", end="\n"):
     sys.stdout.flush()
 
 
-def print_header(title):
+def print_header(title) -> None:
     bar = "─" * 60
     _print(f"\n{BOLD}{CYAN}┌{bar}┐{RESET}")
-    _print(
-        f"{BOLD}{CYAN}│  {WHITE}{title}{CYAN}{' ' * max(0, 58 - len(title))}│{RESET}"
-    )
+    _print(f"{BOLD}{CYAN}│  {WHITE}{title}{CYAN}{' ' * max(0, 58 - len(title))}│{RESET}")
     _print(f"{BOLD}{CYAN}└{bar}┘{RESET}")
 
 
-def print_tool_call(name, args):
+def print_tool_call(name, args) -> None:
     args_str = json.dumps(args)
-    _print(
-        f"\n  {BOLD}{YELLOW}⚙ tool call{RESET}  {CYAN}{name}{RESET}{DIM}({args_str}){RESET}"
-    )
+    _print(f"\n  {BOLD}{YELLOW}⚙ tool call{RESET}  {CYAN}{name}{RESET}{DIM}({args_str}){RESET}")
 
 
-def print_tool_result(result):
+def print_tool_result(result) -> None:
     preview = result[:160] + ("…" if len(result) > 160 else "")
     _print(f"  {DIM}{BLUE}↳ result{RESET}    {DIM}{preview}{RESET}")
 
 
-def print_model_output(text):
+def print_model_output(text) -> None:
     # printed inline during streaming; prefix with a visual marker on first chunk
     sys.stdout.write(text)
     sys.stdout.flush()
 
 
-def print_pass(reason):
+def print_pass(reason) -> None:
     _print(f"\n{BOLD}{GREEN}✔ PASS{RESET}  {reason}")
 
 
-def print_fail(reason):
+def print_fail(reason) -> None:
     _print(f"\n{BOLD}{RED}✘ FAIL{RESET}  {reason}")
 
 
-def print_info(msg):
+def print_info(msg) -> None:
     _print(f"{DIM}{msg}{RESET}")
 
 
@@ -143,9 +140,7 @@ def chat_completion(url, messages, tools=None, stream=False, force_tools=False):
                     if "name" in tc["function"]:
                         tool_calls[idx]["function"]["name"] += tc["function"]["name"]
                     if "arguments" in tc["function"]:
-                        tool_calls[idx]["function"]["arguments"] += tc["function"][
-                            "arguments"
-                        ]
+                        tool_calls[idx]["function"]["arguments"] += tc["function"]["arguments"]
     else:
         data = response.json()
         choices = data.get("choices", [])
@@ -164,8 +159,8 @@ def chat_completion(url, messages, tools=None, stream=False, force_tools=False):
 
 
 def all_tools_called(tools, all_tool_calls):
-    all_tool_names = set([tc["function"]["name"] for tc in tools])
-    all_called_tool_names = set([tc["function"]["name"] for tc in all_tool_calls])
+    all_tool_names = {tc["function"]["name"] for tc in tools}
+    all_called_tool_names = {tc["function"]["name"] for tc in all_tool_calls}
     return all_tool_names == all_called_tool_names
 
 
@@ -181,8 +176,14 @@ def run_agentic_loop(url, messages, tools, mock_tool_responses, stream, max_turn
     msgs = list(messages)
     all_tool_calls: list[dict] = []
 
-    for t in range(max_turns):
-        result = chat_completion(url, msgs, tools=tools, stream=stream, force_tools=(force_tools and not all_tools_called(tools, all_tool_calls)))
+    for _t in range(max_turns):
+        result = chat_completion(
+            url,
+            msgs,
+            tools=tools,
+            stream=stream,
+            force_tools=(force_tools and not all_tools_called(tools, all_tool_calls)),
+        )
         if result is None:
             return all_tool_calls, None
 
@@ -192,7 +193,7 @@ def run_agentic_loop(url, messages, tools, mock_tool_responses, stream, max_turn
         if not tcs:
             # Print a visual separator before the final model response
             if content:
-                _print(f"\n{DIM}{'·'*60}{RESET}")
+                _print(f"\n{DIM}{'·' * 60}{RESET}")
                 _print(f"{DIM}  model response:{RESET}\n")
             return all_tool_calls, content
 
@@ -221,10 +222,7 @@ def run_agentic_loop(url, messages, tools, mock_tool_responses, stream, max_turn
             print_tool_call(tool_name, args)
 
             mock_fn = mock_tool_responses.get(tool_name)
-            if mock_fn:
-                tool_result = mock_fn(args)
-            else:
-                tool_result = json.dumps({"error": f"Unknown tool: {tool_name}"})
+            tool_result = mock_fn(args) if mock_fn else json.dumps({"error": f"Unknown tool: {tool_name}"})
 
             print_tool_result(tool_result)
 
@@ -255,7 +253,7 @@ def run_test(url, test_case, stream, force_tools):
         tools=test_case["tools"],
         mock_tool_responses=test_case["mock_tool_responses"],
         stream=stream,
-        force_tools=force_tools
+        force_tools=force_tools,
     )
 
     if final_content is None and not all_tool_calls:
@@ -425,7 +423,7 @@ AZZOO_TEST_CASE = {
         "azzoo_get_product": lambda _: json.dumps(_AZZOO_PRODUCT_RESULT),
         "azzoo_get_reviews": lambda _: json.dumps(_AZZOO_REVIEWS_RESULT),
     },
-    "validate": lambda tcs, content: _validate_azzoo(tcs, content),
+    "validate": _validate_azzoo,
 }
 
 
@@ -479,8 +477,7 @@ _FITNESS_TOOLS = [
         "function": {
             "name": "get_exercises",
             "description": (
-                "Fetch a list of exercises filtered by muscle group, difficulty, category, "
-                "and/or force type."
+                "Fetch a list of exercises filtered by muscle group, difficulty, category, and/or force type."
             ),
             "parameters": {
                 "type": "object",
@@ -552,7 +549,7 @@ FITNESS_TEST_CASE = {
         "calculate_bmi": lambda _: json.dumps(_BMI_RESULT),
         "get_exercises": lambda _: json.dumps(_EXERCISES_RESULT),
     },
-    "validate": lambda tcs, content: _validate_fitness(tcs, content),
+    "validate": _validate_fitness,
 }
 
 
@@ -589,9 +586,7 @@ _COMMUNITY_TOOLS = [
         "type": "function",
         "function": {
             "name": "get_trending_questions",
-            "description": (
-                "Fetch commonly asked questions on a topic from search engine 'People Also Ask' boxes."
-            ),
+            "description": ("Fetch commonly asked questions on a topic from search engine 'People Also Ask' boxes."),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -690,7 +685,7 @@ COMMUNITY_CLASS_TEST_CASE = {
         "get_trending_questions": lambda _: json.dumps(_TRENDING_QUESTIONS_RESULT),
         "search_mobile_apps": lambda _: json.dumps(_APPS_RESULT),
     },
-    "validate": lambda tcs, content: _validate_community(tcs, content),
+    "validate": _validate_community,
 }
 
 
@@ -698,9 +693,7 @@ def _validate_community(tcs, content):
     names = [tc["function"]["name"] for tc in tcs]
     if not names:
         return False, "No tool calls made"
-    missing = [
-        t for t in ("get_trending_questions", "search_mobile_apps") if t not in names
-    ]
+    missing = [t for t in ("get_trending_questions", "search_mobile_apps") if t not in names]
     if missing:
         return False, f"Missing expected tool calls: {missing}; got: {names}"
     if not content:
@@ -790,7 +783,7 @@ GEO_TEST_CASE = {
     "mock_tool_responses": {
         "lookup_ip_geolocation": _geo_mock,
     },
-    "validate": lambda tcs, content: _validate_geo(tcs, content),
+    "validate": _validate_geo,
 }
 
 
@@ -1038,7 +1031,7 @@ EV_FLEET_TEST_CASE = {
         "search_commercial_properties": lambda _: json.dumps(_PROPERTIES_RESULT),
         "get_video_recommendations": lambda _: json.dumps(_VIDEOS_RESULT),
     },
-    "validate": lambda tcs, content: _validate_ev(tcs, content),
+    "validate": _validate_ev,
 }
 
 
@@ -1091,21 +1084,13 @@ ALL_TEST_CASES = [
 # ---------------------------------------------------------------------------
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Test local-inference-server tool-calling capability."
-    )
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Test local-inference-server tool-calling capability.")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", default=8080, type=int)
-    parser.add_argument(
-        "--no-stream", action="store_true", help="Disable streaming mode tests"
-    )
-    parser.add_argument(
-        "--stream-only", action="store_true", help="Only run streaming mode tests"
-    )
-    parser.add_argument(
-        "--force-tools", action="store_true", help="Change tool mode to forced instead of auto"
-    )
+    parser.add_argument("--no-stream", action="store_true", help="Disable streaming mode tests")
+    parser.add_argument("--stream-only", action="store_true", help="Only run streaming mode tests")
+    parser.add_argument("--force-tools", action="store_true", help="Change tool mode to forced instead of auto")
     parser.add_argument(
         "--test",
         help="Run only the test whose name contains this substring (case-insensitive)",
@@ -1141,9 +1126,9 @@ def main():
                 passed += 1
 
     color = GREEN if passed == total else RED
-    _print(f"\n{BOLD}{color}{'─'*60}{RESET}")
+    _print(f"\n{BOLD}{color}{'─' * 60}{RESET}")
     _print(f"{BOLD}{color}  Results: {passed}/{total} passed{RESET}")
-    _print(f"{BOLD}{color}{'─'*60}{RESET}\n")
+    _print(f"{BOLD}{color}{'─' * 60}{RESET}\n")
     sys.exit(0 if passed == total else 1)
 
 

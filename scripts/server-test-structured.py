@@ -22,9 +22,10 @@ Each test case contains:
 
 import argparse
 import json
-import requests
 import sys
 from typing import Any, cast
+
+import requests
 
 # ---------------------------------------------------------------------------
 # Color / formatting helpers
@@ -47,45 +48,41 @@ def _print(text="", end="\n"):
     sys.stdout.flush()
 
 
-def print_header(title):
+def print_header(title) -> None:
     bar = "─" * 60
     _print(f"\n{BOLD}{CYAN}┌{bar}┐{RESET}")
-    _print(
-        f"{BOLD}{CYAN}│  {WHITE}{title}{CYAN}{' ' * max(0, 58 - len(title))}│{RESET}"
-    )
+    _print(f"{BOLD}{CYAN}│  {WHITE}{title}{CYAN}{' ' * max(0, 58 - len(title))}│{RESET}")
     _print(f"{BOLD}{CYAN}└{bar}┘{RESET}")
 
 
-def print_tool_call(name, args):
+def print_tool_call(name, args) -> None:
     args_str = json.dumps(args)
-    _print(
-        f"\n  {BOLD}{YELLOW}⚙ tool call{RESET}  {CYAN}{name}{RESET}{DIM}({args_str}){RESET}"
-    )
+    _print(f"\n  {BOLD}{YELLOW}⚙ tool call{RESET}  {CYAN}{name}{RESET}{DIM}({args_str}){RESET}")
 
 
-def print_tool_result(result):
+def print_tool_result(result) -> None:
     preview = result[:160] + ("…" if len(result) > 160 else "")
     _print(f"  {DIM}{BLUE}↳ result{RESET}    {DIM}{preview}{RESET}")
 
 
-def print_model_output(text):
+def print_model_output(text) -> None:
     sys.stdout.write(text)
     sys.stdout.flush()
 
 
-def print_pass(reason):
+def print_pass(reason) -> None:
     _print(f"\n{BOLD}{GREEN}✔ PASS{RESET}  {reason}")
 
 
-def print_fail(reason):
+def print_fail(reason) -> None:
     _print(f"\n{BOLD}{RED}✘ FAIL{RESET}  {reason}")
 
 
-def print_info(msg):
+def print_info(msg) -> None:
     _print(f"{DIM}{msg}{RESET}")
 
 
-def print_schema_note(label, rf, extra_body=None):
+def print_schema_note(label, rf, extra_body=None) -> None:
     kind = rf.get("type", "?")
     name = ""
     if kind == "json_schema":
@@ -93,8 +90,7 @@ def print_schema_note(label, rf, extra_body=None):
     elif kind == "json_object" and extra_body and "json_schema" in extra_body:
         extra_schema = extra_body["json_schema"] or {}
         name = extra_schema.get("title") or "extra_body.json_schema"
-    _print(f"{DIM}{MAGENTA}  ⟐ response_format [{label}]: {kind}"
-           f"{(' / ' + name) if name else ''}{RESET}")
+    _print(f"{DIM}{MAGENTA}  ⟐ response_format [{label}]: {kind}{(' / ' + name) if name else ''}{RESET}")
 
 
 # ---------------------------------------------------------------------------
@@ -102,8 +98,7 @@ def print_schema_note(label, rf, extra_body=None):
 # ---------------------------------------------------------------------------
 
 
-def chat_completion(url, messages, tools=None, response_format=None, stream=False,
-                    extra_body=None):
+def chat_completion(url, messages, tools=None, response_format=None, stream=False, extra_body=None):
     payload = {
         "messages": messages,
         "stream": stream,
@@ -168,9 +163,7 @@ def chat_completion(url, messages, tools=None, response_format=None, stream=Fals
                     if "name" in tc["function"]:
                         tool_calls[idx]["function"]["name"] += tc["function"]["name"]
                     if "arguments" in tc["function"]:
-                        tool_calls[idx]["function"]["arguments"] += tc["function"][
-                            "arguments"
-                        ]
+                        tool_calls[idx]["function"]["arguments"] += tc["function"]["arguments"]
     else:
         data = response.json()
         choices = data.get("choices", [])
@@ -189,8 +182,14 @@ def chat_completion(url, messages, tools=None, response_format=None, stream=Fals
 
 
 def run_tool_loop(
-    url, messages, tools, mock_tool_responses, stream, response_format=None,
-    extra_body=None, max_turns=6,
+    url,
+    messages,
+    tools,
+    mock_tool_responses,
+    stream,
+    response_format=None,
+    extra_body=None,
+    max_turns=6,
 ):
     """
     Drive the tool-call loop. If response_format is provided it is applied to
@@ -201,7 +200,11 @@ def run_tool_loop(
 
     for _ in range(max_turns):
         result = chat_completion(
-            url, msgs, tools=tools, response_format=response_format, stream=stream,
+            url,
+            msgs,
+            tools=tools,
+            response_format=response_format,
+            stream=stream,
             extra_body=extra_body,
         )
         if result is None:
@@ -237,10 +240,7 @@ def run_tool_loop(
             print_tool_call(tool_name, args)
 
             mock_fn = mock_tool_responses.get(tool_name) if mock_tool_responses else None
-            if mock_fn:
-                tool_result = mock_fn(args)
-            else:
-                tool_result = json.dumps({"error": f"Unknown tool: {tool_name}"})
+            tool_result = mock_fn(args) if mock_fn else json.dumps({"error": f"Unknown tool: {tool_name}"})
 
             print_tool_result(tool_result)
 
@@ -318,8 +318,7 @@ def run_test(url, test_case, stream):
             msgs.append({"role": "assistant", "content": interim_content})
         followup = test_case.get(
             "followup",
-            "Now output the answer strictly as JSON matching the provided schema. "
-            "Do not include commentary.",
+            "Now output the answer strictly as JSON matching the provided schema. Do not include commentary.",
         )
         msgs.append({"role": "user", "content": followup})
 
@@ -327,7 +326,11 @@ def run_test(url, test_case, stream):
         # model focuses on producing the schema-constrained answer.
         _print(f"\n{DIM}{MAGENTA}  ⟐ follow-up turn with response_format applied{RESET}")
         result = chat_completion(
-            url, msgs, tools=None, response_format=response_format, stream=stream,
+            url,
+            msgs,
+            tools=None,
+            response_format=response_format,
+            stream=stream,
             extra_body=extra_body,
         )
         final_content = result["content"] if result else None
@@ -421,8 +424,14 @@ def _validate_book(parsed):
     if not isinstance(parsed["year"], int) or parsed["year"] != 1965:
         return False, f"year should be 1965, got {parsed['year']!r}"
     if parsed["genre"] not in {
-        "fiction", "non-fiction", "fantasy", "sci-fi", "mystery",
-        "biography", "history", "other",
+        "fiction",
+        "non-fiction",
+        "fantasy",
+        "sci-fi",
+        "mystery",
+        "biography",
+        "history",
+        "other",
     }:
         return False, f"genre not in enum: {parsed['genre']!r}"
     if not isinstance(parsed["page_count"], int) or parsed["page_count"] <= 0:
@@ -611,7 +620,7 @@ def _validate_recipe(parsed):
     for i, ing in enumerate(ings):
         if not isinstance(ing, dict):
             return False, f"ingredient[{i}] is not an object: {ing!r}"
-        ing_d = cast(dict[str, Any], ing)
+        ing_d = cast("dict[str, Any]", ing)
         item_val = ing_d.get("item")
         qty_val = ing_d.get("quantity")
         if item_val is None or qty_val is None:
@@ -664,9 +673,9 @@ _SHOP_TOOLS = [
 
 _SHOP_SEARCH_RESULT = {
     "results": [
-        {"product_id": "LAP-001", "title": "AeroBook 13 Pro",       "price": 1399.0, "rating": 4.7},
-        {"product_id": "LAP-002", "title": "QuantumSlim 14",        "price": 1199.0, "rating": 4.4},
-        {"product_id": "LAP-003", "title": "NimbusWork Ultra 15",   "price":  999.0, "rating": 4.2},
+        {"product_id": "LAP-001", "title": "AeroBook 13 Pro", "price": 1399.0, "rating": 4.7},
+        {"product_id": "LAP-002", "title": "QuantumSlim 14", "price": 1199.0, "rating": 4.4},
+        {"product_id": "LAP-003", "title": "NimbusWork Ultra 15", "price": 999.0, "rating": 4.2},
     ],
 }
 _SHOP_PRODUCT_DETAILS = {
@@ -728,9 +737,9 @@ _SHOP_COMPARISON_SCHEMA = {
                         "additionalProperties": False,
                         "properties": {
                             "product_id": {"type": "string"},
-                            "title":      {"type": "string"},
-                            "score":      {"type": "number"},
-                            "reason":     {"type": "string"},
+                            "title": {"type": "string"},
+                            "score": {"type": "number"},
+                            "reason": {"type": "string"},
                         },
                         "required": ["product_id", "title", "score", "reason"],
                     },
@@ -787,13 +796,12 @@ def _validate_shop_comparison(parsed, tcs):
     for i, c in enumerate(cands):
         if not isinstance(c, dict):
             return False, f"candidate[{i}] not an object: {c!r}"
-        c_d = cast(dict[str, Any], c)
+        c_d = cast("dict[str, Any]", c)
         pid = c_d.get("product_id")
         title = c_d.get("title")
         score = c_d.get("score")
         reason = c_d.get("reason")
-        for k, v in (("product_id", pid), ("title", title),
-                     ("score", score), ("reason", reason)):
+        for k, v in (("product_id", pid), ("title", title), ("score", score), ("reason", reason)):
             if v is None:
                 return False, f"candidate[{i}] missing {k}: {c!r}"
         if pid not in valid_ids:
@@ -804,10 +812,7 @@ def _validate_shop_comparison(parsed, tcs):
     recommendation = parsed["recommendation"]
     if recommendation not in valid_ids and recommendation not in candidate_pids:
         return False, f"recommendation {recommendation!r} not in candidates"
-    return True, (
-        f"tools={names}; recommended={parsed['recommendation']}; "
-        f"{len(cands)} ranked candidates"
-    )
+    return True, (f"tools={names}; recommended={parsed['recommendation']}; {len(cands)} ranked candidates")
 
 
 # ---- Test 5: Multi-step research then structured report (after_tools) ----
@@ -899,8 +904,12 @@ _RESEARCH_REPORT_SCHEMA = {
                 "suitable_for_tourism": {"type": "boolean"},
             },
             "required": [
-                "country", "capital", "population",
-                "climate_summary", "highlights", "suitable_for_tourism",
+                "country",
+                "capital",
+                "population",
+                "climate_summary",
+                "highlights",
+                "suitable_for_tourism",
             ],
         },
     },
@@ -940,8 +949,12 @@ def _validate_country_report(parsed, tcs):
         if required_tool not in names:
             return False, f"missing tool call {required_tool!r}: got {names}"
     required = {
-        "country", "capital", "population",
-        "climate_summary", "highlights", "suitable_for_tourism",
+        "country",
+        "capital",
+        "population",
+        "climate_summary",
+        "highlights",
+        "suitable_for_tourism",
     }
     missing = required - parsed.keys()
     if missing:
@@ -961,10 +974,7 @@ def _validate_country_report(parsed, tcs):
         return False, "each highlight must be a non-empty string"
     if not isinstance(parsed["suitable_for_tourism"], bool):
         return False, f"suitable_for_tourism must be bool: {parsed['suitable_for_tourism']!r}"
-    return True, (
-        f"tools={names}; report for {parsed['country']} "
-        f"(pop {parsed['population']}, {len(hls)} highlights)"
-    )
+    return True, (f"tools={names}; report for {parsed['country']} (pop {parsed['population']}, {len(hls)} highlights)")
 
 
 # ---------------------------------------------------------------------------
@@ -986,18 +996,12 @@ ALL_TEST_CASES = [
 # ---------------------------------------------------------------------------
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Test local-inference-server structured-output capability."
-    )
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Test local-inference-server structured-output capability.")
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", default=8080, type=int)
-    parser.add_argument(
-        "--no-stream", action="store_true", help="Disable streaming mode tests"
-    )
-    parser.add_argument(
-        "--stream-only", action="store_true", help="Only run streaming mode tests"
-    )
+    parser.add_argument("--no-stream", action="store_true", help="Disable streaming mode tests")
+    parser.add_argument("--stream-only", action="store_true", help="Only run streaming mode tests")
     parser.add_argument(
         "--test",
         help="Run only the test whose name contains this substring (case-insensitive)",

@@ -103,7 +103,6 @@ struct test_context {
         cparams.n_outputs_max_per_seq = n_outputs_max_per_seq;
         cparams.samplers = configs.data();
         cparams.n_samplers = configs.size();
-        cparams.kv_unified = true;
 
         // If n_seq_max is not specified, calculate it from configs
         if (n_seq_max < 0) {

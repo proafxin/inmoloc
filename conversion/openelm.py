@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("OpenELMForCausalLM")
@@ -14,7 +16,7 @@ class OpenELMModel(TextModel):
     model_arch = gguf.MODEL_ARCH.OPENELM
 
     @staticmethod
-    def _make_divisible(v: float | int, divisor: int) -> int:
+    def _make_divisible(v: float, divisor: int) -> int:
         # ref: https://huggingface.co/apple/OpenELM-270M-Instruct/blob/eb111ff2e6724348e5b905984063d4064d4bc579/configuration_openelm.py#L34-L38
         new_v = max(divisor, int(v + divisor / 2) // divisor * divisor)
         # Make sure that round down does not go down by more than 10%.
@@ -22,7 +24,7 @@ class OpenELMModel(TextModel):
             new_v += divisor
         return new_v
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         ffn_multipliers: list[float] = self.hparams["ffn_multipliers"]
@@ -31,20 +33,21 @@ class OpenELMModel(TextModel):
         self._num_kv_heads: list[int] = self.hparams["num_kv_heads"]
         self._num_query_heads: list[int] = self.hparams["num_query_heads"]
         self._ffn_dims: list[int] = [
-            OpenELMModel._make_divisible(multiplier * self._n_embd, ffn_dim_divisor)
-            for multiplier in ffn_multipliers
+            OpenELMModel._make_divisible(multiplier * self._n_embd, ffn_dim_divisor) for multiplier in ffn_multipliers
         ]
-        assert isinstance(self._num_kv_heads, list) and isinstance(self._num_kv_heads[0], int)
-        assert isinstance(self._num_query_heads, list) and isinstance(self._num_query_heads[0], int)
+        assert isinstance(self._num_kv_heads, list)
+        assert isinstance(self._num_kv_heads[0], int)
+        assert isinstance(self._num_query_heads, list)
+        assert isinstance(self._num_query_heads[0], int)
 
     # Uses the tokenizer from meta-llama/Llama-2-7b-hf
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         try:
             self._set_vocab_sentencepiece()
         except FileNotFoundError:
             self._set_vocab_builtin("llama-spm", self.hparams["vocab_size"])
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         n_embd = self._n_embd
         head_dim = self.hparams["head_dim"]
         rot_pct = 1.0

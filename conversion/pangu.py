@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
-
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
+import pathlib
+
+from conversion.base import ModelBase, TextModel, gguf, logger
 
 
 @ModelBase.register("PanguEmbeddedForCausalLM")
@@ -15,17 +18,17 @@ from .base import ModelBase, TextModel, gguf, logger
 class PanguEmbeddedModel(TextModel):
     model_arch = gguf.MODEL_ARCH.PANGU_EMBED
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_sentencepiece()
 
-        tokenizer_config_file = self.dir_model / 'tokenizer_config.json'
+        tokenizer_config_file = self.dir_model / "tokenizer_config.json"
         if tokenizer_config_file.is_file():
-            with open(tokenizer_config_file, "r", encoding="utf-8") as f:
+            with pathlib.Path(tokenizer_config_file).open("r", encoding="utf-8") as f:
                 tokenizer_config_json = json.load(f)
                 if "add_prefix_space" in tokenizer_config_json:
                     self.gguf_writer.add_add_space_prefix(tokenizer_config_json["add_prefix_space"])
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         hparams = self.hparams
         self.gguf_writer.add_vocab_size(hparams["vocab_size"])
@@ -40,8 +43,7 @@ class PanguEmbeddedModel(TextModel):
             self.gguf_writer.add_value_length(rope_dim)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        if name == "lm_head.weight":
-            if self.hparams.get("tie_word_embeddings", False):
-                logger.info("Skipping tied output layer 'lm_head.weight'")
-                return
+        if name == "lm_head.weight" and self.hparams.get("tie_word_embeddings", False):
+            logger.info("Skipping tied output layer 'lm_head.weight'")
+            return
         yield from super().modify_tensors(data_torch, name, bid)

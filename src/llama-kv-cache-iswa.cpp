@@ -15,10 +15,8 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
         const llama_model & model,
                 ggml_type   type_k,
                 ggml_type   type_v,
-                     bool   v_trans,
                      bool   offload,
                      bool   swa_full,
-                     bool   unified,
                  uint32_t   kv_size,
                  uint32_t   n_seq_max,
                  uint32_t   n_ubatch,
@@ -26,9 +24,12 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
            llama_memory_t   mem_other,
     const layer_filter_cb & filter,
     const  layer_reuse_cb & reuse,
-    const  layer_share_cb & share) :
-    llama_kv_cache_iswa(model, model.hparams, type_k, type_v, v_trans, offload, swa_full, unified,
-            kv_size, n_seq_max, n_ubatch, n_pad, mem_other, filter, reuse, share) {
+    const  layer_share_cb & share,
+    const std::shared_ptr<llama_box> & box,
+    const std::shared_ptr<llama_box> & box_ref,
+    int32_t box_il_offset) :
+    llama_kv_cache_iswa(model, model.hparams, type_k, type_v, offload, swa_full,
+            kv_size, n_seq_max, n_ubatch, n_pad, mem_other, filter, reuse, share, box, box_ref, box_il_offset) {
 }
 
 llama_kv_cache_iswa::llama_kv_cache_iswa(
@@ -36,10 +37,8 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
         const llama_hparams & hparams,
                 ggml_type   type_k,
                 ggml_type   type_v,
-                     bool   v_trans,
                      bool   offload,
                      bool   swa_full,
-                     bool   unified,
                  uint32_t   kv_size,
                  uint32_t   n_seq_max,
                  uint32_t   n_ubatch,
@@ -47,7 +46,10 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
            llama_memory_t   mem_other,
     const layer_filter_cb & filter,
     const  layer_reuse_cb & reuse,
-    const  layer_share_cb & share) : unified(unified) {
+    const  layer_share_cb & share,
+    const std::shared_ptr<llama_box> & box,
+    const std::shared_ptr<llama_box> & box_ref,
+    int32_t box_il_offset) {
 
     // chain filters
     const layer_filter_cb filter_base = [&](int32_t il) {
@@ -70,13 +72,18 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
 
     // note: the SWA cache is always padded to 256 for performance
     //       https://github.com/ggml-org/llama.cpp/issues/17037
-    uint32_t size_swa = GGML_PAD(std::min(size_base, hparams.n_swa*(unified ? n_seq_max : 1) + n_ubatch), 256);
+    uint32_t size_swa = GGML_PAD(std::min(size_base, hparams.n_swa*n_seq_max + n_ubatch), 256);
 
     // when using full-size SWA cache, we set the SWA cache size to be equal to the base cache size
     if (swa_full) {
         LLAMA_LOG_WARN("%s: using full-size SWA cache (ref: %s)\n",
                 __func__, "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
 
+        size_swa = size_base;
+    }
+
+    // a block holds the rows of every layer: both caches have the cells of the box, each with its own layers
+    if (box || box_ref) {
         size_swa = size_base;
     }
 
@@ -94,15 +101,15 @@ llama_kv_cache_iswa::llama_kv_cache_iswa(
 
     kv_base = std::make_unique<llama_kv_cache>(
             model, hparams, type_k, type_v,
-            v_trans, offload, unified, size_base, n_seq_max, n_pad,
-            0, LLAMA_SWA_TYPE_NONE, mem_other_base, filter_base, reuse, share);
+            offload, size_base, n_seq_max, n_pad,
+            0, LLAMA_SWA_TYPE_NONE, mem_other_base, filter_base, reuse, share, "", nullptr, box_il_offset, box_ref, box);
 
     LLAMA_LOG_INFO("%s: creating     SWA KV cache, size = %u cells\n", __func__, size_swa);
 
     kv_swa = std::make_unique<llama_kv_cache>(
             model, hparams, type_k, type_v,
-            v_trans, offload, unified, size_swa, n_seq_max, n_pad,
-            hparams.n_swa, hparams.swa_type, mem_other_swa, filter_swa, reuse, share);
+            offload, size_swa, n_seq_max, n_pad,
+            hparams.n_swa, hparams.swa_type, mem_other_swa, filter_swa, reuse, share, "", nullptr, box_il_offset, box_ref, box);
 }
 
 void llama_kv_cache_iswa::clear(bool data) {
@@ -150,6 +157,12 @@ llama_pos llama_kv_cache_iswa::seq_pos_max(llama_seq_id seq_id) const {
 
 std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_iswa::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> mb = kv_base->memory_breakdown();
+
+    // both caches count the one box
+    if (get_box_shared()) {
+        return mb;
+    }
+
     for (const auto & buft_size : kv_swa->memory_breakdown()) {
         mb[buft_size.first] += buft_size.second;
     }
@@ -161,11 +174,6 @@ llama_memory_context_ptr llama_kv_cache_iswa::init_batch(llama_batch_allocr & ba
 
     // first try simple split
     do {
-        if (!unified) {
-            // requires equal splits, so we skip the simple split
-            break;
-        }
-
         balloc.split_reset();
 
         std::vector<llama_ubatch> ubatches;
@@ -206,7 +214,7 @@ llama_memory_context_ptr llama_kv_cache_iswa::init_batch(llama_batch_allocr & ba
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = balloc.split_equal(n_ubatch, !unified, 0);
+            auto ubatch = balloc.split_equal(n_ubatch, false, 0);
 
             if (ubatch.n_tokens == 0) {
                 break;

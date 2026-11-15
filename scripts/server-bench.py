@@ -2,26 +2,25 @@
 
 import argparse
 import json
+import logging
 import os
+import pathlib
 import random
 import sqlite3
 import subprocess
 from time import sleep, time
-from typing import Optional, Union
 
 import datasets
-import logging
 import matplotlib.pyplot as plt
 import numpy as np
 import requests
 from tqdm.contrib.concurrent import thread_map
 
-
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("server-bench")
 
 
-def get_prompts_text(dataset_name: str, n_prompts: int) -> Optional[list[str]]:
+def get_prompts_text(dataset_name: str, n_prompts: int) -> list[str] | None:
     ret = []
     if dataset_name.lower() == "mmlu":
         logger.info("Loading MMLU dataset...")
@@ -33,7 +32,9 @@ def get_prompts_text(dataset_name: str, n_prompts: int) -> Optional[list[str]]:
     return ret
 
 
-def get_prompt_lengths_rng(n_prompts: int, prompt_length_min: int, prompt_length_max: int, seed_offset: int) -> list[int]:
+def get_prompt_lengths_rng(
+    n_prompts: int, prompt_length_min: int, prompt_length_max: int, seed_offset: int
+) -> list[int]:
     assert n_prompts >= 0
     ret: list[int] = []
     for i in range(n_prompts):
@@ -47,8 +48,8 @@ def get_prompts_rng(prompt_lengths: list[int]) -> list[list[int]]:
     return [[random.randint(100, 10000) for _ in range(pl)] for pl in prompt_lengths]
 
 
-def get_server(path_server: str, path_log: Optional[str]) -> dict:
-    if path_server.startswith("http://") or path_server.startswith("https://"):
+def get_server(path_server: str, path_log: str | None) -> dict:
+    if path_server.startswith(("http://", "https://")):
         return {"process": None, "address": path_server, "fout": None}
     if os.environ.get("LOCAL_INFERENCE_ARG_HOST") is None:
         logger.info("LOCAL_INFERENCE_ARG_HOST not explicitly set, using 127.0.0.1")
@@ -56,14 +57,18 @@ def get_server(path_server: str, path_log: Optional[str]) -> dict:
     if os.environ.get("LOCAL_INFERENCE_ARG_PORT") is None:
         logger.info("LOCAL_INFERENCE_ARG_PORT not explicitly set, using 8080")
         os.environ["LOCAL_INFERENCE_ARG_PORT"] = "8080"
-    hostname: Optional[str] = os.environ.get("LOCAL_INFERENCE_ARG_HOST")
-    port: Optional[str] = os.environ.get("LOCAL_INFERENCE_ARG_PORT")
+    hostname: str | None = os.environ.get("LOCAL_INFERENCE_ARG_HOST")
+    port: str | None = os.environ.get("LOCAL_INFERENCE_ARG_PORT")
     assert hostname is not None
     assert port is not None
     address: str = f"http://{hostname}:{port}"
-    logger.info(f"Starting the llama.cpp server under {address}...")
+    logger.info("Starting the llama.cpp server under %s...", address)
 
-    fout = open(path_log.format(port=port), "w") if path_log is not None else subprocess.DEVNULL
+    fout = (
+        pathlib.Path(path_log.format(port=port)).open("w", encoding="utf-8")
+        if path_log is not None
+        else subprocess.DEVNULL
+    )
     process = subprocess.Popen([path_server], stdout=fout, stderr=subprocess.STDOUT)
 
     n_failures: int = 0
@@ -72,7 +77,8 @@ def get_server(path_server: str, path_log: Optional[str]) -> dict:
             sleep(1.0)
             exit_code = process.poll()
             if exit_code is not None:
-                raise RuntimeError(f"llama.cpp server exited unexpectedly with exit code {exit_code}{path_log and f', see {path_log.format(port=port)}' or ''}")
+                msg = f"llama.cpp server exited unexpectedly with exit code {exit_code}{(path_log and f', see {path_log.format(port=port)}') or ''}"
+                raise RuntimeError(msg)
             response = requests.get(f"{address}/health")
             if response.status_code == 200:
                 break
@@ -90,14 +96,11 @@ def get_prompt_length(data: dict) -> int:
 
     response = session.post(
         f"{server_address}/apply-template",
-        json={"messages": [{"role": "user", "content": data["prompt"], "stream": True}]}
+        json={"messages": [{"role": "user", "content": data["prompt"], "stream": True}]},
     )
     response.raise_for_status()
     prompt: str = json.loads(response.text)["prompt"]
-    response = session.post(
-        f"{server_address}/tokenize",
-        json={"content": prompt, "add_special": True}
-    )
+    response = session.post(f"{server_address}/tokenize", json={"content": prompt, "add_special": True})
     response.raise_for_status()
     tokens: list[str] = json.loads(response.text)["tokens"]
     return len(tokens)
@@ -110,18 +113,27 @@ def send_prompt(data: dict) -> tuple[float, list[float]]:
     t_submit = time()
     if data["external_server"]:
         json_data: dict = {
-            "prompt": data["prompt"], "ignore_eos": True,
-            "seed": data["seed"], "max_tokens": data["n_predict"], "stream": True}
+            "prompt": data["prompt"],
+            "ignore_eos": True,
+            "seed": data["seed"],
+            "max_tokens": data["n_predict"],
+            "stream": True,
+        }
         response = session.post(f"{server_address}/v1/completions", json=json_data, stream=True)
     elif data["synthetic_prompt"]:
         json_data: dict = {
-            "prompt": data["prompt"], "ignore_eos": True, "cache_prompt": False,
-            "seed": data["seed"], "n_predict": data["n_predict"], "stream": True}
+            "prompt": data["prompt"],
+            "ignore_eos": True,
+            "cache_prompt": False,
+            "seed": data["seed"],
+            "n_predict": data["n_predict"],
+            "stream": True,
+        }
         response = session.post(f"{server_address}/completion", json=json_data, stream=True)
     else:
         response = session.post(
             f"{server_address}/apply-template",
-            json={"messages": [{"role": "user", "content": data["prompt"], "stream": True}]}
+            json={"messages": [{"role": "user", "content": data["prompt"], "stream": True}]},
         )
         response.raise_for_status()
         prompt: str = json.loads(response.text)["prompt"]
@@ -145,15 +157,23 @@ def send_prompt(data: dict) -> tuple[float, list[float]]:
 
 
 def benchmark(
-        path_server: str, path_log: Optional[str], path_db: Optional[str], name: Optional[str], prompt_source: str, n_prompts: int,
-        n_predict: int, n_predict_min: int, seed_offset: int):
-    external_server: bool = path_server.startswith("http://") or path_server.startswith("https://")
+    path_server: str,
+    path_log: str | None,
+    path_db: str | None,
+    name: str | None,
+    prompt_source: str,
+    n_prompts: int,
+    n_predict: int,
+    n_predict_min: int,
+    seed_offset: int,
+) -> None:
+    external_server: bool = path_server.startswith(("http://", "https://"))
     if os.environ.get("LOCAL_INFERENCE_ARG_N_PARALLEL") is None:
         logger.info("LOCAL_INFERENCE_ARG_N_PARALLEL not explicitly set, using 32")
         os.environ["LOCAL_INFERENCE_ARG_N_PARALLEL"] = "32"
 
-    parallel: int = int(os.environ.get("LOCAL_INFERENCE_ARG_N_PARALLEL")) # type: ignore
-    prompts: Union[None, list[str], list[list[int]]] = get_prompts_text(prompt_source, n_prompts)
+    parallel: int = int(os.environ.get("LOCAL_INFERENCE_ARG_N_PARALLEL"))  # type: ignore
+    prompts: list[str] | list[list[int]] | None = get_prompts_text(prompt_source, n_prompts)
     synthetic_prompts: bool = prompts is None
     prompt_n = []
 
@@ -173,9 +193,11 @@ def benchmark(
         context_per_slot: int = int(1.05 * (n_predict + (np.max(prompt_n) if synthetic_prompts else 2048)))
         context_total: int = context_per_slot * parallel
         os.environ["LOCAL_INFERENCE_ARG_CTX_SIZE"] = str(context_total)
-        logger.info(f"LOCAL_INFERENCE_ARG_CTX_SIZE not explicitly set, using {context_total} ({context_per_slot} per slot).")
+        logger.info(
+            "LOCAL_INFERENCE_ARG_CTX_SIZE not explicitly set, using %s (%s per slot).", context_total, context_per_slot
+        )
 
-    server: Optional[dict] = None
+    server: dict | None = None
     session = None
     try:
         server = get_server(path_server, path_log)
@@ -193,10 +215,17 @@ def benchmark(
         for i, p in enumerate(prompts):
             if seed_offset >= 0:
                 random.seed(3 * (seed_offset + 1000 * i) + 1)
-            data.append({
-                "session": session, "server_address": server_address, "external_server": external_server, "prompt": p,
-                "synthetic_prompt": synthetic_prompts, "n_predict": random.randint(n_predict_min, n_predict),
-                "seed": (3 * (seed_offset + 1000 * i) + 2) if seed_offset >= 0 else -1})
+            data.append(
+                {
+                    "session": session,
+                    "server_address": server_address,
+                    "external_server": external_server,
+                    "prompt": p,
+                    "synthetic_prompt": synthetic_prompts,
+                    "n_predict": random.randint(n_predict_min, n_predict),
+                    "seed": (3 * (seed_offset + 1000 * i) + 2) if seed_offset >= 0 else -1,
+                }
+            )
 
         if not synthetic_prompts:
             logger.info("Getting the prompt lengths...")
@@ -215,7 +244,7 @@ def benchmark(
     prompt_t = []
     token_t = []
     depth_sum: int = 0
-    for pn, (t_submit, tat) in zip(prompt_n, results):
+    for pn, (t_submit, tat) in zip(prompt_n, results, strict=False):
         prompt_t.append(tat[0] - t_submit)
         token_t += tat
         n_tokens: int = len(tat)
@@ -231,7 +260,9 @@ def benchmark(
 
     logger.info("")
     logger.info(f"Benchmark duration:                {token_t_last:.2f} s")
-    logger.info(f"Request throughput:                {n_prompts / token_t_last:.2f} requests/s = {n_prompts / (token_t_last/60):.2f} requests/min")
+    logger.info(
+        f"Request throughput:                {n_prompts / token_t_last:.2f} requests/s = {n_prompts / (token_t_last / 60):.2f} requests/min"
+    )
     logger.info(f"Total prompt length:               {np.sum(prompt_n)} tokens")
     logger.info(f"Average prompt length:             {np.mean(prompt_n):.2f} tokens")
     logger.info(f"Average prompt latency:            {1e3 * np.mean(prompt_t):.2f} ms")
@@ -239,7 +270,9 @@ def benchmark(
     logger.info(f"Total generated tokens:            {token_t.shape[0]}")
     logger.info(f"Average generation depth:          {depth_sum / token_t.shape[0]:.2f} tokens")
     logger.info(f"Average total generation speed:    {token_t.shape[0] / token_t_last:.2f} tokens/s")
-    logger.info(f"Average generation speed per slot: {token_t.shape[0] / (parallel * token_t_last):.2f} tokens/s / slot")
+    logger.info(
+        f"Average generation speed per slot: {token_t.shape[0] / (parallel * token_t_last):.2f} tokens/s / slot"
+    )
 
     if path_db is not None:
         con = sqlite3.connect(path_db)
@@ -247,10 +280,12 @@ def benchmark(
         cursor.execute(
             "CREATE TABLE IF NOT EXISTS server_bench"
             "(name TEXT, n_parallel INTEGER, prompt_source TEXT, n_prompts INTEGER, "
-            "n_predict INTEGER, n_predict_min INTEGER, seed_offset INTEGER, runtime REAL);")
+            "n_predict INTEGER, n_predict_min INTEGER, seed_offset INTEGER, runtime REAL);"
+        )
         cursor.execute(
             "INSERT INTO server_bench VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
-            [name, parallel, prompt_source, n_prompts, n_predict, n_predict_min, seed_offset, token_t_last])
+            [name, parallel, prompt_source, n_prompts, n_predict, n_predict_min, seed_offset, token_t_last],
+        )
         con.commit()
 
     plt.figure()
@@ -278,21 +313,39 @@ if __name__ == "__main__":
         "Results are printed to console and visualized as plots (saved to current working directory). "
         "To pass arguments such as the model path to the server, set the corresponding environment variables (see local-inference-server --help). "
         "The reported numbers are the speeds as observed by the Python script and may differ from the performance reported by the server, "
-        "particularly when the server is fast vs. the network or Python script (e.g. when serving a very small model).")
-    parser.add_argument("--path_server", type=str, default="local-inference-server", help="Path to the llama.cpp server binary")
-    parser.add_argument("--path_log", type=str, default="server-bench-{port}.log", help="Path to the model to use for the benchmark")
-    parser.add_argument("--path_db", type=str, default=None, help="Path to an sqlite database to store the benchmark results in")
+        "particularly when the server is fast vs. the network or Python script (e.g. when serving a very small model)."
+    )
+    parser.add_argument(
+        "--path_server", type=str, default="local-inference-server", help="Path to the llama.cpp server binary"
+    )
+    parser.add_argument(
+        "--path_log", type=str, default="server-bench-{port}.log", help="Path to the model to use for the benchmark"
+    )
+    parser.add_argument(
+        "--path_db", type=str, default=None, help="Path to an sqlite database to store the benchmark results in"
+    )
     parser.add_argument("--name", type=str, default=None, help="Name to label plots and database entries with")
     parser.add_argument(
-        "--prompt_source", type=str, default="rng-1024-2048",
+        "--prompt_source",
+        type=str,
+        default="rng-1024-2048",
         help="How to get the prompts for the benchmark, either 'mmlu' for MMLU questions or "
-        "rng-MIN-MAX for synthetic prompts with random lengths in the interval [MIN, MAX]")
+        "rng-MIN-MAX for synthetic prompts with random lengths in the interval [MIN, MAX]",
+    )
     parser.add_argument("--n_prompts", type=int, default=100, help="Number of prompts to evaluate")
     parser.add_argument("--n_predict", type=int, default=2048, help="Max. number of tokens to predict per prompt")
     parser.add_argument(
-        "--n_predict_min", type=int, default=1024,
-        help="Min. number of tokens to predict per prompt (supported for synthetic prompts only)")
-    parser.add_argument("--seed_offset", type=int, default=0, help="Offset for determining the seeds for pseudorandom prompt/generation lengths. "
-                        "Correlations between seeds can occur when set >= 1000. Negative values mean no seed.")
+        "--n_predict_min",
+        type=int,
+        default=1024,
+        help="Min. number of tokens to predict per prompt (supported for synthetic prompts only)",
+    )
+    parser.add_argument(
+        "--seed_offset",
+        type=int,
+        default=0,
+        help="Offset for determining the seeds for pseudorandom prompt/generation lengths. "
+        "Correlations between seeds can occur when set >= 1000. Negative values mean no seed.",
+    )
     args = parser.parse_args()
     benchmark(**vars(args))

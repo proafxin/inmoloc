@@ -1,37 +1,174 @@
 # inmoloc
 
-<div align="center">
-
-<b>Concurrent LLM serving on your own GPU, with the startup time and memory footprint of a local runtime.</b>
+`inmoloc` is an inference engine that allows requests of arbitrary context windows elastically at the maximum possible concurrency not exceeding a specified VRAM budget and provides significantly superior scalability to llama.cpp or vllm.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-</div>
+inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps its model support, quantization formats and backends (see [NOTICE](NOTICE)).
 
-inmoloc (Inferencia de Modelos Locales) serves many requests at once from one GPU. I t starts in seconds, fits the number of concurrent requests to the memory you give it, and keeps each request's cost tied to its own context. It runs GGUF models, including vision models, through an OpenAI-compatible HTTP API.
+## Why
 
-inmoloc is based on [llama.cpp](https://github.com/ggml-org/llama.cpp) and keeps its model support, quantization formats and backends. It is maintained as its own project; see [differences from llama.cpp](docs/differences-from-llama.cpp.md) and [NOTICE](NOTICE).
+`llama.cpp` has a wide range of compatibility but a total context window and number of slots had to be chosen manually. Similarly, vllm would require manually choosing context windows and would provide better request management and throughput but would make the sacrifice of much higher startup time and additional vram costs. While llama.cpp had unified kv cache it failed requests once cache was full. I then started thinking if we could have the best of both worlds without the drawbacks that incur extra costs. `inmoloc` has evolved significantly since then. As a result, inmoloc retains the superior wider support range (making a small concession for now that the model has to be fully loaded in one gpu) of `llama.cpp`, achieves maximum possible concurrency without adding any substantial overhead like `vllm`.
 
-## Features
+I had to make `inmoloc` its own project rather than changes on top of `llama.cpp` for a number of reasons. The two have different directions and my vision fundamentally diverges from llama.cpp which aims at local inference on a very wide range of hardware even at the cost of much higher throughput that could be achieved. `inmoloc` aims at utilizing the maximum potential of the resources allocated with the only tradeoff that for now it loads the full model on a cuda GPU which is the most dominating case anyway. Its elastic design changes the attention kernels, how the KV cache and the state of each request are laid out, how the server admits requests and which options exist, so much of inmoloc differs from llama.cpp outright. Forcing that into llama.cpp, given its contribution policy (see its AGENTS.md), would make every change a maintenance burden, and its long review process would hold back the architecture change and every feature after it.
 
-- **Shared KV cache**: all requests share one cache, and each request takes cells only for the tokens it holds, up to the model's training context.
-- **Memory budget**: at startup the server measures the weights, KV cache, per-request state, compute buffers, draft model, vision encoder, backend scratch memory, and what the process holds outside them (CUDA context, loaded kernels, libraries; measured for the process through NVML on NVIDIA GPUs). For a model with memory per request (e.g. recurrent state), it chooses from the typical request size (`--ctx-typical`) the number of requests at once and the cache size that serve the most requests within `--vram-budget`. A model without it runs `--parallel` requests that share the whole cache, as many at once as their sizes allow. Memory does not grow while serving.
-- **Admission and preemption**: a request is admitted when its prompt and the output it is expected to generate (the mean of recent requests, at most its limit) fit in free memory; waiting requests start smallest first, as soon as memory frees. When running requests still outgrow the cache, the request that holds the fewest cells is paused and the others continue. A paused request's state goes to the prompt cache in host memory (`--cache-ram`) and is restored when it resumes; without room there, it is recomputed.
-- **Per-request attention** (CUDA): each request reads only its own KV cells, so its cost grows with its own context, not with other requests. Quantized q8_0 and q4_0 caches are read directly.
-- **Prefix sharing**: a new request starts from the cached cells of another request with the same prefix, without copying them.
-- **Cost-based prompt scheduling**: long prompts are processed in chunks sized by their measured cost, so requests that are generating are not held up.
-- **Asynchronous vision encoder**: images are encoded on their own thread and lower-priority GPU stream while other requests generate.
-- **Replay rollback for speculative decoding**: on hybrid gated delta-net models such as Qwen3.5, memory per request stays nearly the same at any draft depth.
-- **Low CPU load while waiting for the GPU** (CUDA): with `--gpu-wait block` the server thread sleeps instead of spinning a CPU core.
-- **Observability**: the startup log shows the memory projection and what fills it; Prometheus metrics cover KV cells, why requests wait before they get a slot, preemptions and the tokens restored after them, prefix sharing, attention cost and free device memory; `--slow-loop-ms` logs slow server iterations.
+| | llama.cpp | vLLM | inmoloc |
+| --- | --- | --- | --- |
+| Tuning | Context size and number of slots, by trial and error | Memory fraction, context length and sequence limit, by hand | VRAM budget and the unavoidable maximum output token, nothing else |
+| Wrong guess | Too large fails at load, too small wastes memory | Fails at load or leaves memory unused | Automatically sized so nothing to guess |
+| Memory taken | The whole KV cache of every slot, at startup | A fixed share of the GPU, before serving | Only what running requests hold; the rest stays free for new requests and other services |
+| Memory while serving | Fitted with a margin, CUDA pools grow under load | - | Measured with no margin, does not grow |
+| Startup | Seconds | Profiles, captures graphs and compiles the model first | Seconds |
+| Requests at once | Fixed number of slots, at most 256 | Configured limit | As many as fit, more with a larger budget |
+| Context of one request | A fixed share per slot: 1024 tokens with 8 slots in 23G | Up to the configured context length | Up to ~164k tokens in the same 23G |
+| Memory runs out | Every active request fails | Newest requests are preempted and recomputed later | A running request never runs out; new ones wait |
+| Waiting | Constant retry, burns CPU | Arrival order: small requests wait behind large ones | The earliest request that fits starts |
+| Attention cost | Every request pays for the cached context of all others | Its own blocks | Its own context only |
+| Shared prefixes | Within a slot only | Across requests | Across requests |
+| MTP drafting | Every slot enlarges the shared context window, more VRAM | Heavy VRAM cost: a 4-bit Qwen3.8 27B with MTP does not start on a 24 GiB GPU | Draft depth takes little extra memory |
+| Recurrent state | One state per draft position, for every slot | - | Nearly the same at any draft depth (hybrid gated delta-net models such as Qwen3.5) |
+| Images | Encoded while generation waits | - | Encoded while other requests generate |
+| Waiting for the GPU | Usually a busy CPU core | - | Can sleep and free the core (CUDA) |
+| Visibility | Buffer sizes, throughput, request counts | - | What fills the budget, why requests wait, which iterations are slow |
+| **Models** | All GGUF models | GGUF only through a plugin vLLM calls [highly experimental and under-optimized](https://docs.vllm.ai/en/latest/features/quantization/gguf/) | All llama.cpp GGUF models |
 
-## Quick start
+`-`: not compared.
+
+## Comparison
+
+Setup: same RTX 5090 Laptop at different settings, `Kvark-Sparkle-1.0-27B-Q4_K_M` model, MTP draft depth 2, `q8` KV cache.
+
+### 18G budget per server
+
+64-token prompts, 512 output tokens per request. inmoloc: `--vram-budget 18G --max-output-tokens 512`; llama.cpp: `-c 4096 --parallel 6`.
+
+| Requests | inmoloc wall s | inmoloc agg tok/s | llama.cpp `-c 4096 --parallel 6` wall s | llama.cpp agg tok/s | Failed (both) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 11.3 | 45.4 | 12.2 | 42.0 | 0 |
+| 2 | 9.6 | 106.9 | 22.3 | 46.0 | 0 |
+| 4 | 11.7 | 175.6 | 12.2 | 167.8 | 0 |
+| 8 | 23.0 | 178.2 | 37.2 | 110.1 | 0 |
+| 16 | 39.9 | 205.4 | 52.0 | 157.6 | 0 |
+| 32 | 77.8 | 210.6 | 100.1 | 163.7 | 0 |
+| 64 | 151.9 | 215.8 | 185.9 | 176.2 | 0 |
+
+### 23G budget per server
+
+128-token prompts, 512 output tokens per request. inmoloc: `--vram-budget 23G --max-output-tokens 512`; llama.cpp: `-c 8192 --parallel 8`, its largest setting that loads.
+
+| Requests | inmoloc wall s | inmoloc agg tok/s | llama.cpp `-c 8192 --parallel 8` wall s | llama.cpp agg tok/s | Failed (both) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 11.3 | 45.4 | 12.8 | 39.9 | 0 |
+| 2 | 9.9 | 103.0 | 9.8 | 104.1 | 0 |
+| 4 | 11.9 | 172.7 | 12.8 | 160.6 | 0 |
+| 8 | 15.4 | 266.4 | 18.8 | 217.7 | 0 |
+| 16 | 24.3 | 336.7 | 38.2 | 214.5 | 0 |
+| 32 | 49.5 | 331.1 | 76.6 | 214.0 | 0 |
+| 64 | 92.2 | 355.3 | 159.3 | 205.7 | 0 |
+| 128 | 183.7 | 356.8 | 311.0 | 210.7 | 0 |
+
+- At 64 requests in 23G, inmoloc reaches 355.3 tok/s against 205.7 for llama.cpp (1.7x), and finishes in 92.2 s against 159.3 s.
+- From 18G to 23G at 64 requests, inmoloc goes from 215.8 to 355.3 tok/s; llama.cpp only from 176.2 to 205.7, held back by its fixed slots.
+- In 23G one inmoloc request can use up to ~164k tokens, while each llama.cpp slot gets 1024.
+- On the same GPU, vLLM 0.33.0 does not start with a 4-bit Qwen3.8 27B (INT4 W4A16) and MTP drafting, while inmoloc serves the same model at Q4_K_XL with MTP drafting 2 at 387 tok/s with 64 requests in a 22826 MiB budget.
+
+### OCR vision benchmark: PaddleOCR-VL-1.6 at 300 DPI
+
+#### Debian 13 (native)
+
+Setup: same RTX 5090 Laptop, `PaddleOCR-VL-1.6-Q8_0` model + mmproj, 257 pages rendered at 300 DPI (322 KiB median PNG), `max_tokens 1024`, one image per request.
+
+inmoloc: `--vram-budget 2.5G --max-output-tokens 1024`; llama.cpp: `-c 24576 --parallel 6 --cache-ram 0 --n-predict 1024`.
+
+Throughput (tok/s, higher is better):
+
+| Requests | inmoloc | llama.cpp | inmoloc / llama.cpp |
+| ---: | ---: | ---: | ---: |
+| 1 | 392 | 367 | 1.07x |
+| 2 | 244 | 514 | 0.47x |
+| 4 | 470 | 373 | 1.26x |
+| 8 | 664 | 560 | 1.19x |
+| 16 | 866 | 772 | 1.12x |
+| 32 | 809 | 684 | 1.18x |
+| 64 | 834 | 692 | 1.21x |
+| 128 | 701 | 640 | 1.10x |
+
+Runtime (wall s, lower is better):
+
+| Requests | inmoloc | llama.cpp | inmoloc / llama.cpp |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.8 | 0.9 | 0.89x |
+| 2 | 4.4 | 2.1 | 2.10x |
+| 4 | 2.3 | 2.9 | 0.79x |
+| 8 | 5.5 | 6.7 | 0.82x |
+| 16 | 11.0 | 12.5 | 0.88x |
+| 32 | 20.2 | 23.9 | 0.85x |
+| 64 | 40.4 | 47.0 | 0.86x |
+| 128 | 86.8 | 93.2 | 0.93x |
+
+GPU VRAM: inmoloc ~2262 MiB, llama.cpp ~2248 MiB across all levels (inmoloc's vision encoder no longer pinned to GPU).
+
+- Peak tok/s: inmoloc ~866 at level 16 vs llama.cpp ~772 at level 16 (~12% higher)
+- At level 128: inmoloc 701 tok/s / 86.8 s vs llama.cpp 640 tok/s / 93.2 s (~10% faster)
+- inmoloc's level-2 outlier (4.4 s vs llama.cpp 2.1 s) is warmup on the first concurrent batch; throughput rises once the encoder is warm
+
+#### Windows 11 WSL2 (Debian) + Docker NVIDIA runtime
+
+Setup: Windows 11 WSL2 Debian, Docker with NVIDIA runtime, `PaddleOCR-VL-1.6-Q8_0` model + mmproj, pages rendered at 300 DPI with `bench_ocr.py` (`--pdf-dir /home/masterkenway/input`, `--pages 257 --seed 7 --dpi 300 --levels 1 2 4 8 16 32 64 128 --per-slot 1 --min-requests 1`, `--prompt "OCR:"`, `--max_tokens 1024`), 211 pages rendered (281 KiB median PNG), one image per request.
+
+llama.cpp (`paddleocr-llamacpp`, port 8111): container config to match the baseline (`-c 24576 --parallel 6 --cache-ram 0 --n-predict 1024`). inmoloc numbers pending.
+
+Throughput (tok/s, higher is better):
+
+| Requests | inmoloc | llama.cpp | inmoloc / llama.cpp |
+| ---: | ---: | ---: | ---: |
+| 1 | TBD | 333 | TBD |
+| 2 | TBD | 151 | TBD |
+| 4 | TBD | 356 | TBD |
+| 8 | TBD | 697 | TBD |
+| 16 | TBD | 625 | TBD |
+| 32 | TBD | 573 | TBD |
+| 64 | TBD | 589 | TBD |
+| 128 | TBD | 572 | TBD |
+
+Runtime (wall s, lower is better):
+
+| Requests | inmoloc | llama.cpp | inmoloc / llama.cpp |
+| ---: | ---: | ---: | ---: |
+| 1 | TBD | 1.7 | TBD |
+| 2 | TBD | 2.3 | TBD |
+| 4 | TBD | 8.9 | TBD |
+| 8 | TBD | 8.4 | TBD |
+| 16 | TBD | 14.0 | TBD |
+| 32 | TBD | 28.4 | TBD |
+| 64 | TBD | 54.6 | TBD |
+| 128 | TBD | 71.7 | TBD |
+
+GPU VRAM: pending (`bench_ocr.py` reports container-attributed GPU memory via `nvidia-smi --query-compute-apps=pid,used_memory` matched to `docker top` PIDs; in WSL2 this can return `[N/A]`/no match).
+
+Host RAM (MiB):
+
+| Requests | inmoloc | llama.cpp |
+| ---: | ---: | ---: |
+| 1 | TBD | 764 |
+| 2 | TBD | 934 |
+| 4 | TBD | 1205 |
+| 8 | TBD | 1597 |
+| 16 | TBD | 2004 |
+| 32 | TBD | 2621 |
+| 64 | TBD | 4622 |
+| 128 | TBD | 5927 |
+
+- Base llama.cpp run from `bench_out/paddleocr-llamacpp_summary.json` (2026-11-08). Level 128 ran 82/128 requests because the input set produced 211 distinct pages for the requested 257-page workload; treat level 128 and cross-setup comparisons with that caveat.
+- Host RAM is from `docker stats`. WSL2/Docker NVIDIA runtime changes overhead vs native Linux; compare inmoloc vs llama.cpp within this same setup.
+
+## Usage
 
 Run the published CUDA image (built with CUDA 12.8, so it needs NVIDIA driver 570 or newer, like llama.cpp's; see [Docker](docs/docker.md)):
 
 ```sh
 docker run --gpus all -p 8080:8080 -v /path/to/models:/models ghcr.io/proafxin/inmoloc:latest \
-    -m /models/model.gguf -ngl 999 --flash-attn on --ctx-size 131072 --vram-budget 22G --parallel 64
+    -m /models/model.gguf -ngl 999 --max-output-tokens 512 --vram-budget 22G
 ```
 
 Or build it yourself, for any hardware llama.cpp supports (see [the build guide](docs/build.md) for other backends and older CUDA versions):
@@ -41,120 +178,68 @@ cmake -B build -DGGML_CUDA=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j --target local-inference-server
 ```
 
-Serve a model with a 128k-token context shared by all requests, a q8_0 KV cache and a 22 GiB memory budget:
+Serve a model with a q8_0 KV cache and a 22 GiB memory budget. inmoloc needs the most tokens a request may generate, and neither a context size nor a number of requests:
 
 ```sh
-build/bin/local-inference-server -m model.gguf --mmproj mmproj.gguf -ngl 999 --flash-attn on \
-    --ctx-size 131072 --cache-type-k q8_0 --cache-type-v q8_0 \
-    --vram-budget 22G --parallel 64 --gpu-wait block --metrics --port 8100
+build/bin/local-inference-server -m model.gguf --mmproj mmproj.gguf -ngl 999 \
+    --cache-type-k q8_0 --cache-type-v q8_0 --max-output-tokens 512 \
+    --vram-budget 22G --gpu-wait block --metrics --port 8100
 ```
 
-The log states how many requests run at once and what the budget holds, for example:
+With MTP drafting on a gated delta-net model, use replay rollback. The startup log states what the requests can use and which fixed costs the budget holds:
 
-```text
-limited by the budget: 14 sequences, 131072 tokens of context: model 13061 + context 6763 + compute 297 + draft 725 + other 1662 = 22508 MiB of 22528 MiB
+```sh
+build/bin/local-inference-server -m qwen3.8.gguf -ngl 999 --cache-type-k q8_0 --cache-type-v q8_0 \
+    --spec-type draft-mtp --spec-draft-n-max 2 --rs-rollback replay --max-output-tokens 512 --vram-budget 22826M --port 8100
 ```
 
-## Server options
-
-The options below are specific to inmoloc; all other options are as in llama.cpp, see [the server documentation](tools/server/README.md).
-
-| Option | Default | Description |
-| --- | --- | --- |
-| `--vram-budget SIZE` | free device memory | Device memory the server may use, summed over the devices the model runs on (e.g. `22G`). |
-| `--ctx-typical N` | the longest request that fits | Tokens a typical request holds. For a model with memory per request (e.g. recurrent state), the budget runs the most requests at once whose typical requests fit in the KV cache, and gives the memory left to the cache. A model without it runs `--parallel` requests that share the cache. The startup log shows the longest request the budget holds. |
-| `--ctx-size N` | automatic | The most tokens the KV cache holds. Not needed: without it the cache is sized from the budget. |
-| `--parallel N` | auto | Upper limit on requests at once; the budget may lower it. |
-| `--prompt-cap N` | `-1` | Prompt tokens per iteration while requests generate, weighted by cost. `-1`: fill one ubatch, `0`: no cap. |
-| `--prefix-share`, `--no-prefix-share` | enabled | Let a new request start from another request's cached prefix. |
-| `--prefix-share-min N` | `256` | Least number of tokens a shared prefix must save. |
-| `--rs-rollback {snapshot,replay}` | `snapshot` | How recurrent state rolls back rejected speculative tokens. `replay` applies to gated delta-net models. |
-| `--gpu-wait {spin,yield,block}` | driver | How a thread waits for the GPU (CUDA). `block` sleeps and frees the CPU core. |
-| `--slow-loop-ms N` | `1000` | Log a time breakdown of server iterations slower than N ms. `0`: off. |
-
-When `--gpu-layers` is not given and the model does not fit, `--fit` chooses it against the budget, with no margin.
-
-## Measured
-
-On one RTX 5090 laptop GPU (24 GiB) with Qwen3.8-27B IQ4_XS, MTP speculative decoding, the vision encoder, a q8_0 cache of 131072 tokens and `--vram-budget 22G`:
-
-- **14 requests at once**, and serving in about 5 seconds from start.
-- **No memory growth while serving**: device memory stayed within 6 MiB over 104 OCR requests, 16 at a time.
-- **Long prompts next to other requests**: two 56k-token documents were processed at 680 to 730 tokens per second each, with short requests generating alongside.
-- **q8_0 cache quality**: at 32k, 64k and 110k tokens of context, the q8_0 cache answered retrieval questions at 10%, 50% and 90% depth exactly as the f16 cache did, token for token (`scripts/kv-quality.py`).
-- **CPU temperature with `--gpu-wait block`**: on an MSI Vector 16 HX AI, the CPU averaged below 65 degC while serving, against about 100 degC with the driver's default.
-
-### OCR throughput against llama.cpp at the same memory
-
-Both servers ran alone on the same RTX 5090 laptop GPU, one at a time, with the same model and settings:
-
-- **Model**: PaddleOCR-VL 1.6, Q8_0 weights with its vision encoder (mmproj).
-- **Common settings**: bf16 KV cache (`-ctk bf16 -ctv bf16`), `--flash-attn on`, all layers on the GPU, no prompt cache in host memory (`--cache-ram 0`).
-- **Memory**: about 5 GiB of device memory each. llama.cpp (b11804, the `server-cuda` image of 2026-10-22) has no memory budget, so its cache was set by hand to the largest that fits: 45 slots of 4096 tokens (`-c 184320 --parallel 45`). inmoloc was given `--vram-budget 5G` and sized its cache and concurrency itself.
-- **Requests**: pages of scanned documents rendered at 300 dpi, about 1,250 image tokens each, sent to `/v1/chat/completions` with the prompt `OCR:`, temperature 0 and at most 1024 output tokens. At N requests at once, N clients send 3N requests in total, each client one request after another.
-- **Tokens/s** counts the output tokens of all requests over the wall time of the level.
-
-| Requests at once | llama.cpp tokens/s | inmoloc tokens/s | llama.cpp median latency | inmoloc median latency |
-| --- | --- | --- | --- | --- |
-| 1 | 421 | 400 | 0.8 s | 0.8 s |
-| 8 | 741 | 938 | 3.5 s | 3.2 s |
-| 32 | 751 | 1,237 | 14.7 s | 9.3 s |
-| 64 | 750 | 1,047 | 31.7 s | 24.9 s |
-| 128 | 758 | 1,058 | 72.5 s | 42.4 s |
-| 256 | 767 | 1,065 | 158.5 s | 49.3 s |
-
-- From 64 requests at once, inmoloc is limited by the vision encoder: it encodes one image at a time and was busy 90 to 95% of the time, at about 0.45 s per page.
-- Every level starts from the first page, so a level that runs after lower ones on the same server can find some of its pages still cached. The inmoloc rows for 8 and 32 ran after the lower levels, and 32 includes such reuse; 64 and 128 each ran on a fresh server; 256 ran after 1 and 128, when the cache was full of running requests and almost none of its pages were still cached.
-- With 1 request at a time, inmoloc's throughput is about 5% lower than llama.cpp's: each generated token takes 1.45 ms against 1.20 ms, while the prompts take the same time.
-
-## Compared with llama.cpp and vLLM
-
-llama.cpp at commit 56381e407 (2026-09-12); vLLM as of 2026-10-15.
-
-| | llama.cpp | vLLM | inmoloc |
-| --- | --- | --- | --- |
-| Startup | Loads the model | Profiles memory, captures CUDA graphs, compiles the model | Loads the model after short memory dry runs |
-| GPU memory taken | What the model and context need | A fixed fraction (`--gpu-memory-utilization`) | What the model and context need, within `--vram-budget` |
-| KV cache | `--parallel` fixed parts by default, shared with `--kv-unified` | Shared pool of blocks | Shared, per token |
-| Cache full | Every active request fails | Newest requests preempted | Requests with the least work done preempted |
-| Attention reads | All used cells | Own blocks | Own cells (CUDA) |
-| Shared prefixes | Own slot only | Across requests | Across requests |
-| Quantized KV cache | q8_0, q4_0 and others | fp8 | q8_0, q4_0 and others |
-| GGUF models | Native | Experimental plugin | Native |
-| Multi-GPU | Layer and row split | Tensor and pipeline parallel | Layer and row split |
-
-## Compatibility
-
-- **Models**: GGUF models supported by llama.cpp at the base commit, see [docs/models.md](docs/models.md).
-- **API**: OpenAI-compatible chat completions, completions and embeddings, see [the server documentation](tools/server/README.md).
-- **Hardware and backends**: the same as llama.cpp: all its backends build and run, on the same GPUs and CPUs. The memory budget, preemption, prefix sharing and prompt scheduling work on every backend. Per-request attention and `--gpu-wait` are NVIDIA only (per-request attention for prompt chunks needs Turing or newer); elsewhere attention reads the whole cache with a mask, as in llama.cpp.
-- **Multiple GPUs**: llama.cpp's multi-GPU modes work (see [Multi-GPU](docs/multi-gpu.md)); the budget is summed over devices, and multi-GPU serving is not tested yet.
-
-## Coming from llama.cpp
-
-Most `llama-server` command lines run unchanged under the new name. To let inmoloc size the server for you, replace the fixed sizes with the size of a typical request and a memory budget:
+The HTTP API, GGUF models and chat templates are the same as in llama.cpp. A `llama-server` command line needs the new name and `--max-output-tokens`, and drops the fixed sizes for a memory budget:
 
 ```sh
 # llama.cpp
 llama-server -m model.gguf -ngl 999 --flash-attn on --ctx-size 65536 --parallel 16 --kv-unified
 
 # inmoloc
-local-inference-server -m model.gguf -ngl 999 --flash-attn on --ctx-typical 4096 --vram-budget 22G
+local-inference-server -m model.gguf -ngl 999 --max-output-tokens 512 --vram-budget 22G
 ```
+
+The options below are new or differ from llama.cpp; all others are as in llama.cpp, see [the server documentation](tools/server/README.md).
+
+| Option | llama.cpp | inmoloc |
+| --- | --- | --- |
+| `--vram-budget SIZE` | - | Device memory the server may use, summed over the devices the model runs on (e.g. `22G`). Default: free device memory |
+| `--max-output-tokens N` | - | Required: the most tokens a request generates. A request's `max_tokens` is capped at it, and a request without `max_tokens` uses it |
+| `-n`, `--n-predict N` | The default output of a request, which the request can override | Removed from the server: `--max-output-tokens` takes its place |
+| `-c`, `--ctx-size N` | The KV cache size | Removed from the server: `--vram-budget` sizes the memory |
+| `-np`, `--parallel N` | The number of slots | Removed from the server: as many requests run at once as fit |
+| `--kv-unified-per-slot N` | The cache of each slot | Removed: `--vram-budget` sizes the cache |
+| `-kvu`, `--kv-unified`, `--no-kv-unified` | Whether the slots share one KV cache | Removed: all requests share one memory |
+| `--context-shift` | Shifts the context when it fills | Removed from the server: a request stays within the context window |
+| `--fit`, `--fit-target`, `--fit-ctx` | Fit the model and context to free memory with a margin | Removed from the server: `--vram-budget` is the limit, with no margin |
+| `-ngl`, `--gpu-layers` | Auto: `--fit` chooses how many layers fit | Auto: all layers go on the device, and a model that does not fit there fails at load |
+| `-fa`, `--flash-attn` | Chooses flash attention | Removed from the server: flash attention is always on |
+| `-ub`, `--ubatch-size N` | The most tokens in one GPU step | Also sets the compute memory of the model and of an MTP draft, fixed costs of the budget, and not how many requests run. Default: `512` |
+| `--prefix-share`, `--no-prefix-share` | - | Let a new request start from another request's cached prefix. Default: enabled |
+| `--prefix-share-min N` | - | Least number of tokens a shared prefix must save. Default: `256` |
+| `--rs-rollback {snapshot,replay}` | - | How recurrent state rolls back rejected speculative tokens. `replay` applies to gated delta-net models and takes less memory per request. Default: `snapshot` |
+| `--gpu-wait {spin,yield,block}` | - | How a thread waits for the GPU (CUDA). `block` sleeps and frees the CPU core. Default: driver |
+| `--slow-loop-ms N` | - | Log a time breakdown of server iterations slower than N ms. `0`: off. Default: `1000` |
+| `--threads-http N` | Default: at least `--parallel` + 4 | Default: one less than the CPU threads, at least 5, whatever the number of requests |
+| `--cache-idle-slots` | Saves idle slots to the prompt cache when a new task starts | Saves an idle slot to the prompt cache when its memory is needed; until then it stays in the KV cache |
+| `-cram`, `--cache-ram N` | The prompt cache in host memory; an entry keeps all the context checkpoints of its slot | Also holds the state of preempted requests until they resume; an entry keeps only the newest checkpoint |
+
+When a budget is more than the device has free, 128 MiB of the device stay free, since allocations fail in the last of its memory.
+
+### Names
 
 | llama.cpp | inmoloc |
 | --- | --- |
 | `llama-server`, `llama-cli`, ... | `local-inference-server`, `local-inference-cli`, ...; unified binary `local-inference` |
-| `--ctx-size N`: the KV cache size | The most the KV cache holds. Leave it out to size the cache from `--vram-budget` |
-| `--parallel N`: the number of slots | An upper limit; the budget runs as many requests at once as fit |
-| `--kv-unified-per-slot N` | `--ctx-typical N` |
-| `--kv-unified` | Always on; `--no-kv-unified` is refused |
-| `--fit-target` | Not used by the server: `--vram-budget` is the limit, with no margin |
 | `LLAMA_ARG_*` environment variables | `LOCAL_INFERENCE_ARG_*` |
 | `llamacpp:*` metrics | `local_inference:*` |
 | `ghcr.io/ggml-org/llama.cpp:server-cuda` | `ghcr.io/proafxin/inmoloc:latest` |
 
-The HTTP API, GGUF models and chat templates are the same. The C API is source compatible; bindings that copy the `llama_context_params` layout need updating. All option changes are listed in [differences from llama.cpp](docs/differences-from-llama.cpp.md#options).
+The C API has additions, and `llama_max_parallel_sequences()` is removed since there is no fixed limit; bindings that copy the `llama_context_params` layout need updating.
 
 ## Documentation
 
@@ -163,7 +248,6 @@ The HTTP API, GGUF models and chat templates are the same. The C API is source c
 - [Docker](docs/docker.md)
 - [Multi-GPU](docs/multi-gpu.md)
 - [Models](docs/models.md)
-- [Differences from llama.cpp](docs/differences-from-llama.cpp.md)
 
 ## Contributing
 

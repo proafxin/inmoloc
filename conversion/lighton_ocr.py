@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from typing import Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from torch import Tensor
 
-from .base import ModelBase, gguf
-
-from .llava import LlavaVisionModel
+from conversion.base import ModelBase, gguf
+from conversion.llava import LlavaVisionModel
 
 
 @ModelBase.register("LightOnOCRForConditionalGeneration")
@@ -16,7 +17,7 @@ class LightOnOCRVisionModel(LlavaVisionModel):
     is_mistral_format = False
     use_break_tok = False
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.LIGHTONOCR)
 

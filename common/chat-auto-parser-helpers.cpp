@@ -360,4 +360,3 @@ std::optional<compare_variants_result> compare_variants(
 }
 
 }  // namespace autoparser
-

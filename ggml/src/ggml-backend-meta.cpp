@@ -792,8 +792,9 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
 
     auto handle_lightning_indexer = [&](
             const std::vector<ggml_backend_meta_split_state> & src_ss) -> ggml_backend_meta_split_state {
-        for (size_t i = 0; i < 4; i++) {
-            GGML_ASSERT(src_ss[i].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED);
+        // the weights and the mask are absent in some modes, see ggml_lightning_indexer_rows()
+        for (size_t i = 0; i < GGML_MAX_SRC; i++) {
+            GGML_ASSERT(tensor->src[i] == nullptr || src_ss[i].axis == GGML_BACKEND_SPLIT_AXIS_MIRRORED);
         }
         return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, {0}, {1}, 1};
     };
@@ -1037,7 +1038,8 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             } break;
             case GGML_OP_DSV4_HC_COMB:
             case GGML_OP_DSV4_HC_PRE:
-            case GGML_OP_DSV4_HC_POST: {
+            case GGML_OP_DSV4_HC_POST:
+            case GGML_OP_ARGSORT_OFF: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);
             } break;
             case GGML_OP_UNARY: {

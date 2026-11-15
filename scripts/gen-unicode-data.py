@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import array
 import unicodedata
-import requests
 
+import requests
 
 MAX_CODEPOINTS = 0x110000
 
@@ -50,33 +50,33 @@ def unicode_data_iter():
 
 
 # see definition in unicode.h
-CODEPOINT_FLAG_UNDEFINED   = 0x0001  #
-CODEPOINT_FLAG_NUMBER      = 0x0002  # \p{N}
-CODEPOINT_FLAG_LETTER      = 0x0004  # \p{L}
-CODEPOINT_FLAG_SEPARATOR   = 0x0008  # \p{Z}
-CODEPOINT_FLAG_MARK        = 0x0010  # \p{M}
+CODEPOINT_FLAG_UNDEFINED = 0x0001
+CODEPOINT_FLAG_NUMBER = 0x0002  # \p{N}
+CODEPOINT_FLAG_LETTER = 0x0004  # \p{L}
+CODEPOINT_FLAG_SEPARATOR = 0x0008  # \p{Z}
+CODEPOINT_FLAG_MARK = 0x0010  # \p{M}
 CODEPOINT_FLAG_PUNCTUATION = 0x0020  # \p{P}
-CODEPOINT_FLAG_SYMBOL      = 0x0040  # \p{S}
-CODEPOINT_FLAG_CONTROL     = 0x0080  # \p{C}
+CODEPOINT_FLAG_SYMBOL = 0x0040  # \p{S}
+CODEPOINT_FLAG_CONTROL = 0x0080  # \p{C}
 
 UNICODE_CATEGORY_TO_FLAG = {
-    "Cn": CODEPOINT_FLAG_UNDEFINED,    # Undefined
-    "Cc": CODEPOINT_FLAG_CONTROL,      # Control
-    "Cf": CODEPOINT_FLAG_CONTROL,      # Format
-    "Co": CODEPOINT_FLAG_CONTROL,      # Private Use
-    "Cs": CODEPOINT_FLAG_CONTROL,      # Surrrogate
-    "Ll": CODEPOINT_FLAG_LETTER,       # Lowercase Letter
-    "Lm": CODEPOINT_FLAG_LETTER,       # Modifier Letter
-    "Lo": CODEPOINT_FLAG_LETTER,       # Other Letter
-    "Lt": CODEPOINT_FLAG_LETTER,       # Titlecase Letter
-    "Lu": CODEPOINT_FLAG_LETTER,       # Uppercase Letter
-    "L&": CODEPOINT_FLAG_LETTER,       # Cased Letter
-    "Mc": CODEPOINT_FLAG_MARK,         # Spacing Mark
-    "Me": CODEPOINT_FLAG_MARK,         # Enclosing Mark
-    "Mn": CODEPOINT_FLAG_MARK,         # Nonspacing Mark
-    "Nd": CODEPOINT_FLAG_NUMBER,       # Decimal Number
-    "Nl": CODEPOINT_FLAG_NUMBER,       # Letter Number
-    "No": CODEPOINT_FLAG_NUMBER,       # Other Number
+    "Cn": CODEPOINT_FLAG_UNDEFINED,  # Undefined
+    "Cc": CODEPOINT_FLAG_CONTROL,  # Control
+    "Cf": CODEPOINT_FLAG_CONTROL,  # Format
+    "Co": CODEPOINT_FLAG_CONTROL,  # Private Use
+    "Cs": CODEPOINT_FLAG_CONTROL,  # Surrrogate
+    "Ll": CODEPOINT_FLAG_LETTER,  # Lowercase Letter
+    "Lm": CODEPOINT_FLAG_LETTER,  # Modifier Letter
+    "Lo": CODEPOINT_FLAG_LETTER,  # Other Letter
+    "Lt": CODEPOINT_FLAG_LETTER,  # Titlecase Letter
+    "Lu": CODEPOINT_FLAG_LETTER,  # Uppercase Letter
+    "L&": CODEPOINT_FLAG_LETTER,  # Cased Letter
+    "Mc": CODEPOINT_FLAG_MARK,  # Spacing Mark
+    "Me": CODEPOINT_FLAG_MARK,  # Enclosing Mark
+    "Mn": CODEPOINT_FLAG_MARK,  # Nonspacing Mark
+    "Nd": CODEPOINT_FLAG_NUMBER,  # Decimal Number
+    "Nl": CODEPOINT_FLAG_NUMBER,  # Letter Number
+    "No": CODEPOINT_FLAG_NUMBER,  # Other Number
     "Pc": CODEPOINT_FLAG_PUNCTUATION,  # Connector Punctuation
     "Pd": CODEPOINT_FLAG_PUNCTUATION,  # Dash Punctuation
     "Pe": CODEPOINT_FLAG_PUNCTUATION,  # Close Punctuation
@@ -84,23 +84,23 @@ UNICODE_CATEGORY_TO_FLAG = {
     "Pi": CODEPOINT_FLAG_PUNCTUATION,  # Initial Punctuation
     "Po": CODEPOINT_FLAG_PUNCTUATION,  # Other Punctuation
     "Ps": CODEPOINT_FLAG_PUNCTUATION,  # Open Punctuation
-    "Sc": CODEPOINT_FLAG_SYMBOL,       # Currency Symbol
-    "Sk": CODEPOINT_FLAG_SYMBOL,       # Modifier Symbol
-    "Sm": CODEPOINT_FLAG_SYMBOL,       # Math Symbol
-    "So": CODEPOINT_FLAG_SYMBOL,       # Other Symbol
-    "Zl": CODEPOINT_FLAG_SEPARATOR,    # Line Separator
-    "Zp": CODEPOINT_FLAG_SEPARATOR,    # Paragraph Separator
-    "Zs": CODEPOINT_FLAG_SEPARATOR,    # Space Separator
+    "Sc": CODEPOINT_FLAG_SYMBOL,  # Currency Symbol
+    "Sk": CODEPOINT_FLAG_SYMBOL,  # Modifier Symbol
+    "Sm": CODEPOINT_FLAG_SYMBOL,  # Math Symbol
+    "So": CODEPOINT_FLAG_SYMBOL,  # Other Symbol
+    "Zl": CODEPOINT_FLAG_SEPARATOR,  # Line Separator
+    "Zp": CODEPOINT_FLAG_SEPARATOR,  # Paragraph Separator
+    "Zs": CODEPOINT_FLAG_SEPARATOR,  # Space Separator
 }
 
 
-codepoint_flags = array.array('H', [CODEPOINT_FLAG_UNDEFINED]) * MAX_CODEPOINTS
+codepoint_flags = array.array("H", [CODEPOINT_FLAG_UNDEFINED]) * MAX_CODEPOINTS
 table_whitespace = []
 table_lowercase = []
 table_uppercase = []
 table_nfd = []
 
-for (cpt, cpt_lower, cpt_upper, categ, bidir) in unicode_data_iter():
+for cpt, cpt_lower, cpt_upper, categ, _bidir in unicode_data_iter():
     # convert codepoint to unicode character
     char = chr(cpt)
 
@@ -116,7 +116,7 @@ for (cpt, cpt_lower, cpt_upper, categ, bidir) in unicode_data_iter():
         table_uppercase.append((cpt, cpt_upper))
 
     # NFD normalization
-    norm = ord(unicodedata.normalize('NFD', char)[0])
+    norm = ord(unicodedata.normalize("NFD", char)[0])
     if cpt != norm:
         table_nfd.append((cpt, norm))
 
@@ -155,8 +155,9 @@ for codepoint, norm in table_nfd:
 # Generate 'unicode-data.cpp':
 #   python ./scripts//gen-unicode-data.py > unicode-data.cpp
 
-def out(line=""):
-    print(line, end='\n')  # noqa
+
+def out(line="") -> None:
+    print(line, end="\n")  # ruff: ignore[print]
 
 
 out("""\
@@ -172,25 +173,25 @@ out("""\
 
 out("const std::vector<std::pair<uint32_t, uint16_t>> unicode_ranges_flags = {  // start, flags // last=next_start-1")
 for codepoint, flags in ranges_flags:
-    out("{0x%06X, 0x%04X}," % (codepoint, flags))
+    out(f"{{0x{codepoint:06X}, 0x{flags:04X}}},")
 out("};\n")
 
 out("const std::unordered_set<uint32_t> unicode_set_whitespace = {")
 for codepoint in table_whitespace:
-    out("0x%06X," % codepoint)
+    out(f"0x{codepoint:06X},")
 out("};\n")
 
 out("const std::unordered_map<uint32_t, uint32_t> unicode_map_lowercase = {")
 for tuple_lw in table_lowercase:
-    out("{0x%06X, 0x%06X}," % tuple_lw)
+    out("{{0x{:06X}, 0x{:06X}}},".format(*tuple_lw))
 out("};\n")
 
 out("const std::unordered_map<uint32_t, uint32_t> unicode_map_uppercase = {")
 for tuple_up in table_uppercase:
-    out("{0x%06X, 0x%06X}," % tuple_up)
+    out("{{0x{:06X}, 0x{:06X}}},".format(*tuple_up))
 out("};\n")
 
 out("const std::vector<range_nfd> unicode_ranges_nfd = {  // start, last, nfd")
 for triple in ranges_nfd:
-    out("{0x%06X, 0x%06X, 0x%06X}," % triple)
+    out("{{0x{:06X}, 0x{:06X}, 0x{:06X}}},".format(*triple))
 out("};\n")

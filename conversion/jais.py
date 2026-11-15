@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
-
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf
+from conversion.base import ModelBase, TextModel, gguf
 
 
 @ModelBase.register("Jais2ForCausalLM")
@@ -16,7 +17,7 @@ from .base import ModelBase, TextModel, gguf
 class Jais2Model(TextModel):
     model_arch = gguf.MODEL_ARCH.JAIS2
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         hparams = self.hparams
         head_dim = hparams.get("head_dim", hparams["hidden_size"] // hparams["num_attention_heads"])
@@ -28,7 +29,7 @@ class Jais2Model(TextModel):
 class JaisModel(TextModel):
     model_arch = gguf.MODEL_ARCH.JAIS
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         # SwigLU activation
@@ -38,28 +39,28 @@ class JaisModel(TextModel):
 
         # Embeddings scale
         self.embeddings_scale = 1.0
-        if 'mup_embeddings_scale' in self.hparams:
-            self.embeddings_scale = self.hparams['mup_embeddings_scale']
-        elif 'embeddings_scale' in self.hparams:
-            self.embeddings_scale = self.hparams['embeddings_scale']
+        if "mup_embeddings_scale" in self.hparams:
+            self.embeddings_scale = self.hparams["mup_embeddings_scale"]
+        elif "embeddings_scale" in self.hparams:
+            self.embeddings_scale = self.hparams["embeddings_scale"]
         else:
-            assert False
+            raise AssertionError
 
         self.width_scale = 1.0
-        if 'mup_output_alpha' in self.hparams:
-            assert 'mup_width_scale' in self.hparams
-            self.width_scale = self.hparams['mup_output_alpha'] * self.hparams['mup_width_scale']
-        elif 'width_scale' in self.hparams:
-            self.width_scale = self.hparams['width_scale']
+        if "mup_output_alpha" in self.hparams:
+            assert "mup_width_scale" in self.hparams
+            self.width_scale = self.hparams["mup_output_alpha"] * self.hparams["mup_width_scale"]
+        elif "width_scale" in self.hparams:
+            self.width_scale = self.hparams["width_scale"]
         else:
-            assert False
+            raise AssertionError
 
         self.max_alibi_bias = 8.0
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         self._set_vocab_gpt2()
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         self.gguf_writer.add_block_count(self.block_count)
         self.gguf_writer.add_context_length(self.hparams["n_positions"])
         self.gguf_writer.add_embedding_length(self.hparams["n_embd"])
@@ -70,16 +71,16 @@ class JaisModel(TextModel):
 
     @classmethod
     def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
+        name, _gen = item
 
         # we don't need these
-        if name.endswith((".attn.bias")):
+        if name.endswith(".attn.bias"):
             return None
 
         return super().filter_tensors(item)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        if name.endswith(("relative_pe.slopes")):
+        if name.endswith("relative_pe.slopes"):
             # Calculate max ALiBi bias (this is the inverse of the ALiBi calculation)
             # Some other models has max_alibi_bias spelled out explicitly in the hyperparams,
             # but Jais's PyTorch model simply precalculates the slope values and places them
@@ -102,6 +103,6 @@ class JaisModel(TextModel):
         else:
             yield from super().modify_tensors(data_torch, new_name, bid)
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
         self.gguf_writer.add_max_alibi_bias(self.max_alibi_bias)

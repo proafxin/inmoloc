@@ -69,6 +69,13 @@ struct common_speculative_draft_params {
 
     // the generated draft from the last _draft() call
     llama_tokens * result;
+
+    // candidate distribution per drafted token; set it to make draft-simple and draft-mtp sample
+    std::vector<std::vector<llama_token_data>> * result_q = nullptr;
+
+    // the target's temp and seed, read only when the drafter samples probabilistically
+    float    temp = 1.0f;
+    uint32_t seed = LLAMA_DEFAULT_SEED;
 };
 
 common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);
@@ -99,7 +106,7 @@ struct common_speculative_deleter {
 typedef std::unique_ptr<common_speculative, common_speculative_deleter> common_speculative_ptr;
 
 struct common_speculative_init_result {
-    common_speculative_init_result(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt);
+    common_speculative_init_result(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt, llama_context * ctx_dft_ready, llama_model * model_dft_ready);
     ~common_speculative_init_result();
 
     llama_model   * model();
@@ -112,4 +119,13 @@ private:
 
 using common_speculative_init_result_ptr = std::unique_ptr<common_speculative_init_result>;
 
-common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt);
+// ctx_dft_ready: an MTP draft context that exists already, which this takes over; nullptr to create the draft
+// the outputs a draft asks of the target context and of its own context (hidden states of target layers, the state of
+// the draft before its norm, its attention), set before their compute buffers are reserved, so that the memory budget
+// holds them; the draft implementations set the same again
+void common_speculative_set_outputs(const common_params_speculative & params, llama_context * ctx_tgt, llama_context * ctx_dft);
+
+// ctx_dft_ready and model_dft_ready: a draft created with the target context (see common_init_result::release_context_dft()),
+// which the result takes
+common_speculative_init_result_ptr common_speculative_init_from_params(common_params & params, llama_model * model_tgt, llama_context * ctx_tgt,
+        llama_context * ctx_dft_ready = nullptr, llama_model * model_dft_ready = nullptr);

@@ -1,26 +1,28 @@
 from __future__ import annotations
 
-from typing import Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, TextModel, gguf, logger
-
-from .qwen import QwenModel
+from conversion.base import ModelBase, TextModel, gguf, logger
+from conversion.qwen import QwenModel
 
 
 @ModelBase.register("KimiLinearModel", "KimiLinearForCausalLM")
 @ModelBase.example("moonshotai/Kimi-Linear-48B-A3B-Instruct")
 class KimiLinearModel(TextModel):
     """Kimi-Linear model with hybrid MLA+KDA architecture"""
+
     model_arch = gguf.MODEL_ARCH.KIMI_LINEAR
 
     _experts: list[dict[str, Tensor]] | None = None
 
-    def set_vocab(self):
+    def set_vocab(self) -> None:
         try:
             self._set_vocab_gpt2()
             return
@@ -28,6 +30,7 @@ class KimiLinearModel(TextModel):
             pass
 
         from transformers import AutoTokenizer
+
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
         tokpre = self.get_vocab_base_pre(tokenizer)
 
@@ -42,11 +45,11 @@ class KimiLinearModel(TextModel):
                     continue
                 merged = QwenModel.bpe(mergeable_ranks, token, max_rank=rank)
                 if len(merged) == 2:
-                    merges.append(' '.join(map(QwenModel.token_bytes_to_string, merged)))
+                    merges.append(" ".join(map(QwenModel.token_bytes_to_string, merged)))
             # Build token list
             vocab_size = self.hparams["vocab_size"]
             special_tokens = tokenizer.special_tokens  # ty: ignore[unresolved-attribute]
-            reverse_vocab = {id_ : encoded_tok for encoded_tok, id_ in {**vocab, **special_tokens}.items()}
+            reverse_vocab = {id_: encoded_tok for encoded_tok, id_ in {**vocab, **special_tokens}.items()}
             tokens: list[str] = []
             toktypes: list[int] = []
 
@@ -73,9 +76,10 @@ class KimiLinearModel(TextModel):
             # override eos id in config.json with tiktoken eos id
             self.gguf_writer.add_eos_token_id(tokenizer.eos_id)  # ty: ignore[unresolved-attribute]
         else:
-            raise NotImplementedError(f"Deepseek pre-tokenizer {tokpre!r} is not supported yet!")
+            msg = f"Deepseek pre-tokenizer {tokpre!r} is not supported yet!"
+            raise NotImplementedError(msg)
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         # note: To enable MLA KV cache, attention needs to be converted into MQA (ie: GQA with 1 group)
         self.hparams["num_key_value_heads"] = 1
 
@@ -87,15 +91,15 @@ class KimiLinearModel(TextModel):
         linear_attn_config = self.hparams["linear_attn_config"]
         # n_head == 0 for KDA layers, n_head > 0 for MLA layers
         # full_attention_layers list will be used to distinguish layer type
-        _num_kv_heads = list()
-        _full_attn_layers = linear_attn_config["full_attn_layers"]
+        num_kv_heads = []
+        full_attn_layers = linear_attn_config["full_attn_layers"]
         for il in range(self.hparams["num_hidden_layers"]):
-            if il + 1 in _full_attn_layers:
-                _num_kv_heads.append(self.hparams["num_key_value_heads"])
+            if il + 1 in full_attn_layers:
+                num_kv_heads.append(self.hparams["num_key_value_heads"])
             else:
-                _num_kv_heads.append(0)
-        assert len(_num_kv_heads) == self.hparams["num_hidden_layers"]
-        self.gguf_writer.add_head_count_kv(_num_kv_heads)
+                num_kv_heads.append(0)
+        assert len(num_kv_heads) == self.hparams["num_hidden_layers"]
+        self.gguf_writer.add_head_count_kv(num_kv_heads)
 
         if (ssm_d_conv := linear_attn_config.get("short_conv_kernel_size")) is not None:
             self.gguf_writer.add_ssm_conv_kernel(ssm_d_conv)
@@ -141,12 +145,13 @@ class KimiLinearModel(TextModel):
         # Routed scaling factor (expert_weights_scale = 2.446 for Kimi)
         self.gguf_writer.add_expert_weights_scale(self.hparams["routed_scaling_factor"])
 
-    def prepare_tensors(self):
+    def prepare_tensors(self) -> None:
         super().prepare_tensors()
         if self._experts is not None:
-            experts = [k for d in self._experts for k in d.keys()]
+            experts = [k for d in self._experts for k in d]
             if len(experts) > 0:
-                raise ValueError(f"Unprocessed experts: {experts}")
+                msg = f"Unprocessed experts: {experts}"
+                raise ValueError(msg)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         logger.info(f"Processing {name}: shape before = {tuple(data_torch.shape)}")
@@ -163,12 +168,16 @@ class KimiLinearModel(TextModel):
                 d_inner, d_conv = data_torch.shape
                 # Reshape to (1, d_inner, 1, d_conv) - memory layout preserved (d_conv fastest)
                 data_torch = data_torch.reshape(1, d_inner, 1, d_conv)
-                logger.info(f"Reshaped conv1d weight {name}: [d_inner={d_inner}, d_conv={d_conv}] -> numpy {tuple(data_torch.shape)} -> ggml ne=[{d_conv}, 1, {d_inner}, 1]")
+                logger.info(
+                    f"Reshaped conv1d weight {name}: [d_inner={d_inner}, d_conv={d_conv}] -> numpy {tuple(data_torch.shape)} -> ggml ne=[{d_conv}, 1, {d_inner}, 1]"
+                )
             elif data_torch.ndim == 3:
                 # Already 3D [d_inner, 1, d_conv] from unsqueeze
                 d_inner, _, d_conv = data_torch.shape
                 data_torch = data_torch.reshape(1, d_inner, 1, d_conv)
-                logger.info(f"Reshaped conv1d weight {name}: [d_inner={d_inner}, 1, d_conv={d_conv}] -> numpy {tuple(data_torch.shape)} -> ggml ne=[{d_conv}, 1, {d_inner}, 1]")
+                logger.info(
+                    f"Reshaped conv1d weight {name}: [d_inner={d_inner}, 1, d_conv={d_conv}] -> numpy {tuple(data_torch.shape)} -> ggml ne=[{d_conv}, 1, {d_inner}, 1]"
+                )
 
         # Handle A_log: iHF stores as [1, 1, num_heads, 1]
         # llama.cpp expects ggml ne = [1, num_heads, 1, 1]
@@ -192,9 +201,11 @@ class KimiLinearModel(TextModel):
             if len(self._experts[bid]) >= n_experts * 3:
                 # merge the experts into a single 3d tensor
                 # w1: gate, w2: down, w3: up
-                for wid, tname in [("w1", gguf.MODEL_TENSOR.FFN_GATE_EXP),
-                                   ("w2", gguf.MODEL_TENSOR.FFN_DOWN_EXP),
-                                   ("w3", gguf.MODEL_TENSOR.FFN_UP_EXP)]:
+                for wid, tname in [
+                    ("w1", gguf.MODEL_TENSOR.FFN_GATE_EXP),
+                    ("w2", gguf.MODEL_TENSOR.FFN_DOWN_EXP),
+                    ("w3", gguf.MODEL_TENSOR.FFN_UP_EXP),
+                ]:
                     datas: list[Tensor] = []
                     for xid in range(n_experts):
                         ename = f"model.layers.{bid}.block_sparse_moe.experts.{xid}.{wid}.weight"

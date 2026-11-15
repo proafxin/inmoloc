@@ -5,9 +5,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from torch import Tensor
 
-from .base import ModelBase, gguf
-
-from .qwen import Qwen2MoeModel
+from conversion.base import ModelBase, gguf
+from conversion.qwen import Qwen2MoeModel
 
 
 @ModelBase.register("Dots1ForCausalLM")
@@ -15,11 +14,11 @@ from .qwen import Qwen2MoeModel
 class Dots1Model(Qwen2MoeModel):
     model_arch = gguf.MODEL_ARCH.DOTS1
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.hparams["num_experts"] = self.hparams["n_routed_experts"]
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
         self.gguf_writer.add_leading_dense_block_count(self.hparams["first_k_dense_replace"])
         self.gguf_writer.add_expert_shared_count(self.hparams["n_shared_experts"])

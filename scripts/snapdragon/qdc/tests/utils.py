@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import pathlib
 import subprocess
 import sys
 import tempfile
@@ -46,7 +47,7 @@ def write_qdc_log(filename: str, content: str) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
+    with tempfile.NamedTemporaryFile(encoding="utf-8", mode="w", suffix=".log", delete=False) as f:
         f.write(content)
         tmp_path = f.name
     try:
@@ -56,7 +57,7 @@ def write_qdc_log(filename: str, content: str) -> None:
             stderr=subprocess.STDOUT,
         )
     finally:
-        os.unlink(tmp_path)
+        pathlib.Path(tmp_path).unlink()
 
 
 def ensure_bundle(check_binary: str | None = None) -> None:
@@ -114,8 +115,11 @@ def run_snapdragon(
     cmd.append("--")
     cmd.extend(cmd_args)
     result = subprocess.run(
-        cmd, env=env,
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        cmd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
     log.info(result.stdout)
     return result
@@ -125,7 +129,10 @@ def adb_shell(cmd: str) -> None:
     """Run a command via adb shell (fire-and-forget, no error check)."""
     subprocess.run(
         ["adb", "shell", "sh", "-c", cmd],
-        capture_output=True, encoding="utf-8", errors="replace", check=False,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
     )
 
 

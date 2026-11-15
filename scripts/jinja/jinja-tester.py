@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
-import sys
-import json
 import argparse
+import json
+import pathlib
+import sys
+from datetime import datetime
+
 import jinja2.ext as jinja2_ext
-from PySide6.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QLabel,
-    QPlainTextEdit,
-    QTextEdit,
-    QPushButton,
-    QFileDialog,
-)
-from PySide6.QtGui import QColor, QColorConstants, QTextCursor, QTextFormat
-from PySide6.QtCore import Qt, QRect, QSize
 from jinja2 import TemplateSyntaxError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
-from datetime import datetime
+from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtGui import QColor, QColorConstants, QTextCursor, QTextFormat
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPlainTextEdit,
+    QPushButton,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 
 
 def format_template_content(template_content):
@@ -56,17 +58,13 @@ def format_template_content(template_content):
                 stripped_content = construct_content.strip()
                 instr = block_start + 1
                 while tokens[instr][1] == "whitespace":
-                    instr = instr + 1
+                    instr += 1
 
                 instruction_token = tokens[instr][2]
                 start_control_tokens = ["if", "for", "macro", "call", "block"]
                 end_control_tokens = ["end" + t for t in start_control_tokens]
-                is_control_start = any(
-                    instruction_token.startswith(kw) for kw in start_control_tokens
-                )
-                is_control_end = any(
-                    instruction_token.startswith(kw) for kw in end_control_tokens
-                )
+                is_control_start = any(instruction_token.startswith(kw) for kw in start_control_tokens)
+                is_control_end = any(instruction_token.startswith(kw) for kw in end_control_tokens)
 
                 # Adjust indentation for control structures
                 # For control end blocks, decrease indent BEFORE adding the content
@@ -79,9 +77,7 @@ def format_template_content(template_content):
                 # Add proper indent, but only if this is not the first token
                 added_newline = False
                 if result:  # Only add newline and indent if there's already content
-                    result += (
-                        "\n" + "  " * indent_level
-                    )  # Use 2 spaces per indent level
+                    result += "\n" + "  " * indent_level  # Use 2 spaces per indent level
                     added_newline = True
                 else:  # For the first token, don't add any indent
                     result += ""
@@ -90,20 +86,10 @@ def format_template_content(template_content):
                 result += stripped_content
 
                 # Add '-' after '%' if it wasn't there and we added a newline or indent
-                if (
-                    added_newline
-                    and stripped_content.startswith("{%")
-                    and not stripped_content.startswith("{%-")
-                ):
+                if added_newline and stripped_content.startswith("{%") and not stripped_content.startswith("{%-"):
                     # Add '-' at the beginning
-                    result = (
-                        result[: result.rfind("{%")]
-                        + "{%-"
-                        + result[result.rfind("{%") + 2 :]
-                    )
-                if stripped_content.endswith("%}") and not stripped_content.endswith(
-                    "-%}"
-                ):
+                    result = result[: result.rfind("{%")] + "{%-" + result[result.rfind("{%") + 2 :]
+                if stripped_content.endswith("%}") and not stripped_content.endswith("-%}"):
                     # Only add '-' if this is not the last token or if there's content after
                     if i + 1 < len(tokens) and tokens[i + 1][1] != "eof":
                         result = result[:-2] + "-%}"
@@ -147,7 +133,7 @@ def format_template_content(template_content):
     result = result.rstrip()
 
     # Copy the newline / space count from the original
-    if (trailing_length := len(template_content) - len(tc_rstrip)):
+    if trailing_length := len(template_content) - len(tc_rstrip):
         result += template_content[-trailing_length:]
 
     return result
@@ -157,19 +143,19 @@ def format_template_content(template_content):
 # Line Number Widget
 # ------------------------
 class LineNumberArea(QWidget):
-    def __init__(self, editor):
+    def __init__(self, editor) -> None:
         super().__init__(editor)
         self.code_editor = editor
 
     def sizeHint(self):
         return QSize(self.code_editor.line_number_area_width(), 0)
 
-    def paintEvent(self, event):
+    def paintEvent(self, event) -> None:
         self.code_editor.line_number_area_paint_event(event)
 
 
 class CodeEditor(QPlainTextEdit):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.line_number_area = LineNumberArea(self)
 
@@ -182,31 +168,26 @@ class CodeEditor(QPlainTextEdit):
 
     def line_number_area_width(self):
         digits = len(str(self.blockCount()))
-        space = 3 + self.fontMetrics().horizontalAdvance("9") * digits
-        return space
+        return 3 + self.fontMetrics().horizontalAdvance("9") * digits
 
-    def update_line_number_area_width(self, _):
+    def update_line_number_area_width(self, _) -> None:
         self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
 
-    def update_line_number_area(self, rect, dy):
+    def update_line_number_area(self, rect, dy) -> None:
         if dy:
             self.line_number_area.scroll(0, dy)
         else:
-            self.line_number_area.update(
-                0, rect.y(), self.line_number_area.width(), rect.height()
-            )
+            self.line_number_area.update(0, rect.y(), self.line_number_area.width(), rect.height())
 
         if rect.contains(self.viewport().rect()):
             self.update_line_number_area_width(0)
 
-    def resizeEvent(self, event):
+    def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         cr = self.contentsRect()
-        self.line_number_area.setGeometry(
-            QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height())
-        )
+        self.line_number_area.setGeometry(QRect(cr.left(), cr.top(), self.line_number_area_width(), cr.height()))
 
-    def line_number_area_paint_event(self, event):
+    def line_number_area_paint_event(self, event) -> None:
         from PySide6.QtGui import QPainter
 
         painter = QPainter(self.line_number_area)
@@ -214,9 +195,7 @@ class CodeEditor(QPlainTextEdit):
 
         block = self.firstVisibleBlock()
         block_number = block.blockNumber()
-        top = int(
-            self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
-        )
+        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
         bottom = top + int(self.blockBoundingRect(block).height())
 
         while block.isValid() and top <= event.rect().bottom():
@@ -236,7 +215,7 @@ class CodeEditor(QPlainTextEdit):
             bottom = top + int(self.blockBoundingRect(block).height())
             block_number += 1
 
-    def highlight_current_line(self):
+    def highlight_current_line(self) -> None:
         extra_selections = []
         if not self.isReadOnly():
             selection = QTextEdit.ExtraSelection()
@@ -248,7 +227,7 @@ class CodeEditor(QPlainTextEdit):
             extra_selections.append(selection)
         self.setExtraSelections(extra_selections)
 
-    def highlight_position(self, lineno: int, col: int, color: QColor):
+    def highlight_position(self, lineno: int, col: int, color: QColor) -> None:
         block = self.document().findBlockByLineNumber(lineno - 1)
         if block.isValid():
             cursor = QTextCursor(block)
@@ -265,9 +244,9 @@ class CodeEditor(QPlainTextEdit):
             extra.format.setBackground(color.lighter(160))  # pyright: ignore[reportAttributeAccessIssue] # ty: ignore[unresolved-attribute]
             extra.cursor = cursor  # pyright: ignore[reportAttributeAccessIssue] # ty: ignore[unresolved-attribute]
 
-            self.setExtraSelections(self.extraSelections() + [extra])
+            self.setExtraSelections([*self.extraSelections(), extra])
 
-    def highlight_line(self, lineno: int, color: QColor):
+    def highlight_line(self, lineno: int, color: QColor) -> None:
         block = self.document().findBlockByLineNumber(lineno - 1)
         if block.isValid():
             cursor = QTextCursor(block)
@@ -277,9 +256,9 @@ class CodeEditor(QPlainTextEdit):
             extra.format.setBackground(color.lighter(160))  # pyright: ignore[reportAttributeAccessIssue] # ty: ignore[unresolved-attribute]
             extra.cursor = cursor  # pyright: ignore[reportAttributeAccessIssue] # ty: ignore[unresolved-attribute]
 
-            self.setExtraSelections(self.extraSelections() + [extra])
+            self.setExtraSelections([*self.extraSelections(), extra])
 
-    def clear_highlighting(self):
+    def clear_highlighting(self) -> None:
         self.highlight_current_line()
 
 
@@ -287,7 +266,7 @@ class CodeEditor(QPlainTextEdit):
 # Main App
 # ------------------------
 class JinjaTester(QMainWindow):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Jinja Template Tester")
         self.resize(1200, 800)
@@ -311,7 +290,8 @@ class JinjaTester(QMainWindow):
         json_label = QLabel("Context (JSON)")
         json_layout.addWidget(json_label)
         self.json_edit = CodeEditor()
-        self.json_edit.setPlainText("""
+        self.json_edit.setPlainText(
+            """
 {
     "add_generation_prompt": true,
     "bos_token": "",
@@ -323,7 +303,8 @@ class JinjaTester(QMainWindow):
         }
     ]
 }
-        """.strip())
+        """.strip()
+        )
         json_layout.addWidget(self.json_edit)
         input_layout.addLayout(json_layout)
 
@@ -360,7 +341,7 @@ class JinjaTester(QMainWindow):
 
         self.setCentralWidget(central)
 
-    def render_template(self):
+    def render_template(self) -> None:
         self.template_edit.clear_highlighting()
         self.output_edit.clear()
 
@@ -382,18 +363,12 @@ class JinjaTester(QMainWindow):
             lstrip_blocks=True,
             extensions=[jinja2_ext.loopcontrols],
         )
-        env.filters["tojson"] = (
-            lambda x,
-            indent=None,
-            separators=None,
-            sort_keys=False,
-            ensure_ascii=False: json.dumps(
-                x,
-                indent=indent,
-                separators=separators,
-                sort_keys=sort_keys,
-                ensure_ascii=ensure_ascii,
-            )
+        env.filters["tojson"] = lambda x, indent=None, separators=None, sort_keys=False, ensure_ascii=False: json.dumps(
+            x,
+            indent=indent,
+            separators=separators,
+            sort_keys=sort_keys,
+            ensure_ascii=ensure_ascii,
         )
         env.globals["strftime_now"] = lambda format: datetime.now().strftime(format)  # ty: ignore[invalid-assignment, invalid-argument-type]
         env.globals["raise_exception"] = raise_exception  # ty: ignore[invalid-assignment]
@@ -426,7 +401,7 @@ class JinjaTester(QMainWindow):
             self.output_edit.setPlainText(error_msg)
             self.status_label.setText(f"❌ {error_msg}")
 
-    def load_template(self):
+    def load_template(self) -> None:
         """Load a Jinja template from a file using a file dialog."""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -437,14 +412,14 @@ class JinjaTester(QMainWindow):
 
         if file_path:
             try:
-                with open(file_path, "r", encoding="utf-8") as file:
+                with pathlib.Path(file_path).open(encoding="utf-8") as file:
                     content = file.read()
                     self.template_edit.setPlainText(content)
                     self.status_label.setText(f"✅ Loaded template from {file_path}")
             except Exception as e:
-                self.status_label.setText(f"❌ Error loading file: {str(e)}")
+                self.status_label.setText(f"❌ Error loading file: {e!s}")
 
-    def format_template(self):
+    def format_template(self) -> None:
         """Format the Jinja template using Jinja2's lexer for proper parsing."""
         try:
             template_content = self.template_edit.toPlainText()
@@ -456,16 +431,14 @@ class JinjaTester(QMainWindow):
             self.template_edit.setPlainText(formatted_content)
             self.status_label.setText("✅ Template formatted")
         except Exception as e:
-            self.status_label.setText(f"❌ Error formatting template: {str(e)}")
+            self.status_label.setText(f"❌ Error formatting template: {e!s}")
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         # CLI mode
         parser = argparse.ArgumentParser(description="Jinja Template Tester")
-        parser.add_argument(
-            "--template", required=True, help="Path to Jinja template file"
-        )
+        parser.add_argument("--template", required=True, help="Path to Jinja template file")
         parser.add_argument("--context", required=True, help="JSON string for context")
         parser.add_argument(
             "--action",
@@ -476,8 +449,7 @@ if __name__ == "__main__":
         args = parser.parse_args()
 
         # Load template
-        with open(args.template, "r", encoding="utf-8") as f:
-            template_content = f.read()
+        template_content = pathlib.Path(args.template).read_text(encoding="utf-8")
 
         # Load JSON
         context = json.loads(args.context)
@@ -490,11 +462,11 @@ if __name__ == "__main__":
 
         if args.action == "format":
             formatted = format_template_content(template_content)
-            print(formatted) # noqa: NP100
+            print(formatted)
         elif args.action == "render":
             template = env.from_string(template_content)
             output = template.render(context)
-            print(output) # noqa: NP100
+            print(output)
 
     else:
         # GUI mode

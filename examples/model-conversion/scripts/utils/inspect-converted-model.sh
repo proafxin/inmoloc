@@ -11,4 +11,4 @@ if [ -z "$CONVERTED_MODEL" ]; then
     exit 1
 fi
 
-../../gguf-py/gguf/scripts/gguf_dump.py $CONVERTED_MODEL
+uv run gguf-dump $CONVERTED_MODEL

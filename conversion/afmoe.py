@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from torch import Tensor
 
-from .base import ModelBase, gguf
-
-from .llama import LlamaModel
+from conversion.base import ModelBase, gguf
+from conversion.llama import LlamaModel
 
 
 @ModelBase.register("AfmoeForCausalLM")
@@ -17,7 +18,7 @@ from .llama import LlamaModel
 class AfmoeModel(LlamaModel):
     model_arch = gguf.MODEL_ARCH.AFMOE
 
-    def set_gguf_parameters(self):
+    def set_gguf_parameters(self) -> None:
         super().set_gguf_parameters()
 
         # MoE parameters

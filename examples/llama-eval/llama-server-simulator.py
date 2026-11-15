@@ -2,16 +2,16 @@
 
 import argparse
 import json
+import os
 import random
 import re
-import time
 import sys
-import os
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Dict, List, Optional
+import time
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Optional
 
 import datasets
 
@@ -19,6 +19,7 @@ import datasets
 cache_dir = Path.home() / ".cache" / "huggingface" / "datasets"
 cache_dir.mkdir(parents=True, exist_ok=True)
 os.environ["HF_DATASETS_CACHE"] = str(cache_dir)
+
 
 def dice(s1: str, s2: str) -> float:
     """Calculate Dice coefficient between two strings based on bigram overlap."""
@@ -40,80 +41,97 @@ def dice(s1: str, s2: str) -> float:
     freq2 = Counter(bigrams2)
 
     intersection = sum(min(freq1[bg], freq2[bg]) for bg in freq1)
-    dice_coeff = 2 * intersection / (len(bigrams1) + len(bigrams2))
-    return dice_coeff
+    return 2 * intersection / (len(bigrams1) + len(bigrams2))
 
-def debug_log(message: str):
+
+def debug_log(message: str) -> None:
     """Log debug messages to both stdout and a file"""
     print(message, file=sys.stderr)
-    with open("/tmp/simulator-debug.log", "a") as f:
+    with Path("/tmp/simulator-debug.log").open("a", encoding="utf-8") as f:
         f.write(message + "\n")
 
+
 simulator: Optional["Simulator"] = None
+
 
 @dataclass
 class EvalState:
     id: str
-    tasks: List[str]
-    task_states: Dict[str, Dict]
-    sampling_config: Dict
+    tasks: list[str]
+    task_states: dict[str, dict]
+    sampling_config: dict
 
-def normalize_number(s: str) -> Optional[int]:
+
+def normalize_number(s: str) -> int | None:
     match = re.match(r"\d+", s)  # match digits from the start
     if not match:
         return None
     return int(match.group(0))
 
+
 class AimeDataset:
-    def __init__(self, split: str = "train", dataset_type: str = "aime"):
+    def __init__(self, split: str = "train", dataset_type: str = "aime") -> None:
         self.split = split
         self.dataset_type = dataset_type
-        self.questions: List[Dict] = []
+        self.questions: list[dict] = []
         self._load_dataset()
 
-    def _get_question_text(self, question: Dict) -> str:
+    def _get_question_text(self, question: dict) -> str:
         """Get question text, handling different dataset field names."""
         return question.get("problem", question.get("question", ""))
 
     def _load_dataset(self):
         if self.dataset_type == "aime":
             print(f"Loading AIME dataset (split: {self.split})...")
-            cache_path = Path.home() / ".cache" / "huggingface" / "datasets" / "AI-MO___aimo-validation-aime" / "default" / "0.0.0"
+            cache_path = (
+                Path.home()
+                / ".cache"
+                / "huggingface"
+                / "datasets"
+                / "AI-MO___aimo-validation-aime"
+                / "default"
+                / "0.0.0"
+            )
             if cache_path.exists():
                 print(f"Using cached dataset from {cache_path}")
                 ds = datasets.load_dataset("AI-MO/aimo-validation-aime", split=self.split, cache_dir=str(cache_path))
             else:
                 ds = datasets.load_dataset("AI-MO/aimo-validation-aime", split=self.split)
         elif self.dataset_type == "aime2025":
-            print(f"Loading AIME2025 dataset...")
+            print("Loading AIME2025 dataset...")
             ds_list = []
             for config_name in ["AIME2025-I", "AIME2025-II"]:
-                cache_path = Path.home() / ".cache" / "huggingface" / "datasets" / "opencompass___AIME2025" / "default" / "0.0.0"
+                cache_path = (
+                    Path.home() / ".cache" / "huggingface" / "datasets" / "opencompass___AIME2025" / "default" / "0.0.0"
+                )
                 if cache_path.exists():
                     print(f"Using cached dataset from {cache_path}")
-                    ds = datasets.load_dataset("opencompass/AIME2025", config_name, split="test", cache_dir=str(cache_path))
+                    ds = datasets.load_dataset(
+                        "opencompass/AIME2025", config_name, split="test", cache_dir=str(cache_path)
+                    )
                 else:
                     ds = datasets.load_dataset("opencompass/AIME2025", config_name, split="test")
                 ds_list.extend(ds)
             ds = ds_list
         else:
-            raise ValueError(f"Unknown dataset type: {self.dataset_type}")
+            msg = f"Unknown dataset type: {self.dataset_type}"
+            raise ValueError(msg)
 
         self.questions = list(ds)
         print(f"{self.dataset_type} dataset loaded: {len(self.questions)} questions")
 
-    def find_question(self, request_text: str) -> Optional[Dict]:
+    def find_question(self, request_text: str) -> dict | None:
         # Strip common template prefixes to get the actual question text
         # Templates include things like "Solve the following math problem step by step..."
         # The actual question usually follows a blank line or after the template instruction
         cleaned = request_text
         # Split on double newline and take the part that looks like the problem
-        parts = cleaned.split('\n\n')
+        parts = cleaned.split("\n\n")
         if len(parts) > 1:
             # Find the part that's longest (likely the actual problem text)
             problem_parts = [p for p in parts if len(p.strip()) > 100]
             if problem_parts:
-                cleaned = max(problem_parts, key=lambda x: len(x))
+                cleaned = max(problem_parts, key=len)
 
         best_match = None
         best_distance = -1
@@ -135,7 +153,7 @@ class AimeDataset:
                 return question
 
             # Remove LaTeX formatting for more flexible matching
-            question_no_latex = re.sub(r'\$[^$]+\$', '', question_text)
+            question_no_latex = re.sub(r"\$[^$]+\$", "", question_text)
             if question_no_latex.lower() == request_lower:
                 debug_log(f"DEBUG: Found match (no LaTeX) at index {i}")
                 return question
@@ -157,12 +175,13 @@ class AimeDataset:
         debug_log(f"DEBUG: No matching question found for cleaned: {cleaned[:100]}...")
         return None
 
-    def get_answer(self, question: Dict) -> str:
+    def get_answer(self, question: dict) -> str:
         answer = question["answer"]
         if isinstance(answer, str):
             normalized = normalize_number(answer)
             return str(normalized) if normalized is not None else answer
         return str(answer)
+
 
 class Simulator:
     def __init__(
@@ -171,8 +190,8 @@ class Simulator:
         host: str = "localhost",
         success_rate: float = 0.8,
         dataset_split: str = "train",
-        dataset_type: str = "aime"
-    ):
+        dataset_type: str = "aime",
+    ) -> None:
         self.port = port
         self.host = host
         self.success_rate = success_rate
@@ -181,20 +200,13 @@ class Simulator:
             id=dataset_type,
             tasks=[dataset_type],
             task_states={},
-            sampling_config={"temperature": 0, "max_tokens": 2048}
+            sampling_config={"temperature": 0, "max_tokens": 2048},
         )
 
-    def _generate_response(
-        self,
-        question: Dict,
-        should_be_correct: bool
-    ) -> Dict:
+    def _generate_response(self, question: dict, should_be_correct: bool) -> dict:
         expected_answer = self.dataset.get_answer(question)
 
-        if should_be_correct:
-            response_text = expected_answer
-        else:
-            response_text = self._generate_wrong_answer(question)
+        response_text = expected_answer if should_be_correct else self._generate_wrong_answer(question)
 
         comp_tokens = random.randint(10000, 60000)
         tps_gen = random.uniform(90.0, 110.0)
@@ -206,37 +218,18 @@ class Simulator:
             "created": int(time.time()),
             "model": "llama",
             "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": response_text
-                    },
-                    "finish_reason": "stop"
-                }
+                {"index": 0, "message": {"role": "assistant", "content": response_text}, "finish_reason": "stop"}
             ],
-            "usage": {
-                "prompt_tokens": 100,
-                "completion_tokens": comp_tokens,
-                "total_tokens": 100 + comp_tokens
-            },
-            "timings": {
-                "predicted_ms": t_gen_ms,
-                "predicted_per_second": tps_gen
-            }
+            "usage": {"prompt_tokens": 100, "completion_tokens": comp_tokens, "total_tokens": 100 + comp_tokens},
+            "timings": {"predicted_ms": t_gen_ms, "predicted_per_second": tps_gen},
         }
 
-    def _generate_wrong_answer(self, question: Dict) -> str:
+    def _generate_wrong_answer(self, question: dict) -> str:
         expected_answer = self.dataset.get_answer(question)
 
-        if expected_answer.isdigit():
-            wrong_answer = str(int(expected_answer) + 1)
-        else:
-            wrong_answer = expected_answer + " (wrong)"
+        return str(int(expected_answer) + 1) if expected_answer.isdigit() else expected_answer + " (wrong)"
 
-        return wrong_answer
-
-    def _process_request(self, request_data: Dict) -> Dict:
+    def _process_request(self, request_data: dict) -> dict:
         messages = request_data.get("messages", [])
         if not messages:
             return {"error": "No messages in request"}
@@ -246,7 +239,7 @@ class Simulator:
 
         question = self.dataset.find_question(request_text)
         if not question:
-            debug_log(f"DEBUG: find_question returned None")
+            debug_log("DEBUG: find_question returned None")
             return {"error": "No matching question found"}
 
         should_be_correct = random.random() < self.success_rate
@@ -257,19 +250,20 @@ class Simulator:
         self.eval_state.task_states[task_id] = {
             "correct": should_be_correct,
             "expected": self.dataset.get_answer(question),
-            "predicted": response["choices"][0]["message"]["content"]
+            "predicted": response["choices"][0]["message"]["content"],
         }
 
         return response
 
+
 class RequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def do_GET(self) -> None:
         if self.path == "/v1/models":
             self._send_json({"data": [{"id": "llama", "object": "model"}]}, 200)
             return
         self._send_json({"error": "Not found"}, 404)
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         if self.path != "/v1/chat/completions":
             self._send_json({"error": "Not found"}, 404)
             return
@@ -304,46 +298,20 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, format, *args):
+    def log_message(self, format, *args) -> None:
         # Suppress default request logging
         pass
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="local-inference-server simulator for testing eval scripts"
-    )
+def main() -> None:
+    parser = argparse.ArgumentParser(description="local-inference-server simulator for testing eval scripts")
+    parser.add_argument("--port", type=int, default=8033, help="Server port (default: 8033)")
+    parser.add_argument("--host", type=str, default="localhost", help="Server host (default: localhost)")
+    parser.add_argument("--success-rate", type=float, default=0.8, help="Success rate 0-1 (default: 0.8)")
     parser.add_argument(
-        "--port",
-        type=int,
-        default=8033,
-        help="Server port (default: 8033)"
+        "--dataset", type=str, default="aime", choices=["aime", "aime2025"], help="Dataset type (default: aime)"
     )
-    parser.add_argument(
-        "--host",
-        type=str,
-        default="localhost",
-        help="Server host (default: localhost)"
-    )
-    parser.add_argument(
-        "--success-rate",
-        type=float,
-        default=0.8,
-        help="Success rate 0-1 (default: 0.8)"
-    )
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="aime",
-        choices=["aime", "aime2025"],
-        help="Dataset type (default: aime)"
-    )
-    parser.add_argument(
-        "--dataset-split",
-        type=str,
-        default="train",
-        help="AIME dataset split to use (default: train)"
-    )
+    parser.add_argument("--dataset-split", type=str, default="train", help="AIME dataset split to use (default: train)")
 
     args = parser.parse_args()
 
@@ -353,7 +321,7 @@ def main():
         host=args.host,
         success_rate=args.success_rate,
         dataset_split=args.dataset_split,
-        dataset_type=args.dataset
+        dataset_type=args.dataset,
     )
 
     server = HTTPServer((args.host, args.port), RequestHandler)
@@ -371,6 +339,7 @@ def main():
     except KeyboardInterrupt:
         print("\nShutting down...")
         server.shutdown()
+
 
 if __name__ == "__main__":
     main()

@@ -4,11 +4,11 @@
 #include "llama-cparams.h"
 
 #include <algorithm>
-#include <bitset>
 #include <cassert>
 #include <cstring>
 #include <limits>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 struct llama_kv_cell_ext {
@@ -36,8 +36,6 @@ struct llama_kv_cell_ext {
 // TODO: add unit tests
 class llama_kv_cells {
 public:
-    using seq_set_t = std::bitset<LLAMA_MAX_SEQ>;
-
     // the used cells are also counted per chunk of this many cells, see chunk_n_used()
     static constexpr uint32_t chunk_size = 64;
 
@@ -46,16 +44,18 @@ public:
             pos[i]   = -1;
             ext[i].reset();
             shift[i] =  0;
-            seq[i].reset();
+            seq_one[i] = seq_none;
         }
+
+        seq_many.clear();
 
         has_shift = false;
 
         used.clear();
         chunk_used.assign((pos.size() + chunk_size - 1)/chunk_size, 0);
 
-        for (uint32_t s = 0; s < LLAMA_MAX_SEQ; ++s) {
-            seq_pos[s].clear();
+        for (auto & sp : seq_pos) {
+            sp.clear();
         }
     }
 
@@ -75,7 +75,7 @@ public:
         pos.resize(n);
         ext.resize(n);
         shift.resize(n);
-        seq.resize(n);
+        seq_one.resize(n);
 
         reset();
     }
@@ -128,11 +128,11 @@ public:
 
     //    pos  [idst] = pos  [isrc];
     //    shift[idst] = shift[isrc];
-    //    seq  [idst] = seq  [isrc];
+    //    seq_cp(idst, *this, isrc);
 
     //    pos  [isrc] = -1;
     //    shift[isrc] =  0;
-    //    seq  [isrc].reset();
+    //    seq_clear(isrc);
 
     //    used.erase (isrc);
     //    used.insert(idst);
@@ -151,7 +151,7 @@ public:
 
             res.pos[j] = pos[idx];
             res.ext[j] = ext[idx];
-            res.seq[j] = seq[idx];
+            res.seq_cp(j, *this, idx);
 
             assert(shift[idx] == 0);
         }
@@ -170,7 +170,7 @@ public:
 
             res.pos[j] = pos[idx];
             res.ext[j] = ext[idx];
-            res.seq[j] = seq[idx];
+            res.seq_cp(j, *this, idx);
 
             assert(shift[idx] == 0);
         }
@@ -199,7 +199,7 @@ public:
 
             pos[idx] = other.pos[j];
             ext[idx] = other.ext[j];
-            seq[idx] = other.seq[j];
+            seq_cp(idx, other, j);
 
             if (pos[idx] != -1) {
                 seq_pos_add(i + j);
@@ -230,7 +230,7 @@ public:
 
             pos[idx] = other.pos[j];
             ext[idx] = other.ext[j];
-            seq[idx] = other.seq[j];
+            seq_cp(idx, other, j);
 
             if (pos[idx] != -1) {
                 seq_pos_add(idx);
@@ -246,7 +246,7 @@ public:
         assert(pos[i] != -1);
 
         seq_pos_rm(i);
-        seq[i].reset();
+        seq_clear(i);
 
         pos[i] = -1;
         ext[i].reset();
@@ -259,14 +259,14 @@ public:
     // return true if the cell becomes empty
     bool seq_rm(uint32_t i, llama_seq_id seq_id) {
         assert(i < pos.size());
-        assert(seq[i].test(seq_id));
+        assert(seq_has(i, seq_id));
         assert(pos[i] != -1);
         assert(seq_id >= 0);
 
-        seq[i].reset(seq_id);
+        seq_del(i, seq_id);
         seq_pos_dec(seq_id, i);
 
-        if (seq[i].none()) {
+        if (seq_one[i] == seq_none) {
             pos[i] = -1;
             ext[i].reset();
             shift[i] = 0;
@@ -283,19 +283,19 @@ public:
     bool seq_keep(uint32_t i, llama_seq_id seq_id) {
         assert(i < pos.size());
 
-        if (seq[i].test(seq_id)) {
+        if (seq_has(i, seq_id)) {
             seq_pos_rm(i);
-            seq[i].reset();
+            seq_clear(i);
 
-            seq[i].set(seq_id);
+            seq_set(i, seq_id);
             seq_pos_inc(seq_id, i);
 
             return false;
         }
 
-        if (seq[i].any()) {
+        if (seq_one[i] != seq_none) {
             seq_pos_rm(i);
-            seq[i].reset();
+            seq_clear(i);
 
             pos[i] = -1;
             ext[i].reset();
@@ -316,14 +316,14 @@ public:
         assert(i < pos.size());
         assert(pos[i] != -1);
 
-        return seq[i].count();
+        return seq_one[i] == seq_none ? 0 : (seq_one[i] == seq_shared ? (int) seq_many.at(i).size() : 1);
     }
 
-    // the full set of sequences this cell is visible to
-    const seq_set_t & seq_get_all(uint32_t i) const {
-        assert(i < pos.size());
+    // whether two cells are visible to the same sequences
+    bool seq_same(uint32_t i, uint32_t j) const {
+        assert(i < pos.size() && j < pos.size());
 
-        return seq[i];
+        return seq_one[i] == seq_one[j] && (seq_one[i] != seq_shared || seq_many.at(i) == seq_many.at(j));
     }
 
     // check if the cell contains seq_id
@@ -331,7 +331,13 @@ public:
         assert(i < pos.size());
         assert(seq_id >= 0);
 
-        return seq[i].test(seq_id);
+        if (seq_one[i] != seq_shared) {
+            return seq_one[i] == seq_id;
+        }
+
+        const auto & many = seq_many.at(i);
+
+        return std::binary_search(many.begin(), many.end(), seq_id);
     }
 
     // the token of the cell of sequence seq_id at the largest position <= p
@@ -340,9 +346,8 @@ public:
     // note: used by n-gram input embeddings to recover the tokens preceding a ubatch
     llama_token seq_pos_tok_le(llama_seq_id seq_id, llama_pos p) const {
         assert(seq_id >= 0);
-        assert(seq_id < LLAMA_MAX_SEQ);
 
-        const auto & sp = seq_pos[seq_id];
+        const auto & sp = seq_pos_cells(seq_id);
 
         auto it = sp.upper_bound({ p, std::numeric_limits<uint32_t>::max() });
         if (it == sp.begin()) {
@@ -356,77 +361,64 @@ public:
     void seq_add(uint32_t i, llama_seq_id seq_id) {
         assert(i < pos.size());
         assert(pos[i] != -1);
-        assert(!seq[i].test(seq_id));
+        assert(!seq_has(i, seq_id));
 
-        seq[i].set(seq_id);
+        seq_set(i, seq_id);
         seq_pos_inc(seq_id, i);
     }
 
     // return the sequence id of this cell
     // note: call only for cells with exactly one sequence
     llama_seq_id seq_get(uint32_t i) const {
-        assert(seq[i].count() == 1);
+        assert(seq_count(i) == 1);
 
-        for (int s = 0; s < LLAMA_MAX_SEQ; ++s) {
-            if (seq[i].test(s)) {
-                return s;
-            }
-        }
-
-        return -1;
+        return seq_one[i];
     }
 
     // the minimum position of sequence seq_id currently present in any of the cells
     // return -1 if the sequence is not present
     llama_pos seq_pos_min(llama_seq_id seq_id) const {
         assert(seq_id >= 0);
-        assert(seq_id < LLAMA_MAX_SEQ);
 
-        if (seq_pos[seq_id].empty()) {
-            return -1;
-        }
+        const auto & sp = seq_pos_cells(seq_id);
 
-        return seq_pos[seq_id].begin()->first;
+        return sp.empty() ? -1 : sp.begin()->first;
     }
 
     // the maximum position of sequence seq_id currently present in any of the cells
     // return -1 if the sequence is not present
     llama_pos seq_pos_max(llama_seq_id seq_id) const {
         assert(seq_id >= 0);
-        assert(seq_id < LLAMA_MAX_SEQ);
 
-        if (seq_pos[seq_id].empty()) {
-            return -1;
-        }
+        const auto & sp = seq_pos_cells(seq_id);
 
-        return seq_pos[seq_id].rbegin()->first;
+        return sp.empty() ? -1 : sp.rbegin()->first;
     }
 
     // number of cells that carry sequence seq_id
     uint32_t seq_n_cells(llama_seq_id seq_id) const {
         assert(seq_id >= 0);
-        assert(seq_id < LLAMA_MAX_SEQ);
 
-        return (uint32_t) seq_pos[seq_id].size();
+        return (uint32_t) seq_pos_cells(seq_id).size();
     }
 
     // the (pos, cell) pairs of the cells that carry sequence seq_id, ordered by position
     const std::set<std::pair<llama_pos, uint32_t>> & seq_pos_cells(llama_seq_id seq_id) const {
         assert(seq_id >= 0);
-        assert(seq_id < LLAMA_MAX_SEQ);
 
-        return seq_pos[seq_id];
+        static const std::set<std::pair<llama_pos, uint32_t>> none;
+
+        return (size_t) seq_id < seq_pos.size() ? seq_pos[seq_id] : none;
     }
 
     // the range of cell indices [lo, hi) that carry sequence seq_id, {0, 0} if the sequence is not present
     std::pair<uint32_t, uint32_t> seq_cell_range(llama_seq_id seq_id) const {
         assert(seq_id >= 0);
-        assert(seq_id < LLAMA_MAX_SEQ);
 
         uint32_t lo = UINT32_MAX;
         uint32_t hi = 0;
 
-        for (const auto & [p, i] : seq_pos[seq_id]) {
+        for (const auto & [p, i] : seq_pos_cells(seq_id)) {
             lo = std::min(lo, i);
             hi = std::max(hi, i + 1);
         }
@@ -437,12 +429,13 @@ public:
     // the indices of the cells that carry sequence seq_id, in ascending order
     void seq_cells(llama_seq_id seq_id, std::vector<uint32_t> & res) const {
         assert(seq_id >= 0);
-        assert(seq_id < LLAMA_MAX_SEQ);
+
+        const auto & sp = seq_pos_cells(seq_id);
 
         res.clear();
-        res.reserve(seq_pos[seq_id].size());
+        res.reserve(sp.size());
 
-        for (const auto & [p, i] : seq_pos[seq_id]) {
+        for (const auto & [p, i] : sp) {
             res.push_back(i);
         }
 
@@ -455,6 +448,11 @@ public:
         assert(pos[i] != -1);
 
         return pos[i];
+    }
+
+    // the (pos, cell) pairs of sequence seq_id, ordered by position
+    const std::set<std::pair<llama_pos, uint32_t>> & seq_pos_get(llama_seq_id seq_id) const {
+        return seq_pos_cells(seq_id);
     }
 
     const llama_kv_cell_ext & ext_get(uint32_t i) const {
@@ -485,7 +483,7 @@ public:
     void pos_set(uint32_t i, llama_pos p) {
         assert(i < pos.size());
         assert(pos[i] == -1);
-        assert(seq[i].none());
+        assert(seq_one[i] == seq_none);
 
         pos[i] = p;
 
@@ -512,7 +510,7 @@ public:
         has_shift = true;
 
         if (pos[i] < 0) {
-            seq[i].reset();
+            seq_clear(i);
             pos[i] = -1;
             shift[i] = 0;
 
@@ -587,8 +585,65 @@ private:
     //
     std::vector<llama_pos> shift;
 
-    // the bitset seq[i] tells us which sequences are currently occupying the i-th cell
-    std::vector<seq_set_t> seq;
+    // the sequences that occupy the i-th cell: seq_one[i] is the sequence when there is one, which is nearly always; a cell
+    // that sequences share is marked and has their sorted ids in seq_many, so no cost grows with the number of sequences
+    static constexpr llama_seq_id seq_none   = -1;
+    static constexpr llama_seq_id seq_shared = -2;
+
+    std::vector<llama_seq_id> seq_one;
+
+    std::unordered_map<uint32_t, std::vector<llama_seq_id>> seq_many;
+
+    void seq_set(uint32_t i, llama_seq_id s) {
+        if (seq_one[i] == seq_none) {
+            seq_one[i] = s;
+            return;
+        }
+
+        if (seq_one[i] != seq_shared) {
+            seq_many[i] = { seq_one[i] };
+            seq_one[i]  = seq_shared;
+        }
+
+        auto & many = seq_many[i];
+
+        many.insert(std::lower_bound(many.begin(), many.end(), s), s);
+    }
+
+    void seq_del(uint32_t i, llama_seq_id s) {
+        if (seq_one[i] != seq_shared) {
+            seq_one[i] = seq_none;
+            return;
+        }
+
+        auto & many = seq_many[i];
+
+        many.erase(std::lower_bound(many.begin(), many.end(), s));
+
+        if (many.size() == 1) {
+            seq_one[i] = many[0];
+            seq_many.erase(i);
+        }
+    }
+
+    void seq_clear(uint32_t i) {
+        if (seq_one[i] == seq_shared) {
+            seq_many.erase(i);
+        }
+
+        seq_one[i] = seq_none;
+    }
+
+    // the sequences of cell i take those of cell j of other
+    void seq_cp(uint32_t i, const llama_kv_cells & other, uint32_t j) {
+        seq_clear(i);
+
+        seq_one[i] = other.seq_one[j];
+
+        if (seq_one[i] == seq_shared) {
+            seq_many[i] = other.seq_many.at(j);
+        }
+    }
 
     // the set seq_pos[s] holds one (pos, cell) pair per cell that carries sequence s, ordered by position
     // this way seq_pos[s].begin() and seq_pos[s].rbegin() give us the min/max positions currently in the cache
@@ -598,7 +653,7 @@ private:
     //  - during performing a cache reuse via (rm + add)
     //  - some vision models have input embeddings with repeating positions
     //
-    std::set<std::pair<llama_pos, uint32_t>> seq_pos[LLAMA_MAX_SEQ];
+    std::vector<std::set<std::pair<llama_pos, uint32_t>>> seq_pos;
 
     // helper functions for updating `seq_pos`, once cell at a time:
 
@@ -609,24 +664,32 @@ private:
     }
 
     void seq_pos_inc(llama_seq_id s, uint32_t i) {
+        if ((size_t) s >= seq_pos.size()) {
+            seq_pos.resize((size_t) s + 1);
+        }
+
         seq_pos[s].insert({ pos[i], i });
     }
 
     // remove cell i
     void seq_pos_rm(uint32_t i) {
-        for (int s = 0; s < LLAMA_MAX_SEQ; ++s) {
-            if (seq[i].test(s)) {
+        if (seq_one[i] == seq_shared) {
+            for (const auto s : seq_many.at(i)) {
                 seq_pos_dec(s, i);
             }
+        } else if (seq_one[i] != seq_none) {
+            seq_pos_dec(seq_one[i], i);
         }
     }
 
     // add cell i
     void seq_pos_add(uint32_t i) {
-        for (int s = 0; s < LLAMA_MAX_SEQ; ++s) {
-            if (seq[i].test(s)) {
+        if (seq_one[i] == seq_shared) {
+            for (const auto s : seq_many.at(i)) {
                 seq_pos_inc(s, i);
             }
+        } else if (seq_one[i] != seq_none) {
+            seq_pos_inc(seq_one[i], i);
         }
     }
 };

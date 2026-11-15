@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
-from huggingface_hub import HfApi
 import argparse
-import os
+import pathlib
 
-def upload_gguf_file(local_file_path, repo_id, filename_in_repo=None):
+from huggingface_hub import HfApi
+
+
+def upload_gguf_file(local_file_path, repo_id, filename_in_repo=None) -> bool | None:
     """
     Upload a GGUF file to a Hugging Face model repository
 
@@ -14,15 +16,15 @@ def upload_gguf_file(local_file_path, repo_id, filename_in_repo=None):
         filename_in_repo: Optional custom name for the file in the repo
     """
 
-    if not os.path.exists(local_file_path):
+    if not pathlib.Path(local_file_path).exists():
         print(f"❌ File not found: {local_file_path}")
         return False
 
     if filename_in_repo is None:
-        filename_in_repo = os.path.basename(local_file_path)
+        filename_in_repo = pathlib.Path(local_file_path).name
 
     if filename_in_repo is None or filename_in_repo == "":
-        filename_in_repo = os.path.basename(local_file_path)
+        filename_in_repo = pathlib.Path(local_file_path).name
 
     print(f"📤 Uploading {local_file_path} to {repo_id}/{filename_in_repo}")
 
@@ -34,7 +36,7 @@ def upload_gguf_file(local_file_path, repo_id, filename_in_repo=None):
             path_in_repo=filename_in_repo,
             repo_id=repo_id,
             repo_type="model",
-            commit_message=f"Upload {filename_in_repo}"
+            commit_message=f"Upload {filename_in_repo}",
         )
 
         print("✅ Upload successful!")
@@ -45,14 +47,15 @@ def upload_gguf_file(local_file_path, repo_id, filename_in_repo=None):
         print(f"❌ Upload failed: {e}")
         return False
 
+
 # This script requires that the environment variable HF_TOKEN is set with your
 # Hugging Face API token.
 api = HfApi()
 
-parser = argparse.ArgumentParser(description='Upload a GGUF model to a Huggingface model repository')
-parser.add_argument('--gguf-model-path', '-m', help='The GGUF model file to upload', required=True)
-parser.add_argument('--repo-id', '-r', help='The repository to upload to', required=True)
-parser.add_argument('--name', '-o', help='The name in the model repository', required=False)
+parser = argparse.ArgumentParser(description="Upload a GGUF model to a Huggingface model repository")
+parser.add_argument("--gguf-model-path", "-m", help="The GGUF model file to upload", required=True)
+parser.add_argument("--repo-id", "-r", help="The repository to upload to", required=True)
+parser.add_argument("--name", "-o", help="The name in the model repository", required=False)
 args = parser.parse_args()
 
 upload_gguf_file(args.gguf_model_path, args.repo_id, args.name)

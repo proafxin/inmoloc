@@ -60,13 +60,13 @@ run_conversion_and_inference_lora() {
 
     # Convert safetensors to gguf
     echo "Running convert_hf_to_gguf.py for $model_name with hidden_size $hidden_size..."
-    python convert_hf_to_gguf.py $MODELS_REPO/$model_name/hidden_size=$hidden_size/base \
+    uv run scripts/convert_hf_to_gguf.py $MODELS_REPO/$model_name/hidden_size=$hidden_size/base \
         --outfile $MODELS_REPO/$model_name/hidden_size=$hidden_size/base/Base-F32.gguf \
         --outtype f32
 
     echo -e "\n\n---------------------------\n\n"
     echo "Running convert_lora_to_gguf.py for $model_name with hidden_size $hidden_size..."
-    python3 convert_lora_to_gguf.py $MODELS_REPO/$model_name/hidden_size=$hidden_size/lora \
+    uv run scripts/convert_lora_to_gguf.py $MODELS_REPO/$model_name/hidden_size=$hidden_size/lora \
         --base $MODELS_REPO/$model_name/hidden_size=$hidden_size/base \
         --outtype f32
 

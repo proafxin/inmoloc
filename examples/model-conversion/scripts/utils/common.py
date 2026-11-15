@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 
+import json
 import os
 import sys
+import textwrap
+from pathlib import Path
+
+import numpy as np
 import torch
 import transformers
-import json
-import textwrap
-import numpy as np
-from pathlib import Path
 
 
 def get_model_name_from_env_path(env_path_name):
@@ -16,18 +17,15 @@ def get_model_name_from_env_path(env_path_name):
         print(f"Error: {env_path_name} environment variable not set")
         sys.exit(1)
 
-    if not os.path.exists(model_path):
+    if not Path(model_path).exists():
         print(f"Error: Model file not found: {model_path}")
         sys.exit(1)
 
-    name = os.path.basename(os.path.normpath(model_path))
-    if name.endswith(".gguf"):
-        name = name[:-5]
-
-    return name
+    name = Path(os.path.normpath(model_path)).name
+    return name.removesuffix(".gguf")
 
 
-def summarize(tensor: torch.Tensor, name: str, max_seq: int = 3, max_vals: int = 3):
+def summarize(tensor: torch.Tensor, name: str, max_seq: int = 3, max_vals: int = 3) -> None:
     """
     Print a tensor in llama.cpp debug style.
 
@@ -68,7 +66,7 @@ def summarize(tensor: torch.Tensor, name: str, max_seq: int = 3, max_vals: int =
     # Combine indices
     if has_overlap:
         # If there's overlap, just use the combined unique indices
-        indices = sorted(list(set(first_indices + last_indices)))
+        indices = sorted(set(first_indices + last_indices))
         separator_index = None
     else:
         # If no overlap, we'll add a separator between first and last sequences
@@ -114,7 +112,7 @@ def debug_hook(name):
     return fn
 
 
-def setup_rope_debug(model_module_path: str, function_name: str = "apply_rotary_pos_emb"):
+def setup_rope_debug(model_module_path: str, function_name: str = "apply_rotary_pos_emb") -> None:
     """
     Apply monkey patch to dump RoPE activations for debugging.
 
@@ -133,7 +131,7 @@ def setup_rope_debug(model_module_path: str, function_name: str = "apply_rotary_
     orig_rope = getattr(module, function_name)
 
     # Set torch print options for better debugging
-    torch.set_printoptions(threshold=float('inf'))
+    torch.set_printoptions(threshold=float("inf"))
     torch.set_printoptions(precision=6, sci_mode=False)
 
     def debug_rope(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
@@ -155,7 +153,7 @@ def setup_rope_debug(model_module_path: str, function_name: str = "apply_rotary_
     print(f"RoPE debug patching applied to {model_module_path}.{function_name}")
 
 
-def save_output_data(data, tokens, prompt, model_name, type_suffix="", output_dir="data"):
+def save_output_data(data, tokens, prompt, model_name, type_suffix="", output_dir="data") -> None:
     """
     Save output data (logits/embeddings), tokens, and prompt to files.
 
@@ -185,7 +183,7 @@ def save_output_data(data, tokens, prompt, model_name, type_suffix="", output_di
     data.astype(np.float32).tofile(f"{base_path}.bin")
     print(f"Data saved to {base_path}.bin")
 
-    with open(f"{base_path}.txt", "w") as f:
+    with Path(f"{base_path}.txt").open("w", encoding="utf-8") as f:
         f.writelines(f"{i}: {value:.6f}\n" for i, value in enumerate(data))
     print(f"Data saved to {base_path}.txt")
 
@@ -198,14 +196,14 @@ def save_output_data(data, tokens, prompt, model_name, type_suffix="", output_di
     print(f"Tokens saved to {base_path}-tokens.bin")
 
     # Save prompt file
-    with open(f"{base_path}-prompt.txt", "w") as f:
+    with Path(f"{base_path}-prompt.txt").open("w", encoding="utf-8") as f:
         f.write(f"prompt: {prompt}\n")
         f.write(f"n_tokens: {len(tokens)}\n")
         f.write(f"token ids: {', '.join(str(int(tid)) for tid in tokens)}\n")
     print(f"Prompt saved to {base_path}-prompt.txt")
 
 
-def compare_tokens(original, converted, type_suffix="", output_dir="data"):
+def compare_tokens(original, converted, type_suffix="", output_dir="data") -> bool:
     data_dir = Path(output_dir)
 
     # Read tokens from both models
@@ -223,7 +221,7 @@ def compare_tokens(original, converted, type_suffix="", output_dir="data"):
     tokens1 = np.fromfile(tokens1_file, dtype=np.int32)
     tokens2 = np.fromfile(tokens2_file, dtype=np.int32)
 
-    print(f"\nComparing tokens between:")
+    print("\nComparing tokens between:")
     print(f"  Original : {original} ({len(tokens1)} tokens)")
     print(f"  Converted: {converted} ({len(tokens2)} tokens)")
 
@@ -253,13 +251,15 @@ def show_version_warning(current_version, model_version):
         return False
 
     try:
-        from packaging.version import parse, InvalidVersion
+        from packaging.version import InvalidVersion, parse
+
         try:
             return parse(current_version) < parse(model_version)
         except InvalidVersion:
             return current_version != model_version
     except ImportError:
         return current_version != model_version
+
 
 def get_model_transformers_version(model_path):
     if not model_path:
@@ -270,19 +270,20 @@ def get_model_transformers_version(model_path):
         return None
 
     try:
-        with open(config_path, "r", encoding="utf-8") as f:
+        with Path(config_path).open(encoding="utf-8") as f:
             config = json.load(f)
         return config.get("transformers_version")
-    except (IOError, json.JSONDecodeError) as e:
+    except (OSError, json.JSONDecodeError) as e:
         print(f"Warning: Could not read or parse {config_path}: {e}", file=sys.stderr)
         return None
 
-def exit_with_warning(message, model_path):
+
+def exit_with_warning(message, model_path) -> None:
     print(message)
 
     if model_path and transformers is not None:
         model_transformers_version = get_model_transformers_version(model_path)
-        transformers_version       = transformers.__version__
+        transformers_version = transformers.__version__
         if show_version_warning(transformers_version, model_transformers_version):
             warning_message = f"""
                 =====================================================================

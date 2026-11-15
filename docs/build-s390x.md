@@ -102,13 +102,13 @@ All models need to be converted to Big-Endian. You can achieve this in three cas
     Ensure that you have installed the required packages in advance
 
     ```bash
-    pip3 install -r requirements.txt
+    uv sync --extra convert
     ```
 
     Convert the `safetensors` model to `GGUF`
 
     ```bash
-    python3 convert_hf_to_gguf.py \
+    uv run scripts/convert_hf_to_gguf.py \
         --outfile model-name-be.f16.gguf \
         --outtype f16 \
         --bigendian \
@@ -118,7 +118,7 @@ All models need to be converted to Big-Endian. You can achieve this in three cas
     For example,
 
     ```bash
-    python3 convert_hf_to_gguf.py \
+    uv run scripts/convert_hf_to_gguf.py \
         --outfile granite-3.3-2b-instruct-be.f16.gguf \
         --outtype f16 \
         --bigendian \
@@ -132,13 +132,13 @@ All models need to be converted to Big-Endian. You can achieve this in three cas
     The model you are trying to convert must be in `gguf` file format (for example [IBM Granite 3.3 2B GGUF](https://huggingface.co/ibm-granite/granite-3.3-2b-instruct-GGUF)). Make sure you have downloaded the model file for this case.
 
     ```bash
-    python3 gguf-py/gguf/scripts/gguf_convert_endian.py model-name.f16.gguf BIG
+    uv run gguf-convert-endian model-name.f16.gguf BIG
     ```
 
     For example,
 
     ```bash
-    python3 gguf-py/gguf/scripts/gguf_convert_endian.py granite-3.3-2b-instruct-le.f16.gguf BIG
+    uv run gguf-convert-endian granite-3.3-2b-instruct-le.f16.gguf BIG
     mv granite-3.3-2b-instruct-le.f16.gguf granite-3.3-2b-instruct-be.f16.gguf
     ```
 
@@ -211,7 +211,7 @@ IBM VXE/VXE2 SIMD acceleration depends on the BLAS implementation. It is strongl
     For example,
 
     ```bash
-    CXXFLAGS="-include cstdint" pip3 install -r requirements.txt
+    CXXFLAGS="-include cstdint" uv sync --extra convert
     ```
 
 ## Getting Help on IBM Z & LinuxONE
